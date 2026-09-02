@@ -147,7 +147,12 @@ health_set() { # health_set <provider> <ok|failed> [note]
   exec {lock_fd}>"${HEALTH}.lock"
   flock "$lock_fd"
   [[ -s "$HEALTH" ]] || printf '{}' > "$HEALTH"
-  local tmp; tmp="$(mktemp "${HEALTH}.XXXXXX")"
+  local tmp
+  if ! tmp="$(mktemp "${HEALTH}.XXXXXX")"; then
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    return 1
+  fi
   if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
         '.[$p] = {status:$s, note:$n, at:$t}' "$HEALTH" > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp"
@@ -209,8 +214,6 @@ key_source() { # env | keyring | config | none
       secret-tool lookup service omarchy-tts key "$name" >/dev/null 2>&1; then
     printf keyring; return
   fi
-  jq -e --arg name "$name" '.apiKeys[$name] // empty' "$CONFIG" >/dev/null 2>&1 &&
-    { printf config; return; }
   printf none
 }
 
@@ -463,7 +466,7 @@ else
       OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
         die "no such OCR engine: $OCR_ENGINE"
       export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG"
-      PNG="$(mktemp -t speak-XXXXXX.png)"
+      PNG="$(mktemp -t speak-XXXXXX.png)" || die "could not create temporary capture"
       trap 'rm -f "$PNG"' EXIT
       capture "$SOURCE" > "$PNG"; rc=$?
       [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
@@ -523,7 +526,11 @@ fi
 exec {speech_lock_fd}>"$SPEECH_LOCK"
 flock "$speech_lock_fd"
 stop_speaking_unlocked   # never let two voices overlap
-set_status speaking
+if ! set_status speaking; then
+  flock -u "$speech_lock_fd"
+  exec {speech_lock_fd}>&-
+  die "could not write speech state"
+fi
 # $0 is deliberately single-quoted: it must expand in the inner shell, where
 # it becomes $PROV_BIN, not here.
 # shellcheck disable=SC2016
@@ -535,7 +542,13 @@ speech_identity="$(awk '{print $22}' "/proc/$speech_pgid/stat" 2>/dev/null || tr
 speech_owner=""
 if [[ -n "$speech_identity" ]]; then
   speech_owner="$speech_pgid $speech_identity"
-  printf '%s\n' "$speech_owner" > "$PID_FILE"
+  if ! printf '%s\n' "$speech_owner" > "$PID_FILE"; then
+    kill -KILL -- "-$speech_pgid" 2>/dev/null || true
+    flock -u "$speech_lock_fd"
+    exec {speech_lock_fd}>&-
+    wait "$child" 2>/dev/null || true
+    die "could not register speech process"
+  fi
 fi
 flock -u "$speech_lock_fd"
 exec {speech_lock_fd}>&-

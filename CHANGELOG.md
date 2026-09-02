@@ -27,6 +27,9 @@ Versioning.
   user-owned chord choices so plugin moves cannot leave stale command paths.
 - Match Omarchy's bar popout handoff contract and broaden keyboard shortcut
   capture to function, navigation, and punctuation keys.
+- Enforce structurally valid one-key shortcuts, stream cloud request text
+  without temporary plaintext files, and reject plaintext configuration keys
+  so key storage matches the documented keyring-only policy.
 
 ## 1.1.0 - 2026-09-02
 

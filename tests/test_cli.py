@@ -20,6 +20,8 @@ class CliConfigTests(unittest.TestCase):
         self.env = {**os.environ, "XDG_CONFIG_HOME": self.temp.name,
                     "XDG_RUNTIME_DIR": self.temp.name}
         self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        self.env.pop("OPENAI_API_KEY", None)
+        self.env.pop("ELEVENLABS_API_KEY", None)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -72,6 +74,17 @@ class CliConfigTests(unittest.TestCase):
         result = self.run_speak("--set", ".apiKeys.openai", "secret", check=False)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_plaintext_config_api_keys_are_not_accepted(self):
+        self.run_speak("--info")
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        data = json.loads(config.read_text())
+        data["apiKeys"] = {"openai": "plaintext-must-not-be-used"}
+        config.write_text(json.dumps(data))
+        info = json.loads(self.run_speak("--info").stdout)
+        openai = next(item for item in info["providers"] if item["name"] == "openai")
+        self.assertEqual(openai["keySource"], "none")
+        self.assertEqual(openai["status"], "nokey")
+
     def test_preview_uses_persisted_sanitizer_options(self):
         self.run_speak("--set", ".sanitizer.urls", "link")
         result = self.run_speak("--preview-text", "See https://example.com in 2s")
@@ -113,11 +126,13 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("-- >>> omarchy-tts bindings", installed)
 
     def test_binding_manager_rejects_non_chord_input(self):
-        result = subprocess.run(
-            [BINDINGS, "set", "selection", 'SUPER + E\n")\nos.execute("bad")'],
-            env=self.env, capture_output=True, text=True,
-        )
-        self.assertNotEqual(result.returncode, 0)
+        for chord in ('SUPER + E\n")\nos.execute("bad")',
+                      "SUPER + A + B", "SUPER + SUPER + E", "SUPER"):
+            result = subprocess.run(
+                [BINDINGS, "set", "selection", chord],
+                env=self.env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_binding_config_persists_choices_not_derived_commands(self):
         config = Path(self.temp.name, "omarchy-tts", "bindings.json")
@@ -293,14 +308,20 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.args = self.root / "curl-args"
+        self.body = self.root / "curl-body"
+        self.headers = self.root / "curl-headers"
         fake_curl = self.bin / "curl"
         fake_curl.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
+            "output=\n"
             "while [[ $# -gt 0 ]]; do\n"
-            "  if [[ $1 == --output ]]; then printf fake-audio > \"$2\"; exit 0; fi\n"
+            "  if [[ $1 == --output ]]; then output=$2; shift; fi\n"
             "  shift\n"
             "done\n"
+            "cat > \"$FAKE_CURL_BODY\"\n"
+            "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
+            "printf fake-audio > \"$output\"\n"
         )
         fake_curl.chmod(0o755)
         self.config = self.root / "config.json"
@@ -317,6 +338,9 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             env = {**os.environ,
                    "PATH": f"{self.bin}:{os.environ['PATH']}",
                    "FAKE_CURL_ARGS": str(self.args),
+                   "FAKE_CURL_BODY": str(self.body),
+                   "FAKE_CURL_HEADERS": str(self.headers),
+                   "XDG_RUNTIME_DIR": str(self.root),
                    "TTS_PLUGIN_DIR": str(ROOT),
                    "TTS_CONFIG": str(self.config),
                    "TTS_SILENT": "1",
@@ -327,6 +351,9 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             arguments = self.args.read_text()
             self.assertNotIn(secret, arguments)
             self.assertNotIn(spoken, arguments)
+            payload = json.loads(self.body.read_text())
+            self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
+            self.assertIn(secret, self.headers.read_text())
 
 
 class BindingAdoptionTests(unittest.TestCase):

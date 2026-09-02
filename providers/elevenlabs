@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: opt-in cloud, needs ELEVENLABS_API_KEY, text leaves your machine
 # kind: cloud
-# probe: [[ -n "${ELEVENLABS_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key elevenlabs >/dev/null 2>&1 || jq -e ".apiKeys.elevenlabs // empty" "$TTS_CONFIG" >/dev/null 2>&1
+# probe: [[ -n "${ELEVENLABS_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key elevenlabs >/dev/null 2>&1
 # vendor: ElevenLabs
 # voices: remote
 set -uo pipefail
@@ -16,13 +16,11 @@ VOICE="${TTS_VOICE:-}"
 MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
 
-audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.mp3")"
-body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.json")"
-headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.headers")"
-trap 'rm -f "$audio" "$body" "$headers"' EXIT
-jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' > "$body"
-printf 'xi-api-key: %s\nContent-Type: application/json\n' "$KEY" > "$headers"
-curl -sS --fail-with-body --connect-timeout 15 --max-time 180 \
-  "https://api.elevenlabs.io/v1/text-to-speech/$VOICE?output_format=mp3_44100_128" \
-  -H "@$headers" --data-binary "@$body" --output "$audio" || exit $?
+audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.mp3")" || exit 1
+trap 'rm -f "$audio"' EXIT
+jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' |
+  curl -sS --fail-with-body --connect-timeout 15 --max-time 180 \
+    "https://api.elevenlabs.io/v1/text-to-speech/$VOICE?output_format=mp3_44100_128" \
+    -H @/dev/fd/3 --data-binary @- --output "$audio" \
+    3<<< "xi-api-key: $KEY"$'\nContent-Type: application/json' || exit $?
 play_file "$audio"

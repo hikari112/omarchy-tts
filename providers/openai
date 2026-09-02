@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # desc: opt-in cloud, needs OPENAI_API_KEY, text leaves your machine
 # kind: cloud
-# probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1 || jq -e ".apiKeys.openai // empty" "$TTS_CONFIG" >/dev/null 2>&1
+# probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
 # vendor: OpenAI
 # voices: remote
 set -uo pipefail
@@ -16,14 +16,12 @@ VOICE="${TTS_VOICE:-}"
 MODEL="$(jq -r '.openai.model // "gpt-4o-mini-tts"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="gpt-4o-mini-tts"
 
-audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")"
-body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.json")"
-headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.headers")"
-trap 'rm -f "$audio" "$body" "$headers"' EXIT
+audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")" || exit 1
+trap 'rm -f "$audio"' EXIT
 jq -Rs --arg m "$MODEL" --arg v "$VOICE" --argjson s "${TTS_RATE:-1.0}" \
-  '{model:$m, voice:$v, input:., speed:$s, response_format:"mp3"}' > "$body"
-printf 'Authorization: Bearer %s\nContent-Type: application/json\n' "$KEY" > "$headers"
-curl -sS --fail-with-body --connect-timeout 15 --max-time 180 \
-  https://api.openai.com/v1/audio/speech \
-  -H "@$headers" --data-binary "@$body" --output "$audio" || exit $?
+  '{model:$m, voice:$v, input:., speed:$s, response_format:"mp3"}' |
+  curl -sS --fail-with-body --connect-timeout 15 --max-time 180 \
+    https://api.openai.com/v1/audio/speech \
+    -H @/dev/fd/3 --data-binary @- --output "$audio" \
+    3<<< "Authorization: Bearer $KEY"$'\nContent-Type: application/json' || exit $?
 play_file "$audio"

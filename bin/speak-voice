@@ -82,7 +82,7 @@ ensure_catalogue() {
   fi
   [[ $stale -eq 0 ]] && return 0
   command -v curl >/dev/null 2>&1 || return 1
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(mktemp "${CATALOGUE}.XXXXXX")" || return 1
   if curl -sL --fail --max-time 30 "$CATALOGUE_URL" -o "$tmp" && jq -e . "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$CATALOGUE"; return 0
   fi
