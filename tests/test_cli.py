@@ -82,8 +82,15 @@ class CliConfigTests(unittest.TestCase):
         config.write_text(json.dumps(data))
         info = json.loads(self.run_speak("--info").stdout)
         openai = next(item for item in info["providers"] if item["name"] == "openai")
-        self.assertEqual(openai["keySource"], "none")
-        self.assertEqual(openai["status"], "nokey")
+        # The property under test is that a plaintext key is never the source,
+        # not that no key exists. Asserting "none" only held on a machine with
+        # an empty keyring: it passed in CI and failed for anyone who had
+        # actually stored a key, which is precisely who this protects.
+        self.assertNotEqual(openai["keySource"], "config",
+                            "a plaintext key in config.json was accepted")
+        self.assertIn(openai["keySource"], ("none", "keyring", "env"))
+        if openai["keySource"] == "none":
+            self.assertEqual(openai["status"], "nokey")
 
     def test_preview_uses_persisted_sanitizer_options(self):
         self.run_speak("--set", ".sanitizer.urls", "link")
