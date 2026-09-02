@@ -19,8 +19,19 @@ guided, cancellable operations—no terminal setup or manual config editing.
 
 ## Requirements
 
-`wl-clipboard`, `jq`, `python3`, `flock` (util-linux), and PipeWire or ALSA. For the OCR modes:
-`tesseract`, `grim`, `slurp`, and optionally `hyprpicker`. All ship with Omarchy.
+The base plugin uses `bash`, `wl-clipboard`, `jq`, `python3`, `flock`
+(util-linux), and PipeWire or ALSA. Screen-reading modes additionally use
+`tesseract`, `grim`, `slurp`, and optionally `hyprpicker`. Cloud providers use
+`curl`; secure key storage uses `secret-tool` (libsecret). These system tools
+ship with Omarchy or are installed from its configured Arch repositories.
+
+The guided local-engine setup is always explicit. It may request administrator
+approval through `pkexec` to install `uv`, `espeak-ng`, or
+`speech-dispatcher`, then uses `uv` to create an isolated environment under
+`~/.local/share/omarchy-tts/`. Piper installs the PyPI `piper-tts` package;
+Kokoro installs the PyPI `kokoro` and `soundfile` packages plus its language
+model. Voice models are downloaded only after confirmation and verified before
+installation. No installer runs merely because the plugin is added or enabled.
 
 ## Keys
 
@@ -174,11 +185,17 @@ text, or provider response bodies.
 
 ## Remove
 
-Remove the plugin from Omarchy's plugin manager. Before removing it, use
-**Keys → Remove TTS bindings** so no shortcuts are left behind. API keys can
-be removed individually from the Provider tab. Voice models and engines live
-under `~/.local/share/omarchy-tts` so any remaining downloaded data is easy to
-identify and remove.
+Before removing the plugin, use **Keys → Remove TTS bindings** so no shortcuts
+are left behind, and remove cloud keys from the Provider tab if desired. Then:
+
+```bash
+omarchy plugin remove io.github.hikari112.tts
+```
+
+Removal deliberately leaves downloaded engines, voice models, settings, and
+cache data intact to avoid destroying user data. They remain clearly grouped
+under `~/.local/share/omarchy-tts`, `~/.config/omarchy-tts`, and
+`~/.cache/omarchy-tts` for optional manual cleanup.
 
 ## Config
 

@@ -5,6 +5,8 @@ Versioning.
 
 ## Unreleased
 
+## 1.2.1 - 2026-09-02
+
 - Make settings-state reads network-free and cloud voice refresh explicit.
 - Use ElevenLabs' current paginated v2 voice API, with bounded pagination and
   private, atomic account-voice caching.
