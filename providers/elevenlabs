@@ -4,6 +4,7 @@
 # probe: [[ -n "${ELEVENLABS_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key elevenlabs >/dev/null 2>&1
 # vendor: ElevenLabs
 # voices: remote
+# maxchars: 40000
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
@@ -11,9 +12,6 @@ source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
 KEY="$(get_key ELEVENLABS_API_KEY elevenlabs)" || exit 1
 
-VOICE="${TTS_VOICE:-}"
-[[ -z "$VOICE" ]] && VOICE="$(jq -r '.elevenlabs.voiceId // "21m00Tcm4TlvDq8ikWAM"' "$TTS_CONFIG" 2>/dev/null)"
-[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="21m00Tcm4TlvDq8ikWAM"
 MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
 
@@ -90,6 +88,17 @@ if [[ "${1:-}" == "--usage" ]]; then
   cat "$account"
   exit 0
 fi
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.elevenlabs.voiceId // empty' "$TTS_CONFIG" 2>/dev/null)"
+[[ -n "$VOICE" ]] || {
+  printf 'ElevenLabs: no voice selected; refresh cloud voices and choose one\n' >&2
+  exit 64
+}
+[[ "$VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] || {
+  printf 'ElevenLabs: invalid voice id in configuration\n' >&2
+  exit 64
+}
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.mp3")" || exit 1
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1

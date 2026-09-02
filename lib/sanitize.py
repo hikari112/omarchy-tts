@@ -17,10 +17,10 @@ ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 ANSI_REST = re.compile(r"\x1b[@-_]")
 
 # Nerd Font glyphs live in the Private Use Areas; Omarchy uses them heavily.
-PUA = re.compile("[-\U000f0000-\U000ffffd\U00100000-\U0010fffd]")
-BOX = re.compile("[─-▟■-◿⬀-⯿]")
+PUA = re.compile("[\ue000-\uf8ff\U000f0000-\U000ffffd\U00100000-\U0010fffd]")
+BOX = re.compile("[\u2500-\u259f\u25a0-\u25ff\u2b00-\u2bff]")
 EMOJI = re.compile(
-    "[\U0001f000-\U0001faff☀-➿←-⇿︀-️‍]"
+    "[\U0001f000-\U0001faff\u2600-\u27bf\u2190-\u21ff\ufe00-\ufe0f\u200d]"
 )
 
 # --- structural markdown --------------------------------------------------
@@ -59,7 +59,12 @@ COLUMN_BLEED = re.compile(r"^\s*[\w\)\]]{1,2}\s{4,}(?=\S)")
 
 URL = re.compile(r"\b(?:https?://|www\.)([^\s/)>\]]+)(\S*)", re.I)
 HEXBLOB = re.compile(r"\b(?:0x)?[0-9a-fA-F]{12,}\b")
-B64BLOB = re.compile(r"\b[A-Za-z0-9+/]{28,}={0,2}\b")
+B64BLOB = re.compile(
+    r"(?<![A-Za-z0-9+/])"
+    r"(?=[A-Za-z0-9+/]{28,}={0,2}(?![A-Za-z0-9+/=]))"
+    r"(?=[A-Za-z0-9+/]*[0-9+/])"
+    r"[A-Za-z0-9+/]{28,}={0,2}"
+)
 PATH = re.compile(r"(?<![\w.])(?:~|\.{1,2})?(?:/[\w.@+-]+){2,}/?")
 UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I

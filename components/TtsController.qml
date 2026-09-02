@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
 
 Item {
@@ -25,7 +24,11 @@ Item {
   property string pendingKey: ""
   property string pendingKeyProvider: ""
   property bool keySaving: false
-  property bool speaking: false
+  property var statusSource: null
+  property bool watchedSpeaking: false
+  readonly property bool speaking: statusSource
+                                   ? statusSource.speaking === true
+                                   : watchedSpeaking
   signal actionFinished
 
   function restart(process) { process.running = false; process.running = true }
@@ -91,7 +94,7 @@ Item {
     configQueue = queue
     runNextConfig()
   }
-  function speak(text) { speechProc.command = [speakBin, "--raw", "--", text]; restart(speechProc) }
+  function speak(text) { speechProc.command = [speakBin, "--", text]; restart(speechProc) }
   function stop() { speechProc.command = [speakBin, "--stop"]; restart(speechProc) }
   function selectProvider(name) { setConfig(".provider", name) }
   // Proving a backend takes seconds and makes no sound; `verifying` lets the
@@ -152,7 +155,9 @@ Item {
     onRunningChanged: if (!running && root.infoQueued) { root.infoQueued = false; Qt.callLater(root.refresh) }
   }
   Process { id: speechProc; command: []; stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() } }
-  Process { id: speechWatch; running: true; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.speaking = data.trim() === "speaking" } } }
+  // The bar already owns a status stream. Reuse it when hosted there, while
+  // retaining a fallback for standalone panel development.
+  Process { id: speechWatch; running: root.statusSource === null; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.watchedSpeaking = data.trim() === "speaking" } } }
   Process {
     id: verifyProc; command: []
     stderr: StdioCollector { waitForEnd: true }

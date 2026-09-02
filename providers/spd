@@ -12,4 +12,9 @@ RATE="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ v=(r-1)*100; if(v>100)v=100; if(v<-1
 TEXT="$(cat)"
 ARGS=(-w -r "$RATE")
 [[ -n "${TTS_VOICE:-}" ]] && ARGS+=(-y "$TTS_VOICE")
+if [[ "${TTS_SILENT:-0}" == "1" ]]; then
+  # Speech Dispatcher has no null audio sink. Querying its live output modules
+  # proves that the client can reach the daemon without queueing any speech.
+  exec spd-say --list-output-modules > /dev/null
+fi
 exec spd-say "${ARGS[@]}" -- "$TEXT"

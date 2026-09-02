@@ -2,7 +2,7 @@
 # desc: opt-in local, best quality, slow cold start
 # kind: local
 # probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
-# install: uv venv ~/.local/share/omarchy-tts/kokoro-venv && uv pip install --python ~/.local/share/omarchy-tts/kokoro-venv/bin/python kokoro soundfile
+# install: managed Python 3.12 venv · kokoro==0.9.4
 # voices: bundled
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
@@ -11,8 +11,7 @@ source "$TTS_PLUGIN_DIR/lib/play.sh"
 KPY="${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}"
 if [[ ! -x "$KPY" ]]; then
   echo "speak: kokoro not installed." >&2
-  echo "  uv venv ~/.local/share/omarchy-tts/kokoro-venv" >&2
-  echo "  uv pip install --python ~/.local/share/omarchy-tts/kokoro-venv/bin/python kokoro soundfile" >&2
+  echo "  Install it from the Provider tab." >&2
   notify-send -a "Speak" "Kokoro not installed" "See: speak --help" 2>/dev/null
   exit 127
 fi

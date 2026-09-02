@@ -25,9 +25,11 @@ the key never returns to QML or appears in a process argument.
 ## Configuration
 
 `config.json` schema version 2 is additive and backwards compatible. Startup
-fills missing defaults without replacing existing values. Invalid JSON is
-preserved with an `.invalid.<timestamp>` suffix before defaults are restored.
-Writes are limited to an allowlist and use an atomic rename with mode 0600.
+fills missing defaults without replacing existing values. ElevenLabs has no
+global default voice: the first successful account-voice refresh selects one
+only when the user has not already made a choice. Invalid JSON is preserved
+with an `.invalid.<timestamp>` suffix before defaults are restored. Writes are
+limited to an allowlist and use an atomic rename with mode 0600.
 
 Runtime state is stored in a private, user-owned directory. Speech and
 background jobs record both process ownership and identity; callers must only
@@ -40,6 +42,8 @@ pending writes to the same property coalesced.
 - Keys use Omarchy's current Lua configuration, not the obsolete `.conf` file
   in the original mockup.
 - Provider installs use reviewed Omarchy/uv commands and require confirmation.
+- Direct engine packages are release-pinned; Kokoro deliberately uses an
+  isolated Python 3.12 because its published metadata excludes newer Python.
 - API keys use the system keyring rather than a plaintext keys file.
 - Live speed changes apply to the next utterance because current providers do
   not expose safe in-place playback speed updates.

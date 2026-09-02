@@ -1,6 +1,5 @@
 import QtQuick
 import qs.Commons
-import qs.Ui
 
 Rectangle {
   id: root

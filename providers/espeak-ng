@@ -10,4 +10,9 @@ need espeak-ng "install with: omarchy pkg add espeak-ng"
 
 WPM="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ if (r<=0) r=1; printf "%d", 175*r }')"
 VOICE="${TTS_VOICE:-en-us}"
+if [[ "${TTS_SILENT:-0}" == "1" ]]; then
+  # --stdout exercises text parsing, voice lookup, and synthesis without ever
+  # opening an audio device. Verification consumes the stream in /dev/null.
+  exec espeak-ng -s "$WPM" -v "$VOICE" --stdout --stdin > /dev/null
+fi
 exec espeak-ng -s "$WPM" -v "$VOICE" --stdin

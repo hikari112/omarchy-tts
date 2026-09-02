@@ -65,6 +65,16 @@ class TestNoisyTokens(unittest.TestCase):
         out = sanitize("id 12345678 here")
         self.assertIn("1 2 3 4 5 6 7 8", out)
 
+    def test_long_plain_identifier_is_not_mistaken_for_base64(self):
+        identifier = "ThisIsAQuiteLongAlphabeticIdentifier"
+        self.assertIn(identifier, sanitize(f"Keep {identifier} intact"))
+
+    def test_base64_like_token_is_collapsed(self):
+        token = "VGhpcyBpcyBhIHJlYWwgYmFzZTY0IHRva2Vu"
+        out = sanitize(f"Payload {token} received")
+        self.assertNotIn(token, out)
+        self.assertIn("encoded blob", out)
+
 
 class TestMarkdown(unittest.TestCase):
     def test_code_fence_is_announced_not_read(self):

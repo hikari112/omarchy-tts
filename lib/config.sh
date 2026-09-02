@@ -36,7 +36,7 @@ tts_config_init_unlocked() {
   "maxChars": 0,
   "piper": { "voice": "en_US-amy-medium" },
   "openai": { "voice": "alloy", "model": "gpt-4o-mini-tts" },
-  "elevenlabs": { "voiceId": "21m00Tcm4TlvDq8ikWAM", "model": "eleven_turbo_v2_5" },
+  "elevenlabs": { "model": "eleven_turbo_v2_5" },
   "kokoro": { "voice": "af_heart" },
   "ocr": { "engine": "tesseract", "langs": "eng", "minConfidence": 60 },
   "sanitizer": {
@@ -59,16 +59,24 @@ JSON
   # Additive migration. User values always win.
   local tmp
   tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
-  jq '
+  if jq '
     .schemaVersion = 2
     | .provider //= "piper"
     | .rate //= 1.0
     | .maxChars //= 0
-    | .piper //= {voice:"en_US-amy-medium"}
-    | .openai //= {voice:"alloy",model:"gpt-4o-mini-tts"}
-    | .elevenlabs //= {voiceId:"21m00Tcm4TlvDq8ikWAM",model:"eleven_turbo_v2_5"}
-    | .kokoro //= {voice:"af_heart"}
-    | .ocr //= {engine:"tesseract",langs:"eng",minConfidence:60}
+    | .piper //= {}
+    | .piper.voice //= "en_US-amy-medium"
+    | .openai //= {}
+    | .openai.voice //= "alloy"
+    | .openai.model //= "gpt-4o-mini-tts"
+    | .elevenlabs //= {}
+    | .elevenlabs.model //= "eleven_turbo_v2_5"
+    | .kokoro //= {}
+    | .kokoro.voice //= "af_heart"
+    | .ocr //= {}
+    | .ocr.engine //= "tesseract"
+    | .ocr.langs //= "eng"
+    | .ocr.minConfidence //= 60
     | .sanitizer //= {}
     | .sanitizer.urls //= "domain"
     | .sanitizer.inlineCode //= true
@@ -82,7 +90,11 @@ JSON
     | .maxChars = (if (.maxChars|type)=="number" and .maxChars>=0 then (.maxChars|floor) else 0 end)
     | .ocr.minConfidence = (if (.ocr.minConfidence|type)=="number" and .ocr.minConfidence>=0 and .ocr.minConfidence<=100 then (.ocr.minConfidence|floor) else 60 end)
     | .ui.lastTab = (if (.ui.lastTab|type)=="number" and .ui.lastTab>=0 and .ui.lastTab<=4 then (.ui.lastTab|floor) else 0 end)
-  ' "$CONFIG" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CONFIG"
+  ' "$CONFIG" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CONFIG"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 tts_config_set() { # jq path, JSON-or-string value

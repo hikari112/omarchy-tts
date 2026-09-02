@@ -17,8 +17,11 @@ FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
 CACHE_MAX_AGE_DAYS=7
 
 mkdir -p "$VOICES_DIR" "$CACHE_DIR"
+[[ ! -L "$STATE_DIR" ]] || {
+  printf 'speak-voice: unsafe runtime directory symlink: %s\n' "$STATE_DIR" >&2; exit 1;
+}
 mkdir -p "$STATE_DIR"
-[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+[[ ! -L "$STATE_DIR" && "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
   printf 'speak-voice: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
 }
 chmod 700 "$STATE_DIR" || exit 1
@@ -76,19 +79,24 @@ is_installed() { [[ -f "$VOICES_DIR/$1.onnx" ]]; }
 
 # The catalogue is 240K and changes rarely; refetch only when stale or absent.
 ensure_catalogue() {
-  local stale=1
-  if [[ -s "$CATALOGUE" ]]; then
+  local force="${1:-no}" stale=1
+  if [[ "$force" != yes && -s "$CATALOGUE" ]]; then
     if [[ -z "$(find "$CATALOGUE" -mtime +$CACHE_MAX_AGE_DAYS 2>/dev/null)" ]]; then stale=0; fi
   fi
   [[ $stale -eq 0 ]] && return 0
-  command -v curl >/dev/null 2>&1 || return 1
+  if ! command -v curl >/dev/null 2>&1; then
+    [[ -s "$CATALOGUE" && "$force" != yes ]]
+    return
+  fi
   local tmp; tmp="$(mktemp "${CATALOGUE}.XXXXXX")" || return 1
-  if curl -sL --fail --max-time 30 "$CATALOGUE_URL" -o "$tmp" && jq -e . "$tmp" >/dev/null 2>&1; then
+  if curl -sL --fail --max-time 30 "$CATALOGUE_URL" -o "$tmp" &&
+      jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$CATALOGUE"; return 0
   fi
   rm -f "$tmp"
   # A stale catalogue still beats none at all.
-  [[ -s "$CATALOGUE" ]]
+  if [[ -s "$CATALOGUE" && "$force" != yes ]]; then return 0; fi
+  return 1
 }
 
 write_state() { # write_state <status> <voice> <got> <total> [message]
@@ -277,7 +285,9 @@ case "${1:-}" in
     tts_config_set .piper.voice "$2" || die "could not update configuration"
     echo "Default voice is now $2"
     ;;
-  refresh) rm -f "$CATALOGUE"; ensure_catalogue && echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
+  refresh)
+    ensure_catalogue yes || die "could not refresh the voice catalogue; existing cache was kept"
+    echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
   browse) xdg-open "https://rhasspy.github.io/piper-samples/" 2>/dev/null & ;;
   *) usage ;;
 esac
