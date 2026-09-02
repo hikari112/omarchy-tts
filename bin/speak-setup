@@ -141,6 +141,14 @@ def install_system_provider(provider: str) -> None:
     run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", *packages])
 
 
+# Kokoro's English G2P needs a spaCy model that is not on PyPI. Left out, it
+# tries to fetch the model at first use through spaCy's own downloader, which
+# shells out to pip - absent from a uv-created venv - so the backend installs
+# cleanly and then cannot speak a word.
+SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
+               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
+
+
 def install_kokoro() -> None:
     uv = ensure_uv()
     target = ENGINE / "kokoro"
@@ -148,8 +156,33 @@ def install_kokoro() -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if not (target / "bin/python").exists():
         run_checked([uv, "venv", str(target)])
-    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"),
-                 "kokoro", "soundfile"])
+    python = str(target / "bin/python")
+    run_checked([uv, "pip", "install", "--python", python, "kokoro", "soundfile"])
+    write_state("running", "engine", 60, "Installing the English language model")
+    run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
+
+
+def prove(target: str) -> None:
+    """Make the freshly installed backend speak before calling it done.
+
+    Installing successfully and being able to speak are different claims.
+    Kokoro installed cleanly and could not synthesise a sample, was reported
+    ready, and silently disabled every shortcut.
+    """
+    provider = {"recommended": "piper"}.get(target, target)
+    speak = Path(__file__).resolve().parent / "speak"
+    if not speak.exists():
+        return
+    write_state("running", "verify", 90, "Checking it can speak")
+    try:
+        subprocess.run([str(speak), "--verify", provider], timeout=180,
+                       capture_output=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"{provider} installed but could not speak; it is marked as not working"
+        ) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"{provider} installed but did not respond in time") from exc
 
 
 def worker(target: str) -> int:
@@ -166,6 +199,7 @@ def worker(target: str) -> int:
             install_system_provider(target)
         else:
             raise RuntimeError("Unknown installation target")
+        prove(target)
         write_state("done", "complete", 100, "Ready")
         return 0
     except Exception as exc:  # boundary: convert backend failures to UI state

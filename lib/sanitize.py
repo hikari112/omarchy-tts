@@ -65,7 +65,13 @@ UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I
 )
 LONGNUM = re.compile(r"\b\d{7,}\b")
-UNIT = re.compile(r"\b(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|min|mins|h|hr|hrs|kb|mb|gb|%)\b", re.I)
+# A leading "~" is read as "about"; without it the tilde is simply dropped and
+# an approximation is spoken as though it were exact.
+UNIT = re.compile(
+    r"(~\s*)?\b(\d+(?:\.\d+)?)\s*"
+    r"(ms|secs|sec|s|mins|min|m|hrs|hr|h|kb|mb|gb|tb|%)(?![\w.])",
+    re.I,
+)
 REPEAT_PUNCT = re.compile(r"([!?.,;:])\1{1,}")
 MULTISPACE = re.compile(r"[ \t ]+")
 BLANKLINES = re.compile(r"\n{2,}")
@@ -164,15 +170,21 @@ def _handle_table_row(line: str) -> str:
     return ", ".join(cells) + "." if cells else ""
 
 
+UNIT_NAMES = {
+    "ms": "milliseconds", "s": "seconds", "sec": "seconds", "secs": "seconds",
+    "m": "minutes", "min": "minutes", "mins": "minutes",
+    "h": "hours", "hr": "hours", "hrs": "hours",
+    "kb": "kilobytes", "mb": "megabytes", "gb": "gigabytes", "tb": "terabytes",
+    "%": "percent",
+}
+
+
 def _expand_unit(match: re.Match) -> str:
-    value, unit = match.group(1), match.group(2).lower()
-    names = {
-        "ms": "milliseconds", "s": "seconds", "sec": "seconds", "secs": "seconds",
-        "min": "minutes", "mins": "minutes", "h": "hours", "hr": "hours",
-        "hrs": "hours", "kb": "kilobytes", "mb": "megabytes", "gb": "gigabytes",
-        "%": "percent",
-    }
-    return f"{value} {names[unit]}"
+    approx, value, unit = match.group(1), match.group(2), match.group(3).lower()
+    name = UNIT_NAMES[unit]
+    if value == "1" and name.endswith("s") and unit != "%":
+        name = name[:-1]
+    return f"{'about ' if approx else ''}{value} {name}"
 
 
 def sanitize(text: str, announce_code=True, max_chars=0, ocr=False,

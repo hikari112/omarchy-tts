@@ -142,7 +142,13 @@ Panel {
           width: parent.width; height: Math.max(headerIcon.implicitHeight, headerTitle.implicitHeight)
           Text { id: headerIcon; text: "󰕾"; color: controller.speaking ? Color.accent : root.fg; font.family: root.ff; font.pixelSize: Style.fontPx(1.3); anchors.verticalCenter: parent.verticalCenter }
           Text { id: headerTitle; anchors.left: headerIcon.right; anchors.leftMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter; text: "Text to speech"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.subtitle }
-          Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.activeIsCloud ? "󰅟 text leaves this machine" : "on-demand accessibility"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; // The shortcut is the whole point of the tool; the panel is where
+                 // someone finds out what it is.
+                 text: { if (root.activeIsCloud) return "󰅟 text leaves this machine"
+                         var b = controller.bindings.bindings
+                         if (b && b.selection && b.selection.chord) return b.selection.chord
+                         return "on-demand accessibility" }
+                 color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
         Row {
           width: parent.width; spacing: Style.space(14); visible: !root.needsSetup

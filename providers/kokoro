@@ -22,14 +22,26 @@ VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="af_heart"
 
 TEXT="$(cat)"
+
+# Torch and the HF hub client are chatty on stderr on every run; none of it is
+# actionable here, and it buries real errors.
 KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" KOKORO_TEXT="$TEXT" \
-"$KPY" - <<'PYEOF' | play_raw 24000 1
-import os, sys, numpy as np
+PYTHONWARNINGS=ignore HF_HUB_DISABLE_TELEMETRY=1 \
+"$KPY" - <<'KOKORO_PY' 2>/dev/null | play_raw 24000 1
+import os, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np
 from kokoro import KPipeline
-pipe = KPipeline(lang_code=os.environ.get("KOKORO_VOICE", "af_heart")[0])
-for _, _, audio in pipe(os.environ["KOKORO_TEXT"],
-                        voice=os.environ.get("KOKORO_VOICE", "af_heart"),
+
+voice = os.environ.get("KOKORO_VOICE", "af_heart")
+pipe = KPipeline(lang_code=voice[0])
+
+for _, _, audio in pipe(os.environ["KOKORO_TEXT"], voice=voice,
                         speed=float(os.environ.get("KOKORO_SPEED", "1.0"))):
-    sys.stdout.buffer.write((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+    # kokoro yields a torch Tensor, which has no .astype; convert first.
+    if hasattr(audio, "detach"):
+        audio = audio.detach().cpu().numpy()
+    samples = np.clip(np.asarray(audio, dtype="float32"), -1.0, 1.0)
+    sys.stdout.buffer.write((samples * 32767.0).astype("<i2").tobytes())
     sys.stdout.buffer.flush()
-PYEOF
+KOKORO_PY

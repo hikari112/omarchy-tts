@@ -166,6 +166,28 @@ class TestOcrReflow(unittest.TestCase):
         self.assertIn("one. two", out)
 
 
+class TestUnitExpansion(unittest.TestCase):
+    def test_approximation_is_spoken_as_about(self):
+        self.assertIn("about 2 seconds", sanitize("takes ~2s"))
+
+    def test_bare_m_is_minutes(self):
+        self.assertIn("5 minutes", sanitize("wait 5m"))
+
+    def test_singular_value_uses_singular_unit(self):
+        out = sanitize("1s left")
+        self.assertIn("1 second", out)
+        self.assertNotIn("1 seconds", out)
+
+    def test_percent_and_sizes(self):
+        out = sanitize("50% of 3 GB in 250ms")
+        self.assertIn("50 percent", out)
+        self.assertIn("3 gigabytes", out)
+        self.assertIn("250 milliseconds", out)
+
+    def test_expansion_can_be_disabled(self):
+        self.assertIn("2s", sanitize("takes ~2s", expand_units=False))
+
+
 class TestEmptyResults(unittest.TestCase):
     def test_whitespace_only_yields_nothing(self):
         self.assertEqual(sanitize("   \n\t  \n "), "")
