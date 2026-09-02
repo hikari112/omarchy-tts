@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "hikari.tts",
+  "id": "io.github.hikari112.tts",
   "name": "Text to Speech",
   "version": "1.0.0",
   "author": "hikari",

@@ -1,8 +1,34 @@
-# hikari.tts — speak highlighted text
+# omarchy-tts — speak highlighted text
 
 On-demand text-to-speech for Omarchy. Highlight anything, press a key, hear it.
 Works in any app that supports the Wayland primary selection — terminal,
 browser, PDF viewer — because it never touches AT-SPI.
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/hikari112/omarchy-tts
+omarchy plugin enable io.github.hikari112.tts right
+```
+
+Then install the speech engine and a voice (no root needed):
+
+```bash
+uv tool install piper-tts
+speak-voice add en_US-amy-medium
+```
+
+Add the keybindings to `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + ALT + S", "Speak selection", "speak --toggle")
+o.bind("SUPER + ALT + C", "Speak clipboard", "speak --clipboard")
+o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
+```
+
+## Requirements
+
+`wl-clipboard`, `jq`, `python3`, and PipeWire or ALSA. All ship with Omarchy.
 
 ## Keys
 
@@ -88,5 +114,9 @@ you the word "hash", not thirty seconds of hex.
 Test it standalone:
 
 ```bash
-cat something.md | python3 ~/.config/omarchy/plugins/hikari.tts/lib/sanitize.py
+cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib/sanitize.py
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
