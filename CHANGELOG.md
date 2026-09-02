@@ -5,6 +5,13 @@ Versioning.
 
 ## Unreleased
 
+## 1.2.3 - 2026-09-02
+
+- Add a root `preview.png` for marketplace listing cards.
+- Fall back to an owner-only `$XDG_STATE_HOME` directory instead of shared
+  `/tmp` when no session runtime directory exists, so runtime PID state is
+  never placed where another user could pre-populate it.
+
 ## 1.2.2 - 2026-09-02
 
 - Make provider verification silent for every bundled backend and document the

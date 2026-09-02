@@ -22,9 +22,12 @@ import time
 PLUGIN = Path(__file__).resolve().parents[1]
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+# Without a session runtime dir, fall back to an owner-only XDG state
+# directory rather than sticky /tmp.
 RUNTIME = (Path(os.environ["XDG_RUNTIME_DIR"]) / "omarchy-tts"
            if os.environ.get("XDG_RUNTIME_DIR")
-           else Path(f"/tmp/omarchy-tts-{os.getuid()}"))
+           else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+           / "omarchy-tts" / "run")
 DATA = DATA_HOME / "omarchy-tts"
 ENGINE = DATA / "engines"
 VOICES = DATA / "voices" / "piper"

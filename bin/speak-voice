@@ -7,7 +7,10 @@ CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
 CATALOGUE="$CACHE_DIR/voices.json"
 STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
-STATE_DIR="${STATE_DIR:-/tmp/omarchy-tts-$UID}"
+# Without a session runtime dir, fall back to an owner-only XDG state
+# directory rather than sticky /tmp, so runtime PID state is never in a
+# location another user can pre-populate.
+STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tts/run}"
 DL_STATE="$STATE_DIR/download.json"
 DL_LOCK="$STATE_DIR/download.lock"
 OWNER_PID=""
