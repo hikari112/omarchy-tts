@@ -11,6 +11,7 @@ PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts"
 CONFIG="$USER_DIR/config.json"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
 PID_FILE="$STATE_DIR/pgid"
 STATUS_FILE="$STATE_DIR/status"
@@ -125,18 +126,70 @@ meta_of() { # meta_of <file> <field>
   sed -n "s/^# $2: //p" "$1" | head -1
 }
 
-provider_status() { # ready | missing | nokey
-  local bin="$1" probe kind
-  probe="$(meta_of "$bin" probe)"
-  kind="$(meta_of "$bin" kind)"
-  [[ -z "$probe" ]] && { printf 'ready'; return; }
-  if TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" bash -c "$probe" >/dev/null 2>&1; then
-    printf 'ready'
-  elif [[ "$kind" == "cloud" ]]; then
-    printf 'nokey'
+# A probe answers "is it installed", which is not the same as "does it work".
+# Kokoro passed its probe while unable to synthesise a single sample, was
+# selected as default, and silently killed every keybinding. So installation
+# and proof are tracked separately, and only proof earns the word "ready".
+HEALTH="$CACHE_DIR/health.json"
+
+health_of() { # health_of <provider> -> ok | failed | untested
+  [[ -s "$HEALTH" ]] || { printf 'untested'; return; }
+  local v; v="$(jq -r --arg p "$1" '.[$p].status // "untested"' "$HEALTH" 2>/dev/null)"
+  printf '%s' "${v:-untested}"
+}
+
+health_set() { # health_set <provider> <ok|failed> [note]
+  mkdir -p "$CACHE_DIR"
+  [[ -s "$HEALTH" ]] || printf '{}' > "$HEALTH"
+  local tmp; tmp="$(mktemp)"
+  if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
+        '.[$p] = {status:$s, note:$n, at:$t}' "$HEALTH" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$HEALTH"
   else
-    printf 'missing'
+    rm -f "$tmp"
   fi
+}
+
+provider_installed() { # 0 if the probe passes
+  local probe; probe="$(meta_of "$1" probe)"
+  [[ -z "$probe" ]] && return 0
+  TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" bash -c "$probe" >/dev/null 2>&1
+}
+
+provider_status() { # ready | untested | failing | missing | nokey
+  local bin="$1" kind name
+  kind="$(meta_of "$bin" kind)"
+  name="$(basename "$bin")"
+  if ! provider_installed "$bin"; then
+    [[ "$kind" == "cloud" ]] && { printf 'nokey'; return; }
+    printf 'missing'; return
+  fi
+  case "$(health_of "$name")" in
+    ok)     printf 'ready' ;;
+    failed) printf 'failing' ;;
+    *)      printf 'untested' ;;
+  esac
+}
+
+# Prove a provider by making it speak into the void. Exit status is the
+# signal: a backend that cannot synthesise exits non-zero or hangs.
+# 0 = proved working, 1 = installed but broken, 2 = not installed to test
+verify_provider() { # verify_provider <name>
+  local name="$1" bin
+  bin="$(provider_path "$name")" || return 2
+  # Absent is not the same as broken; do not record health for it.
+  provider_installed "$bin" || return 2
+  local rc=0
+  # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
+  timeout 90 env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
+      TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+      bash -c 'exec "$0"' "$bin" <<< "Test." >/dev/null 2>&1 || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    health_set "$name" ok ""
+    return 0
+  fi
+  health_set "$name" failed "exit $rc"
+  return 1
 }
 
 key_source() { # env | keyring | config | none
@@ -164,11 +217,12 @@ emit_info() {
              --arg kind "$(meta_of "$b" kind)" \
              --arg desc "$(meta_of "$b" desc)" \
              --arg status "$(provider_status "$b")" \
+             --arg health "$(health_of "$n")" \
              --arg install "$(meta_of "$b" install)" \
              --arg vendor "$(meta_of "$b" vendor)" \
              --arg voices "$(meta_of "$b" voices)" \
              --arg keySource "$(key_source "$n")" \
-             '{name:$name, kind:(if $kind=="" then "local" else $kind end),
+             '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor,
                keySource:$keySource,
                voices:(if $voices=="" then "fixed" else $voices end)}'
@@ -272,6 +326,7 @@ Voice
   -r, --rate N         speed multiplier (provider-dependent)
   -m, --max-chars N    truncate near N characters (0 = unlimited)
   -l, --list           list available providers
+      --verify [NAME]  prove a provider can actually speak (silent)
       --cycle-provider switch to the next provider
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
@@ -338,6 +393,19 @@ while [[ $# -gt 0 ]]; do
     --preview-text)
       [[ -n "${2:-}" ]] || die "--preview-text needs text"
       printf '%s' "$2" | python3 "$SANITIZER" --config "$CONFIG"; exit $? ;;
+    --verify)
+      vtargets="${2:-}"
+      [[ -n "$vtargets" ]] && shift || vtargets="$(provider_names)"
+      vrc=0
+      for vn in $vtargets; do
+        printf '%-14s ' "$vn"
+        verify_provider "$vn"; case $? in
+          0) echo "ok" ;;
+          2) echo "not installed" ;;
+          *) echo "FAILING"; vrc=1 ;;
+        esac
+      done
+      exit $vrc ;;
     -l|--list) list_providers; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; WORDS+=("$@"); break ;;
@@ -430,6 +498,15 @@ printf '%s\n' "${pgid:-$child}" > "$PID_FILE"
 
 wait "$child"
 rc=$?
+
+# Real use is the best evidence there is. A cancellation is not a failure.
+if [[ $rc -eq 0 ]]; then
+  health_set "$PROVIDER" ok ""
+elif [[ $rc -ne 143 && $rc -ne 137 ]]; then
+  health_set "$PROVIDER" failed "exit $rc"
+  notify-send -a "Speak" "$PROVIDER could not speak" \
+    "Marked as failing. Pick another provider in the panel." 2>/dev/null
+fi
 rm -f "$PID_FILE"
 set_status idle
 

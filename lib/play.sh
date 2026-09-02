@@ -4,6 +4,8 @@
 # play_raw <rate> <channels> — raw s16le PCM on stdin to the default sink.
 play_raw() {
   local rate="${1:-22050}" ch="${2:-1}"
+  # Verification drives a provider end to end; it must not be audible.
+  if [[ "${TTS_SILENT:-0}" == "1" ]]; then exec cat > /dev/null; fi
   if command -v pw-cat >/dev/null 2>&1; then
     exec pw-cat --playback --format=s16 --rate="$rate" --channels="$ch" --raw -
   elif command -v aplay >/dev/null 2>&1; then
@@ -17,6 +19,7 @@ play_raw() {
 # play_file <path> — a container file (wav/mp3/etc).
 play_file() {
   local f="$1"
+  if [[ "${TTS_SILENT:-0}" == "1" ]]; then exec cat > /dev/null; fi
   if command -v mpv >/dev/null 2>&1; then
     exec mpv --really-quiet --no-video --audio-display=no "$f"
   elif command -v ffplay >/dev/null 2>&1; then

@@ -19,6 +19,7 @@ Item {
   property var keyResult: ({ ok: false, message: "" })
   property string preview: ""
   property string error: ""
+  property string verifying: ""
   property string pendingKey: ""
   property bool keySaving: false
   property bool speaking: false
@@ -34,6 +35,9 @@ Item {
   function speak(text) { speechProc.command = [speakBin, "--raw", "--", text]; restart(speechProc) }
   function stop() { speechProc.command = [speakBin, "--stop"]; restart(speechProc) }
   function selectProvider(name) { setConfig(".provider", name) }
+  // Proving a backend takes seconds and makes no sound; `verifying` lets the
+  // panel say so rather than appearing to have ignored the click.
+  function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { action([voiceBin, "add", key, "--async"]); download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true }
   function cancelDownload() { action([voiceBin, "cancel"]); downloadPoll.running = false }
@@ -61,6 +65,11 @@ Item {
   }
   Process { id: speechProc; command: []; stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() } }
   Process { id: speechWatch; running: true; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.speaking = data.trim() === "speaking" } } }
+  Process {
+    id: verifyProc; command: []
+    stderr: StdioCollector { waitForEnd: true }
+    onRunningChanged: if (!running) { root.verifying = ""; root.refresh() }
+  }
   Process {
     id: actionProc; command: []
     stdout: StdioCollector { waitForEnd: true }

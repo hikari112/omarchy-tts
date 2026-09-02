@@ -93,5 +93,78 @@ class CliConfigTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)["code"], code)
 
 
+class ProviderHealthTests(unittest.TestCase):
+    """A provider that is installed but cannot speak must never read "ready".
+
+    This is the regression that silently disabled every keybinding: kokoro
+    passed its probe, was reported ready, was selected as default, and could
+    not synthesise a single sample.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        self.providers = self.home / "config" / "omarchy-tts" / "providers"
+        self.providers.mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_provider(self, name, body, probe="true"):
+        path = self.providers / name
+        path.write_text("#!/usr/bin/env bash\n"
+                        f"# desc: test provider {name}\n"
+                        "# kind: local\n"
+                        f"# probe: {probe}\n"
+                        f"{body}\n")
+        path.chmod(0o755)
+        return path
+
+    def speak(self, *args):
+        return subprocess.run([SPEAK, *args], text=True, capture_output=True,
+                              env=self.env, check=False)
+
+    def status_of(self, name):
+        info = json.loads(self.speak("--info").stdout)
+        for entry in info["providers"]:
+            if entry["name"] == name:
+                return entry["status"]
+        return None
+
+    def test_installed_but_broken_provider_is_not_ready(self):
+        self.write_provider("brokentest", "exit 3")
+        self.assertEqual(self.status_of("brokentest"), "untested",
+                         "an unproven provider must not claim to be ready")
+        result = self.speak("--verify", "brokentest")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.status_of("brokentest"), "failing")
+
+    def test_working_provider_becomes_ready_only_after_proof(self):
+        self.write_provider("worktest", "cat > /dev/null")
+        self.assertEqual(self.status_of("worktest"), "untested")
+        result = self.speak("--verify", "worktest")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.status_of("worktest"), "ready")
+
+    def test_absent_provider_reports_missing_not_failing(self):
+        # Absence and breakage are different problems with different fixes.
+        self.write_provider("absenttest", "cat > /dev/null", probe="false")
+        self.assertEqual(self.status_of("absenttest"), "missing")
+        result = self.speak("--verify", "absenttest")
+        self.assertIn("not installed", result.stdout)
+
+    def test_failure_during_real_speech_is_recorded(self):
+        self.write_provider("livetest", "exit 4")
+        self.speak("--set", ".provider", "livetest")
+        self.speak("Hello there.")
+        self.assertEqual(self.status_of("livetest"), "failing",
+                         "a real failure should mark the provider without a separate test")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

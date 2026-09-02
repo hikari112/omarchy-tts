@@ -179,6 +179,10 @@ Panel {
               required property var modelData
               readonly property bool selected: modelData.name === controller.info.provider
               readonly property bool ready: modelData.status === "ready"
+              readonly property bool failing: modelData.status === "failing"
+              readonly property bool untested: modelData.status === "untested"
+              // Installed means "present", which is not the same as usable.
+              readonly property bool usable: ready || untested
               readonly property bool cloud: modelData.kind === "cloud"
               width: parent.width; height: providerCopy.implicitHeight + Style.space(12); radius: Style.space(6)
               color: selected ? root.tint(0.10) : "transparent"; border.width: selected ? 1 : 0; border.color: root.tint(0.45)
@@ -187,19 +191,41 @@ Panel {
                 Item {
                   width: parent.width; height: providerName.implicitHeight
                   Text { id: providerRadio; text: parent.parent.parent.selected ? "󰝥" : "󰝦"; color: parent.parent.parent.ready ? (parent.parent.parent.selected ? Color.accent : root.fg) : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
-                  Text { id: providerName; anchors.left: providerRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.ready ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
+                  Text { id: providerName; anchors.left: providerRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
                   Text { anchors.left: providerName.right; anchors.leftMargin: 6; anchors.baseline: providerName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-                  Text { anchors.right: providerAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.parent.parent.ready ? (parent.parent.parent.cloud ? (parent.parent.parent.modelData.keySource === "keyring" ? "● Key stored" : "● Key available") : "● Ready") : (parent.parent.parent.modelData.status === "nokey" ? "No API key" : "Not installed"); color: parent.parent.parent.ready ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                  Text { anchors.right: providerAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: { var d = parent.parent.parent
+                            if (d.failing) return "Not working"
+                            if (d.untested) return "Untested"
+                            if (d.ready) return d.cloud ? (d.modelData.keySource === "keyring" ? "● Key stored" : "● Key available") : "● Ready"
+                            return d.modelData.status === "nokey" ? "No API key" : "Not installed" }
+                    // urgent is otherwise reserved for Stop, but a backend that is
+                    // present and cannot speak is a genuine fault, not an absence.
+                    color: { var d = parent.parent.parent
+                             if (d.failing) return Color.urgent
+                             if (d.ready) return Color.accent
+                             return root.dim }
+                    font.family: root.ff
+                    font.pixelSize: Style.font.caption
+                  }
                   Text {
                     id: providerAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring") || !parent.parent.parent.ready
-                    text: parent.parent.parent.cloud && parent.parent.parent.ready ? "Remove key" : (parent.parent.parent.modelData.status === "nokey" ? "Add key" : "Install"); color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
+                    text: { var d = parent.parent.parent
+                            if (d.cloud && d.ready) return "Remove key"
+                            if (d.modelData.status === "nokey") return "Add key"
+                            if (controller.verifying === d.modelData.name) return "Testing…"
+                            if (d.failing || d.untested) return "Test"
+                            return "Install" }
+                    color: Color.accent
+                    font.family: root.ff
+                    font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else if (row.failing || row.untested) { controller.verifyProvider(row.modelData.name) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
                   }
                 }
                 Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · paid"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-                Text { visible: parent.parent.modelData.name === "kokoro"; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: "Installed, but it produced no audio when tested. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.modelData.name === "kokoro" && !parent.parent.failing; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               }
-              MouseArea { anchors.fill: parent; enabled: parent.ready; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectProvider(parent.modelData.name) }
+              MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectProvider(parent.modelData.name) }
             }
           }
           Rectangle {
