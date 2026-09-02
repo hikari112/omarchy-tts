@@ -18,6 +18,14 @@ VOICE="${TTS_VOICE:-}"
 MODEL="$(jq -r '.openai.model // "gpt-4o-mini-tts"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="gpt-4o-mini-tts"
 
+# OpenAI addresses voices by name, so the id is already the label.
+if [[ "${1:-}" == "--voices" ]]; then
+  jq -nc '[ "alloy","ash","ballad","cedar","coral","echo","fable","marin",
+            "nova","onyx","sage","shimmer","verse" ]
+          | map({value: ., label: .})'
+  exit 0
+fi
+
 if [[ "${1:-}" == "--usage" ]]; then
   jq -c '. + {account:{source:"request_headers",note:"OpenAI account-wide usage requires an organization admin key; request limits update after each speech request."}}' \
     "${TTS_METRICS_FILE:-/dev/null}" 2>/dev/null ||

@@ -140,11 +140,28 @@ Panel {
     return 0
   }
 
+  // A provider addressed by filename (piper) sends plain keys and we make them
+  // readable here; one addressed by opaque id (ElevenLabs) sends the names its
+  // own service gave them, because only the service knows them.
   readonly property var voiceOptions: {
-    var keys = controller.info.voices || [], out = []
-    for (var i = 0; i < keys.length; ++i)
-      out.push({ label: root.voiceLabel(keys[i]), value: String(keys[i]) })
+    var list = controller.info.voices || [], out = []
+    for (var i = 0; i < list.length; ++i) {
+      var v = list[i]
+      if (v && typeof v === "object")
+        out.push({ label: String(v.label || v.value), value: String(v.value) })
+      else
+        out.push({ label: root.voiceLabel(v), value: String(v) })
+    }
     return out
+  }
+
+  // What to call the active voice: the provider's own name for it if we were
+  // given one, otherwise the identifier tidied up.
+  function activeVoiceLabel() {
+    var opts = root.voiceOptions, current = String(controller.info.voice || "")
+    for (var i = 0; i < opts.length; ++i)
+      if (opts[i].value === current) return opts[i].label
+    return root.voiceName(current)
   }
 
   function qualityRank(q) {
@@ -676,7 +693,7 @@ Panel {
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
             Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
-          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + root.voiceName(controller.info.voice) : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + root.activeVoiceLabel() : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: controller.error !== ""; text: controller.error; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
       }

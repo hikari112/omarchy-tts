@@ -236,6 +236,29 @@ provider_model() {
 }
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
+# Voices a provider has to be asked about, cached because asking costs a
+# network round trip and the answer changes rarely. A stale list beats no list:
+# offline, the names already seen are still more use than a bare identifier.
+VOICE_CACHE_MAX_AGE_MIN=1440
+
+remote_voices() { # remote_voices <name> <bin>
+  local name="$1" bin="$2" out=""
+  local cache="$CACHE_DIR/voices/$name.json"
+  mkdir -p "$CACHE_DIR/voices" 2>/dev/null
+  if [[ -s "$cache" && -z "$(find "$cache" -mmin +$VOICE_CACHE_MAX_AGE_MIN 2>/dev/null)" ]]; then
+    cat "$cache"; return 0
+  fi
+  out="$(TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+         timeout 30 "$bin" --voices 2>/dev/null)"
+  if jq -e 'type == "array" and length > 0' <<< "$out" >/dev/null 2>&1; then
+    printf '%s' "$out" > "$cache"
+    printf '%s' "$out"
+    return 0
+  fi
+  if [[ -s "$cache" ]]; then cat "$cache"; return 0; fi
+  printf '[]'
+}
+
 emit_info() {
   local voices_dir="${PIPER_VOICES_DIR:-$DATA_DIR/voices/piper}"
   local legacy_voices_dir="$HOME/.local/share/piper-voices"
@@ -270,10 +293,23 @@ emit_info() {
         sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
     openai)
       voice="$(cfg .openai.voice alloy)"; voice_path=.openai.voice
-      vs='["alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse"]' ;;
+      vs="$(remote_voices openai "$(provider_path openai)")" ;;
     elevenlabs)
-      voice="$(cfg .elevenlabs.voiceId 21m00Tcm4TlvDq8ikWAM)"; voice_path=.elevenlabs.voiceId
-      vs="$(jq -nc --arg voice "$voice" '[$voice]')" ;;
+      voice_path=.elevenlabs.voiceId
+      vs="$(remote_voices elevenlabs "$(provider_path elevenlabs)")"
+      voice="$(cfg .elevenlabs.voiceId "")"
+      # With nothing chosen, take the account's first voice rather than a fixed
+      # id: the vendor's premade roster changes, and a default that ages out
+      # leaves a new user pointing at a voice their account never lists.
+      [[ -z "$voice" ]] && voice="$(jq -r '.[0].value // "21m00Tcm4TlvDq8ikWAM"' <<< "$vs")"
+      # A configured voice the account does not list still works - the service
+      # resolves older ids - but it has no name here. Keep it in the list and
+      # say so, rather than showing a bare identifier with no explanation.
+      if [[ -n "$voice" ]] && ! jq -e --arg v "$voice" 'any(.[]; .value == $v)' <<< "$vs" >/dev/null 2>&1; then
+        vs="$(jq -c --arg v "$voice" '[{value:$v, label:($v + " · not in your account")}] + .' <<< "$vs")"
+      fi
+      jq -e 'length > 0' <<< "$vs" >/dev/null 2>&1 ||
+        vs="$(jq -nc --arg v "$voice" '[{value:$v, label:$v}]')" ;;
     kokoro)
       voice="$(cfg .kokoro.voice af_heart)"; voice_path=.kokoro.voice
       vs='["af_heart","af_bella","af_nicole","af_sarah","am_adam","am_michael","bf_emma","bf_isabella","bm_george","bm_lewis"]' ;;
@@ -376,6 +412,7 @@ Voice
   -m, --max-chars N    truncate near N characters (0 = unlimited)
   -l, --list           list available providers
       --verify [NAME]  prove a provider can actually speak (silent)
+      --refresh-voices re-fetch cloud voice lists
       --cycle-provider switch to the next provider
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
@@ -468,6 +505,10 @@ while [[ $# -gt 0 ]]; do
         esac
       done
       exit $vrc ;;
+    --refresh-voices)
+      rm -rf "$CACHE_DIR/voices"
+      echo "voice lists cleared; they will be fetched again on next use"
+      exit 0 ;;
     -l|--list) list_providers; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; WORDS+=("$@"); break ;;

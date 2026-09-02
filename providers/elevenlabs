@@ -17,6 +17,28 @@ VOICE="${TTS_VOICE:-}"
 MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
 
+# List the account's voices as {value,label} pairs. ElevenLabs addresses
+# voices by opaque id, so without this the panel can only ever show the one id
+# already in the config, and shows it as the identifier it is.
+if [[ "${1:-}" == "--voices" ]]; then
+  body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-voices.XXXXXX")" || exit 1
+  trap 'rm -f "$body"' EXIT
+  curl_rc=0
+  status="$(curl -sS --connect-timeout 15 --max-time 30 \
+    https://api.elevenlabs.io/v1/voices -H @/dev/fd/3 \
+    --output "$body" --write-out '%{http_code}' \
+    3<<< "xi-api-key: $KEY")" || curl_rc=$?
+  [[ $curl_rc -eq 0 && "$status" =~ ^2[0-9][0-9]$ ]] || {
+    printf 'ElevenLabs: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
+  # A cloned voice is worth distinguishing from a stock one; otherwise the
+  # vendor's own name is what the user recognises from the website.
+  jq -c '[.voices[]? | {
+      value: .voice_id,
+      label: (.name + (if (.category // "premade") == "premade" then "" else " · " + .category end))
+    }] | map(select(.value != null and .label != null))' "$body"
+  exit 0
+fi
+
 if [[ "${1:-}" == "--usage" ]]; then
   body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-usage.XXXXXX")" || exit 1
   headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1
