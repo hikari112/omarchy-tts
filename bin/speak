@@ -320,7 +320,9 @@ refresh_remote_voices() { # refresh_remote_voices <name>
   if [[ "$name" == elevenlabs && -z "$(cfg .elevenlabs.voiceId "")" ]]; then
     local first_voice
     first_voice="$(jq -r '.[0].value // empty' "$cache")"
-    [[ -n "$first_voice" ]] && tts_config_set .elevenlabs.voiceId "$first_voice" || true
+    if [[ -n "$first_voice" ]]; then
+      tts_config_set .elevenlabs.voiceId "$first_voice" || true
+    fi
   fi
   # Return a confirmation, not the account-specific names. The cache is read
   # privately by --info and the panel reload that follows this command.
