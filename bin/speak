@@ -581,6 +581,9 @@ else
           trap 'rm -f "$PNG"' EXIT
           capture clipboard-image "$image_mime" > "$PNG" || die "could not read clipboard image"
           [[ -s "$PNG" ]] || die "clipboard image is empty"
+          # The engine sources lib/play.sh from the plugin directory, so it
+          # needs the same environment the screen-capture path exports.
+          export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR"
           TEXT="$("$OCR_BIN" < "$PNG")"
           OCRMODE=1
           if [[ -z "${TEXT//[[:space:]]/}" ]]; then
