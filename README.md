@@ -23,8 +23,8 @@ speak-voice add en_US-amy-medium
 Add the keybindings to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + ALT + S", "Speak selection", "speak --toggle")
-o.bind("SUPER + ALT + C", "Speak clipboard", "speak --clipboard")
+o.bind("SUPER + ALT + E", "Speak selection", "speak --toggle")
+o.bind("SUPER + ALT + A", "Speak clipboard", "speak --clipboard")
 o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
 ```
 
@@ -36,8 +36,8 @@ o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
 
 | Key | Action |
 |-----|--------|
-| `SUPER+ALT+S` | Speak the highlighted text (press again to stop) |
-| `SUPER+ALT+C` | Speak the clipboard |
+| `SUPER+ALT+E` | Speak the highlighted text (press again to stop) |
+| `SUPER+ALT+A` | Speak the clipboard |
 | `SUPER+ALT+X` | Stop immediately |
 
 Bar widget: left-click speaks the selection, right-click cycles providers.
