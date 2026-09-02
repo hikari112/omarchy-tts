@@ -23,8 +23,11 @@ jobs:
       - name: CLI configuration tests
         run: python3 tests/test_cli.py
 
+      - name: Audio fade tests
+        run: python3 tests/test_fade.py
+
       - name: Python syntax
-        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py lib/fade.py
 
       - name: Shell syntax
         run: |

@@ -284,7 +284,24 @@ Panel {
           }
           Row { width: parent.width; spacing: 8
             Button { width: 32; text: "−"; bordered: true; onClicked: { root.speedPreview = Math.max(.5, root.speedPreview - .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
-            PanelSlider { width: parent.width - 80; bar: root.bar; minimum: .5; maximum: 2; step: .05; value: Number(controller.info.rate || 1); onMoved: function(v) { root.speedPreview = Math.round(v * 20) / 20 }; onReleased: function(v) { var snapped = Math.round(v * 20) / 20; root.speedPreview = snapped; controller.setConfig(".rate", snapped.toFixed(2)) } }
+            // The knob tracks the raw pointer while the label shows the snapped
+            // value, so on release it drifts to the step and eases there once
+            // the config round-trip returns. Snapping liveValue as we go keeps
+            // knob, label and stored value identical at every instant.
+            PanelSlider {
+              id: speedSlider
+              width: parent.width - 80; bar: root.bar
+              minimum: .5; maximum: 2; step: .05
+              value: Number(controller.info.rate || 1)
+              function snap(v) { return Math.round(v * 20) / 20 }
+              onMoved: function(v) { var s = speedSlider.snap(v); root.speedPreview = s; speedSlider.liveValue = s }
+              onReleased: function(v) {
+                var s = speedSlider.snap(v)
+                root.speedPreview = s
+                speedSlider.liveValue = s
+                controller.setConfig(".rate", s.toFixed(2))
+              }
+            }
             Button { width: 32; text: "+"; bordered: true; onClicked: { root.speedPreview = Math.min(2, root.speedPreview + .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
           }
           Item {
@@ -362,7 +379,20 @@ Panel {
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
             Text { anchors.right: parent.right; text: root.confidencePreview > 0 ? root.confidencePreview + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
-          PanelSlider { width: parent.width; bar: root.bar; minimum: 0; maximum: 95; step: 5; integer: true; value: Number(controller.info.ocr?.minConfidence ?? 60); onMoved: function(v) { root.confidencePreview = Math.round(v / 5) * 5 }; onReleased: function(v) { var snapped = Math.round(v / 5) * 5; root.confidencePreview = snapped; controller.setConfig(".ocr.minConfidence", snapped) } }
+          PanelSlider {
+            id: confidenceSlider
+            width: parent.width; bar: root.bar
+            minimum: 0; maximum: 95; step: 5; integer: true
+            value: Number(controller.info.ocr?.minConfidence ?? 60)
+            function snap(v) { return Math.round(v / 5) * 5 }
+            onMoved: function(v) { var s = confidenceSlider.snap(v); root.confidencePreview = s; confidenceSlider.liveValue = s }
+            onReleased: function(v) {
+              var s = confidenceSlider.snap(v)
+              root.confidencePreview = s
+              confidenceSlider.liveValue = s
+              controller.setConfig(".ocr.minConfidence", s)
+            }
+          }
           TextField { width: parent.width; text: controller.info.ocr?.langs || "eng"; foreground: root.fg; onEditingFinished: controller.setConfig(".ocr.langs", text) }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Tesseract language codes joined with + (for example eng+fra). Install the corresponding language data first."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
