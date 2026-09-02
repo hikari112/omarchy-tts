@@ -27,6 +27,10 @@ Panel {
   property string confirmInstall: ""
   property string confirmProvider: ""
   property string confirmKeyRemove: ""
+  property string apiProvider: ""
+  property string apiVendor: ""
+  property bool setupSkipped: false
+  readonly property bool needsSetup: !controller.setup.ready && !setupSkipped
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
   function keyName(event) {
@@ -75,10 +79,8 @@ Panel {
       if (controller.selectionText.trim()) root.previewSource = controller.selectionText.slice(0, 4000)
     }
   }
-  Timer { interval: 750; repeat: true; running: root.opened; onTriggered: controller.refresh() }
-
   onOpenedChanged: if (opened) {
-    controller.refresh(); controller.refreshBindings(); controller.loadSelection()
+    controller.refresh(); controller.refreshBindings(); controller.refreshSetup(); controller.loadSelection()
     Qt.callLater(function() {
       root.currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
       root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
@@ -124,12 +126,12 @@ Panel {
 
         Item {
           width: parent.width; height: Math.max(headerIcon.implicitHeight, headerTitle.implicitHeight)
-          Text { id: headerIcon; text: "󰕾"; color: controller.info.speaking ? Color.accent : root.fg; font.family: root.ff; font.pixelSize: Style.fontPx(1.3); anchors.verticalCenter: parent.verticalCenter }
+          Text { id: headerIcon; text: "󰕾"; color: controller.speaking ? Color.accent : root.fg; font.family: root.ff; font.pixelSize: Style.fontPx(1.3); anchors.verticalCenter: parent.verticalCenter }
           Text { id: headerTitle; anchors.left: headerIcon.right; anchors.leftMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter; text: "Text to speech"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.subtitle }
           Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.activeIsCloud ? "󰅟 text leaves this machine" : "on-demand accessibility"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
         Row {
-          width: parent.width; spacing: Style.space(14)
+          width: parent.width; spacing: Style.space(14); visible: !root.needsSetup
           Repeater {
             model: root.tabNames
             delegate: Item {
@@ -144,9 +146,14 @@ Panel {
         }
         PanelSeparator { width: parent.width; foreground: root.fg }
 
+        FirstRunWizard {
+          width: parent.width; visible: root.needsSetup; controller: controller; foreground: root.fg
+          onSkipped: root.setupSkipped = true
+        }
+
         // Provider ---------------------------------------------------------
         Column {
-          width: parent.width; spacing: Style.space(4); visible: root.currentTab === 0
+          width: parent.width; spacing: Style.space(4); visible: !root.needsSetup && root.currentTab === 0
           Item {
             width: parent.width; height: providerHeader.implicitHeight
             PanelSectionHeader { id: providerHeader; text: "Speech provider"; foreground: root.fg }
@@ -172,7 +179,7 @@ Panel {
                   Text {
                     id: providerAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring") || !parent.parent.parent.ready
                     text: parent.parent.parent.cloud && parent.parent.parent.ready ? "Remove key" : (parent.parent.parent.modelData.status === "nokey" ? "Add key" : "Install"); color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") controller.storeKey(row.modelData.name); else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
                   }
                 }
                 Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · paid"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
@@ -186,10 +193,10 @@ Panel {
             Column {
               id: installCol; anchors.fill: parent; anchors.margins: 8; spacing: 6
               Text { text: "Install " + root.confirmProvider + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
-              Text { width: parent.width; text: root.confirmInstall; wrapMode: Text.WrapAnywhere; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text { width: parent.width; text: "The required packages will be installed for you. Administrator approval may appear for system packages."; wrapMode: Text.WordWrap; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               Row { spacing: 8
                 Button { text: "Cancel"; bordered: true; onClicked: { root.confirmInstall = ""; root.confirmProvider = "" } }
-                Button { text: "Open terminal"; bordered: true; foreground: Color.accent; onClicked: { controller.installProvider(root.confirmInstall); root.confirmInstall = ""; root.confirmProvider = "" } }
+                Button { text: "Install"; bordered: true; foreground: Color.accent; onClicked: { controller.installProvider(root.confirmProvider); root.confirmInstall = ""; root.confirmProvider = "" } }
               }
             }
           }
@@ -204,11 +211,23 @@ Panel {
               Button { text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.confirmKeyRemove); root.confirmKeyRemove = "" } }
             }
           }
+          ApiKeyDialog {
+            width: parent.width; visible: root.apiProvider !== ""
+            controller: controller; provider: root.apiProvider; vendor: root.apiVendor; foreground: root.fg
+            onClosed: { root.apiProvider = ""; root.apiVendor = "" }
+          }
+          Text {
+            width: parent.width
+            visible: controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
+            text: controller.setupJob.message; wrapMode: Text.WordWrap
+            color: controller.setupJob.status === "error" ? Color.urgent : root.dim
+            font.family: root.ff; font.pixelSize: Style.font.caption
+          }
         }
 
         // Voice ------------------------------------------------------------
         Column {
-          width: parent.width; spacing: Style.space(10); visible: root.currentTab === 1 && !root.browsing
+          width: parent.width; spacing: Style.space(10); visible: !root.needsSetup && root.currentTab === 1 && !root.browsing
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
           Dropdown { width: parent.width; showLabel: false; foreground: root.fg; options: controller.info.voices?.length ? controller.info.voices : ["No voice installed"]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
           Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
@@ -234,7 +253,7 @@ Panel {
           }
         }
         Column {
-          width: parent.width; spacing: 8; visible: root.currentTab === 1 && root.browsing
+          width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 1 && root.browsing
           Item {
             width: parent.width; height: browseHeader.implicitHeight
             PanelSectionHeader { id: browseHeader; text: "Browse voices · Piper"; foreground: root.fg }
@@ -248,16 +267,16 @@ Panel {
               readonly property bool busy: controller.download.status === "downloading" && controller.download.voice === modelData.key
               width: ListView.view.width; height: 42; radius: 5; color: modelData.installed ? root.tint(.07) : "transparent"
               Text { anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.modelData.name + " · " + parent.modelData.quality + " · " + parent.modelData.lang; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
-              Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.modelData.installed ? "󰄬 Installed" : (parent.busy ? controller.download.percent + "%" : "󰇚 " + parent.modelData.sizeMB + " MB"); color: parent.modelData.installed || parent.busy ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-              MouseArea { anchors.fill: parent; enabled: !parent.modelData.installed && !parent.busy; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.downloadVoice(parent.modelData.key) }
+              Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? controller.download.percent + "% · Cancel" : "󰇚 " + parent.modelData.sizeMB + " MB"); color: parent.modelData.installed || parent.busy ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+              MouseArea { anchors.fill: parent; enabled: parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: { if (parent.busy) controller.cancelDownload(); else if (parent.modelData.installed) controller.removeVoice(parent.modelData.key); else controller.downloadVoice(parent.modelData.key) } }
             }
           }
-          Text { text: "Storage: ~/.local/share/piper-voices"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { text: "Storage: ~/.local/share/omarchy-tts/voices/piper"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
 
         // Text -------------------------------------------------------------
         Column {
-          width: parent.width; spacing: 8; visible: root.currentTab === 2
+          width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 2
           PanelSectionHeader { text: "What gets spoken"; foreground: root.fg }
           Row {
             width: parent.width; spacing: 8
@@ -274,7 +293,7 @@ Panel {
 
         // Screen -----------------------------------------------------------
         Column {
-          width: parent.width; spacing: 10; visible: root.currentTab === 3
+          width: parent.width; spacing: 10; visible: !root.needsSetup && root.currentTab === 3
           PanelSectionHeader { text: "Reading the screen"; foreground: root.fg }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Region, focused-window and focused-monitor OCR stay local. Recognised text only leaves your computer when a cloud speech provider is active."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Item {
@@ -289,7 +308,7 @@ Panel {
 
         // Keys -------------------------------------------------------------
         Column {
-          width: parent.width; spacing: 4; visible: root.currentTab === 4
+          width: parent.width; spacing: 4; visible: !root.needsSetup && root.currentTab === 4
           Item {
             width: parent.width; height: keysHeader.implicitHeight
             PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }
@@ -305,10 +324,11 @@ Panel {
             }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: (parent.width - 8)/2; text: controller.bindings.installed ? "Apply changes" : "Install bindings"; bordered: true; foreground: Color.accent; onClicked: controller.installBindings() }
+            Button { width: (parent.width - 8)/2; text: controller.bindings.installed ? "Apply changes" : "Install bindings"; bordered: true; foreground: Color.accent; enabled: controller.bindings.canInstall !== false; onClicked: controller.installBindings() }
             Button { width: (parent.width - 8)/2; text: "Remove TTS bindings"; bordered: true; enabled: controller.bindings.installed; onClicked: controller.removeBindings() }
           }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Only the marked omarchy-tts block in bindings.lua is managed. Every write is backed up and rolled back if Hyprland reports an error."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; visible: (controller.bindings.conflicts || []).length > 0; wrapMode: Text.WordWrap; text: "Resolve these shortcuts first: " + controller.bindings.conflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
 
         Rectangle {
@@ -325,7 +345,7 @@ Panel {
 
         PanelSeparator { width: parent.width; foreground: root.fg }
         Column {
-          width: parent.width; spacing: 8
+          width: parent.width; spacing: 8; visible: !root.needsSetup
           Item {
             width: parent.width; height: testHeader.implicitHeight
             PanelSectionHeader { id: testHeader; text: "Test"; foreground: root.fg }
@@ -333,9 +353,9 @@ Panel {
           }
           Row { width: parent.width; spacing: 8
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
-            Button { id: testButton; width: 96; text: controller.info.speaking ? "Stop" : "Speak"; iconText: controller.info.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.info.speaking ? Color.urgent : root.fg; accent: controller.info.speaking ? Color.urgent : Color.accent; onClicked: controller.info.speaking ? controller.stop() : controller.speak(root.sampleText) }
+            Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
-          Text { width: parent.width; elide: Text.ElideRight; text: (controller.info.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + controller.info.voice : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.info.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + controller.info.voice : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: controller.error !== ""; text: controller.error; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
       }
