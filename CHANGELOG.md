@@ -5,6 +5,8 @@ Versioning.
 
 ## Unreleased
 
+## 1.2.0 - 2026-09-02
+
 - Add privacy-safe paid-provider telemetry, live ElevenLabs subscription usage,
   OpenAI rate-limit windows, actionable quota/rate errors, and panel refresh.
 - Preserve provider health across transient rate, quota, and service failures,

@@ -12,6 +12,17 @@ cloud_header() { # cloud_header <headers-file> <name>
   ' "$1" 2>/dev/null
 }
 
+cloud_ensure_metrics() { # caller holds the metrics lock
+  if jq -e 'type == "object"' "$TTS_METRICS_FILE" >/dev/null 2>&1; then return 0; fi
+  local repair
+  repair="$(mktemp "${TTS_METRICS_FILE}.repair.XXXXXX")" || return 1
+  if ! printf '{}\n' > "$repair" || ! chmod 600 "$repair" ||
+      ! mv "$repair" "$TTS_METRICS_FILE"; then
+    rm -f "$repair"
+    return 1
+  fi
+}
+
 cloud_error_code() { # cloud_error_code <http-status> <response-file>
   local code
   code="$(jq -r '.error.code // .error.type // .detail.status // .detail.code // empty' "$2" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
@@ -33,13 +44,14 @@ cloud_record() { # provider model chars http-status headers response [units]
   local request_id retry_after error_code="" outcome=ok now tmp lock_fd
   request_id="$(cloud_header "$headers" x-request-id)"
   [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" request-id)"
+  [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" x-trace-id)"
   retry_after="$(cloud_header "$headers" retry-after)"
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || { outcome=error; error_code="$(cloud_error_code "$status" "$body")"; }
   now="$(date -Is)"
   mkdir -p "$(dirname "$TTS_METRICS_FILE")" || return 0
   exec {lock_fd}>"${TTS_METRICS_FILE}.lock" || return 0
   flock "$lock_fd" || { exec {lock_fd}>&-; return 0; }
-  [[ -s "$TTS_METRICS_FILE" ]] || printf '{}' > "$TTS_METRICS_FILE"
+  cloud_ensure_metrics || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 0; }
   tmp="$(mktemp "${TTS_METRICS_FILE}.XXXXXX")" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 0; }
   if jq --arg provider "$provider" --arg model "$model" --arg now "$now" \
     --arg status "$status" --arg outcome "$outcome" --arg error "$error_code" \
@@ -77,7 +89,7 @@ cloud_store_account() { # normalized-account-json-file
   mkdir -p "$(dirname "$TTS_METRICS_FILE")" || return 1
   exec {lock_fd}>"${TTS_METRICS_FILE}.lock" || return 1
   flock "$lock_fd" || { exec {lock_fd}>&-; return 1; }
-  [[ -s "$TTS_METRICS_FILE" ]] || printf '{}' > "$TTS_METRICS_FILE"
+  cloud_ensure_metrics || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
   tmp="$(mktemp "${TTS_METRICS_FILE}.XXXXXX")" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
   if jq --slurpfile account "$account" '.account=$account[0] | .updatedAt=(now|todateiso8601)' \
       "$TTS_METRICS_FILE" > "$tmp" 2>/dev/null; then
@@ -88,6 +100,11 @@ cloud_store_account() { # normalized-account-json-file
   flock -u "$lock_fd"; exec {lock_fd}>&-
 }
 
+cloud_transport_fail() { # provider curl-exit
+  printf '%s: network request failed (curl exit %s)\n' "$1" "$2" >&2
+  return 74
+}
+
 cloud_fail() { # provider http-status response headers
   local provider="$1" status="$2" body="$3" headers="$4" code retry
   code="$(cloud_error_code "$status" "$body")"; retry="$(cloud_header "$headers" retry-after)"
@@ -95,7 +112,7 @@ cloud_fail() { # provider http-status response headers
     401:*|403:*) printf '%s: API key was rejected (%s)\n' "$provider" "$code" >&2; return 77 ;;
     402:*|*:quota) printf '%s: credits or billing limit exhausted\n' "$provider" >&2; return 69 ;;
     429:*) printf '%s: rate or concurrency limit reached%s\n' "$provider" "${retry:+; retry after $retry}" >&2; return 75 ;;
-    5??:*) printf '%s: service temporarily unavailable (HTTP %s)\n' "$provider" "$status" >&2; return 75 ;;
+    408:*|425:*|5??:*) printf '%s: service temporarily unavailable (HTTP %s)\n' "$provider" "$status" >&2; return 74 ;;
     *) printf '%s: request failed (HTTP %s, %s)\n' "$provider" "${status:-unknown}" "$code" >&2; return 1 ;;
   esac
 }

@@ -211,7 +211,7 @@ verify_provider() { # verify_provider <name>
   fi
   # A valid paid provider can be temporarily unavailable without becoming a
   # broken installation. Keep its last proven health for quota/rate outages.
-  [[ $rc -eq 69 || $rc -eq 75 ]] && return 1
+  [[ $rc -eq 69 || $rc -eq 74 || $rc -eq 75 ]] && return 1
   health_set "$name" failed "exit $rc"
   return 1
 }
@@ -270,7 +270,7 @@ emit_info() {
         sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
     openai)
       voice="$(cfg .openai.voice alloy)"; voice_path=.openai.voice
-      vs='["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]' ;;
+      vs='["alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse"]' ;;
     elevenlabs)
       voice="$(cfg .elevenlabs.voiceId 21m00Tcm4TlvDq8ikWAM)"; voice_path=.elevenlabs.voiceId
       vs="$(jq -nc --arg voice "$voice" '[$voice]')" ;;
@@ -597,15 +597,19 @@ rc=$?
 # Real use is the best evidence there is. A cancellation is not a failure.
 if [[ $rc -eq 0 ]]; then
   health_set "$PROVIDER" ok ""
-elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 69 ]]; then
+elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 74 && $rc -ne 69 ]]; then
   health_set "$PROVIDER" failed "exit $rc"
   notify-send -a "Speak" "$PROVIDER could not speak" \
     "Marked as failing. Pick another provider in the panel." 2>/dev/null
 fi
-if [[ $rc -eq 75 || $rc -eq 69 ]]; then
-  notify-send -a "Speak" "$PROVIDER is temporarily limited" \
-    "Provider health was preserved; see cloud usage in the panel." 2>/dev/null
-fi
+case "$rc" in
+  69) notify-send -a "Speak" "$PROVIDER billing limit reached" \
+        "Provider health was preserved. Refresh cloud usage in the panel." 2>/dev/null ;;
+  74) notify-send -a "Speak" "$PROVIDER is temporarily unavailable" \
+        "Check the network or try again shortly. Provider health was preserved." 2>/dev/null ;;
+  75) notify-send -a "Speak" "$PROVIDER rate limit reached" \
+        "Wait for the limit to reset. Provider health was preserved." 2>/dev/null ;;
+esac
 # A superseding invocation owns these files now. Never erase its state when
 # this older provider finally notices that it was cancelled.
 exec {speech_lock_fd}>"$SPEECH_LOCK"

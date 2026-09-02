@@ -260,10 +260,11 @@ class ProviderHealthTests(unittest.TestCase):
                          "a real failure should mark the provider without a separate test")
 
     def test_temporary_provider_limit_does_not_poison_health(self):
-        self.write_provider("limitedtest", "exit 75")
-        self.speak("--set", ".provider", "limitedtest")
-        self.speak("Hello there.")
-        self.assertEqual(self.status_of("limitedtest"), "untested")
+        for name, code in (("quotatest", 69), ("networktest", 74), ("ratetest", 75)):
+            self.write_provider(name, f"exit {code}")
+            self.speak("--set", ".provider", name)
+            self.speak("Hello there.")
+            self.assertEqual(self.status_of(name), "untested")
 
     def test_superseded_speech_cannot_erase_the_new_owner(self):
         self.write_provider(
@@ -327,6 +328,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         fake_curl.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
+            "[[ ${FAKE_CURL_EXIT:-0} == 0 ]] || exit \"$FAKE_CURL_EXIT\"\n"
             "output=\n"
             "dump=\n"
             "writeout=\n"
@@ -339,7 +341,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             "cat > \"$FAKE_CURL_BODY\"\n"
             "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
             "[[ -z $dump ]] || cp \"$FAKE_RESPONSE_HEADERS\" \"$dump\"\n"
-            "printf fake-audio > \"$output\"\n"
+            "[[ ${FAKE_EMPTY_AUDIO:-0} == 1 ]] || printf fake-audio > \"$output\"\n"
             "[[ -z $writeout ]] || printf 200\n"
         )
         fake_curl.chmod(0o755)
@@ -377,6 +379,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
 
     def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
         metrics = self.root / "metrics.json"
+        metrics.write_text("not json")
         spoken = "private words"
         env = {**os.environ,
                "PATH": f"{self.bin}:{os.environ['PATH']}",
@@ -396,6 +399,34 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         self.assertEqual(data["rateLimits"]["requests"]["remaining"], "99")
         self.assertNotIn(spoken, metrics.read_text())
         self.assertEqual(metrics.stat().st_mode & 0o777, 0o600)
+
+    def test_network_failure_is_reported_as_temporary(self):
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_CURL_EXIT": "28", "XDG_RUNTIME_DIR": str(self.root),
+               "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(self.config),
+               "TTS_SILENT": "1", "OPENAI_API_KEY": "safe-test-key"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input="hello",
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 74)
+        self.assertIn("network request failed", result.stderr)
+
+    def test_empty_success_response_is_rejected(self):
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_EMPTY_AUDIO": "1", "XDG_RUNTIME_DIR": str(self.root),
+               "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(self.config),
+               "TTS_SILENT": "1", "OPENAI_API_KEY": "safe-test-key"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input="hello",
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 74)
+        self.assertIn("returned no audio", result.stderr)
 
 
 class BindingAdoptionTests(unittest.TestCase):

@@ -28,14 +28,17 @@ fi
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")" || exit 1
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai-headers.XXXXXX")" || exit 1
 trap 'rm -f "$audio" "$headers"' EXIT
+curl_rc=0
 status="$(jq -Rs --arg m "$MODEL" --arg v "$VOICE" --argjson s "${TTS_RATE:-1.0}" \
   '{model:$m, voice:$v, input:., speed:$s, response_format:"mp3"}' |
   curl -sS --connect-timeout 15 --max-time 180 \
     https://api.openai.com/v1/audio/speech \
     -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
     --write-out '%{http_code}' \
-    3<<< "Authorization: Bearer $KEY"$'\nContent-Type: application/json')" || exit $?
-[[ -n "$status" ]] || status=200 # permits simple curl fakes used by downstream tests
+    3<<< "Authorization: Bearer $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
+if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail OpenAI "$curl_rc"; exit $?; fi
+[[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'OpenAI: invalid HTTP response\n' >&2; exit 74; }
 cloud_record openai "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
 if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail OpenAI "$status" "$audio" "$headers"; exit $?; fi
+[[ -s "$audio" ]] || { printf 'OpenAI: service returned no audio\n' >&2; exit 74; }
 play_file "$audio"
