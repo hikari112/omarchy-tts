@@ -23,6 +23,9 @@ jobs:
       - name: CLI configuration tests
         run: python3 tests/test_cli.py
 
+      - name: Python syntax
+        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+
       - name: Shell syntax
         run: |
           for f in bin/speak bin/speak-voice providers/* ocr/* lib/*.sh; do

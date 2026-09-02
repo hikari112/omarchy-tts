@@ -10,31 +10,12 @@ rather than AT-SPI, which Hyprland does not implement.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/hikari112/omarchy-tts
-omarchy plugin enable io.github.hikari112.tts right
-mkdir -p ~/.local/bin
-ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak ~/.local/bin/speak
-ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak-voice ~/.local/bin/speak-voice
-ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak-bindings ~/.local/bin/speak-bindings
+omarchy plugin add https://github.com/hikari112/omarchy-tts.git --enable
 ```
 
-Then install the speech engine and a voice (no root needed):
-
-```bash
-uv tool install piper-tts
-speak-voice add en_US-amy-medium
-```
-
-Add the keybindings to `~/.config/hypr/bindings.lua`:
-
-```lua
-o.bind("SUPER + ALT + E", "Speak selection", "speak --toggle")
-o.bind("SUPER + ALT + A", "Speak clipboard", "speak --clipboard")
-o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
-o.bind("SUPER + ALT + R", "Speak screen region", "speak --snip")
-o.bind("SUPER + ALT + W", "Speak focused window", "speak --window")
-o.bind("SUPER + ALT + SHIFT + R", "Speak whole screen", "speak --screen")
-```
+Click the speaker in the bar. The welcome screen installs the recommended
+local engine and voice; the **Keys** tab installs the shortcuts. Both are
+guided, cancellable operations—no terminal setup or manual config editing.
 
 ## Requirements
 
@@ -168,12 +149,17 @@ Environment given to providers: `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
 
 ### Cloud API keys
 
-Never stored in plaintext by default. Resolution order is env var, then
-system keyring, then config file:
+Add or remove keys from the **Provider** tab. They are entered in a masked
+field and stored in the system keyring, never in the plugin settings or logs.
+The panel clearly marks providers that send text off the machine.
 
-```bash
-secret-tool store --label='openai' service omarchy-tts key openai
-```
+## Remove
+
+Remove the plugin from Omarchy's plugin manager. Before removing it, use
+**Keys → Remove TTS bindings** so no shortcuts are left behind. API keys can
+be removed individually from the Provider tab. Voice models and engines live
+under `~/.local/share/omarchy-tts` so any remaining downloaded data is easy to
+identify and remove.
 
 ## Config
 
@@ -199,6 +185,7 @@ cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib
 ```bash
 python3 tests/test_sanitize.py
 python3 tests/test_cli.py
+python3 -m py_compile bin/speak-bindings bin/speak-setup
 shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 ```
 
