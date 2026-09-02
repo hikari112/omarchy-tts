@@ -92,6 +92,21 @@ Panel {
     return String(key)
   }
 
+  // PanelSlider ends a drag with `liveValue = value`, assuming the owner has
+  // already applied the new number. Ours is written to disk and read back,
+  // which takes about 200 ms, so `value` still held the old number and the
+  // knob snapped back to it before jumping forward again. These hold the
+  // value the user just chose so `value` is already correct at that instant;
+  // they are cleared as soon as a settings read confirms the write.
+  property real rateOverride: -1
+  property int confidenceOverride: -1
+
+  readonly property real rateValue:
+    rateOverride >= 0 ? rateOverride : Number(controller.info.rate || 1)
+  readonly property int confidenceValue:
+    confidenceOverride >= 0 ? confidenceOverride
+                            : Number(controller.info.ocr?.minConfidence ?? 60)
+
   readonly property int adoptableCount: (controller.bindings.adoptable || []).length
 
   readonly property int removeSizeMB: {
@@ -150,18 +165,32 @@ Panel {
   }
 
   TtsController { id: controller }
+  // Restoring the tab used to run on a callLater, which fires long before the
+  // 200 ms settings read returns - so it restored from whatever was loaded
+  // last time and the panel opened on the wrong tab. Wait for real data.
+  property bool restorePending: false
+
   onOpenedChanged: if (opened) {
+    restorePending = true
     controller.refresh(); controller.refreshBindings(); controller.refreshSetup()
     controller.loadCatalogue()   // cached: ~30 ms, and the Voice tab needs it
-    Qt.callLater(function() {
-      root.currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
-      root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
-      controller.previewText(root.previewSource)
-    })
+  }
+
+  function restoreFromInfo() {
+    if (!restorePending || !controller.infoLoaded) return
+    restorePending = false
+    currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
+    sampleText = String(controller.info.ui?.sampleText || sampleText)
+    controller.previewText(previewSource)
   }
   Connections {
     target: controller
     function onInfoChanged() {
+      // The controller discards reads older than the last write, so anything
+      // arriving here already reflects it.
+      root.rateOverride = -1
+      root.confidenceOverride = -1
+      root.restoreFromInfo()
       if (!sampleField.activeFocus) {
         root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
         Qt.callLater(function() { sampleField.cursorPosition = 0 })
@@ -353,10 +382,10 @@ Panel {
           Item {
             width: parent.width; height: speedHeader.implicitHeight
             PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: speedSlider.liveValue.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: root.rateValue.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: 32; text: "−"; bordered: true; onClicked: { var s = Math.max(.5, Math.round((speedSlider.liveValue - .1) * 20) / 20); speedSlider.liveValue = s; controller.setConfig(".rate", s.toFixed(2)) } }
+            Button { width: 32; text: "−"; bordered: true; onClicked: { var s = Math.max(.5, Math.round((root.rateValue - .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
             // The knob tracks the raw pointer while the label shows the snapped
             // value, so on release it drifts to the step and eases there once
             // the config round-trip returns. Snapping liveValue as we go keeps
@@ -365,16 +394,18 @@ Panel {
               id: speedSlider
               width: parent.width - 80; bar: root.bar
               minimum: .5; maximum: 2; step: .05
-              value: Number(controller.info.rate || 1)
+              value: root.rateValue
               function snap(v) { return Math.round(v * 20) / 20 }
-              onMoved: function(v) { speedSlider.liveValue = speedSlider.snap(v) }
+              // Track the drag in the override too: the label reads it, and it
+              // makes `value` already correct when the drag ends.
+              onMoved: function(v) { var s = speedSlider.snap(v); root.rateOverride = s; speedSlider.liveValue = s }
               onReleased: function(v) {
                 var s = speedSlider.snap(v)
-                speedSlider.liveValue = s
+                root.rateOverride = s          // value is correct before liveValue resets to it
                 controller.setConfig(".rate", s.toFixed(2))
               }
             }
-            Button { width: 32; text: "+"; bordered: true; onClicked: { var s = Math.min(2, Math.round((speedSlider.liveValue + .1) * 20) / 20); speedSlider.liveValue = s; controller.setConfig(".rate", s.toFixed(2)) } }
+            Button { width: 32; text: "+"; bordered: true; onClicked: { var s = Math.min(2, Math.round((root.rateValue + .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
           }
           Item {
             width: parent.width; height: limitHeader.implicitHeight
@@ -484,18 +515,18 @@ Panel {
           Item {
             width: parent.width; height: ocrHeader.implicitHeight
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: confidenceSlider.liveValue > 0 ? Math.round(confidenceSlider.liveValue) + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: root.confidenceValue > 0 ? root.confidenceValue + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           PanelSlider {
             id: confidenceSlider
             width: parent.width; bar: root.bar
             minimum: 0; maximum: 95; step: 5; integer: true
-            value: Number(controller.info.ocr?.minConfidence ?? 60)
+            value: root.confidenceValue
             function snap(v) { return Math.round(v / 5) * 5 }
-            onMoved: function(v) { confidenceSlider.liveValue = confidenceSlider.snap(v) }
+            onMoved: function(v) { var s = confidenceSlider.snap(v); root.confidenceOverride = s; confidenceSlider.liveValue = s }
             onReleased: function(v) {
               var s = confidenceSlider.snap(v)
-              confidenceSlider.liveValue = s
+              root.confidenceOverride = s
               controller.setConfig(".ocr.minConfidence", s)
             }
           }
