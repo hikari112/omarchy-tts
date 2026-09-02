@@ -205,7 +205,7 @@ Panel {
     return grouped
   }
 
-  TtsController { id: controller }
+  TtsController { id: controller; statusSource: root.hostWidget }
   // Restoring the tab used to run on a callLater, which fires long before the
   // 200 ms settings read returns - so it restored from whatever was loaded
   // last time and the panel opened on the wrong tab. Wait for real data.
@@ -287,11 +287,11 @@ Panel {
           Text { id: headerTitle; anchors.left: headerIcon.right; anchors.leftMargin: Style.space(8); anchors.verticalCenter: parent.verticalCenter; text: "Text to speech"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.subtitle }
           Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; // The shortcut is the whole point of the tool; the panel is where
                  // someone finds out what it is.
-                 text: { if (root.activeIsCloud) return "󰅟 text leaves this machine"
+                 text: { if (root.activeIsCloud) return "󰅟  Spoken text leaves this machine"
                          var b = controller.bindings.bindings
                          if (b && b.selection && b.selection.chord) return b.selection.chord
                          return "on-demand accessibility" }
-                 color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                 color: root.activeIsCloud ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
         Row {
           width: parent.width; spacing: Style.space(14); visible: !root.needsSetup
@@ -320,7 +320,7 @@ Panel {
           Item {
             width: parent.width; height: providerHeader.implicitHeight
             PanelSectionHeader { id: providerHeader; text: "Speech provider"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: "󰅟 = cloud provider"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: "󰅟  Cloud provider"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Repeater {
             model: controller.info.providers || []
@@ -392,7 +392,7 @@ Panel {
                       } }
                   }
                 }
-                Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · " + (parent.parent.modelData.model || "paid API"); color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud; text: "󰅟  Sends spoken text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · " + (parent.parent.modelData.model || "paid API"); color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Item {
                   width: parent.width; height: cloudUsage.implicitHeight; visible: parent.parent.cloud && parent.parent.modelData.status !== "nokey"
                   Text {
@@ -401,7 +401,7 @@ Panel {
                     text: { var u = parent.parent.parent.modelData.usage || {}; var a = u.account || {}; var l = u.localObserved || {}; var r = (u.rateLimits || {}).requests || {}; var last = u.lastRequest || {}
                             if (last.outcome === "error") return (last.errorCode === "concurrency_limit" ? "Concurrency limit reached" : last.errorCode === "rate_limit" ? "Rate limit reached" : last.errorCode === "quota" ? "Credits or billing limit reached" : "Last request failed") + (last.retryAfter ? " · retry after " + last.retryAfter : "")
                             if (a.limit !== undefined) return (a.tier || "Plan") + " · " + a.used + " / " + a.limit + " characters" + (a.resetAt ? " · resets " + new Date(a.resetAt * 1000).toLocaleDateString() : "")
-                            if (r.remaining !== undefined) return r.remaining + " / " + r.limit + " requests remain · resets " + r.reset
+                            if (r.remaining !== undefined) return r.remaining + (r.limit !== undefined ? " / " + r.limit : "") + " requests remain" + (r.reset ? " · resets " + r.reset : "")
                             if (l.requests) return l.requests + " local requests · " + l.characters + " characters observed"
                             return "Usage appears after the first request" }
                   }
@@ -581,11 +581,11 @@ Panel {
             Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
             Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: root.tint(.06); border.width: 1; border.color: Color.popups.border; Text { anchors.fill: parent; anchors.margins: 6; text: controller.preview || "Spoken preview"; color: root.fg; wrapMode: Text.WordWrap; clip: true; elide: Text.ElideRight; maximumLineCount: 5; font.family: root.ff; font.pixelSize: Style.font.caption } }
           }
-          SettingToggle { label: "Read URLs as ‘link’"; checked: controller.info.sanitizer?.urls === "link"; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.urls", value ? "link" : "domain") }
-          SettingToggle { label: "Read inline code"; checked: controller.info.sanitizer?.inlineCode !== false; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.inlineCode", value) }
-          SettingToggle { label: "Announce skipped code blocks"; checked: controller.info.sanitizer?.announceCodeBlocks !== false; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.announceCodeBlocks", value) }
-          SettingToggle { label: "Strip Markdown symbols"; checked: controller.info.sanitizer?.stripMarkdown !== false; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.stripMarkdown", value) }
-          SettingToggle { label: "Expand abbreviations and units"; checked: controller.info.sanitizer?.expandUnits !== false; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.expandUnits", value) }
+          SettingToggle { label: "Read URLs as ‘link’"; checked: controller.info.sanitizer?.urls === "link"; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.urls", value ? "link" : "domain") } }
+          SettingToggle { label: "Read inline code"; checked: controller.info.sanitizer?.inlineCode !== false; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.inlineCode", value) } }
+          SettingToggle { label: "Announce skipped code blocks"; checked: controller.info.sanitizer?.announceCodeBlocks !== false; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.announceCodeBlocks", value) } }
+          SettingToggle { label: "Strip Markdown symbols"; checked: controller.info.sanitizer?.stripMarkdown !== false; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.stripMarkdown", value) } }
+          SettingToggle { label: "Expand abbreviations and units"; checked: controller.info.sanitizer?.expandUnits !== false; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.expandUnits", value) } }
           Timer { id: previewDelay; interval: 180; onTriggered: controller.previewText(root.previewSource) }
         }
 
@@ -627,11 +627,14 @@ Panel {
               // "Not installed" beside six shortcuts that plainly work is a
               // contradiction. Unmanaged is a third state, not a broken one.
               text: controller.bindings.installed ? "● Managed"
-                    : (root.adoptableCount > 0
+                    : ((controller.bindings.conflicts || []).length > 0
+                       ? "Needs attention"
+                       : root.adoptableCount > 0
                        ? root.adoptableCount + " already set up"
                        : "Not set up")
               color: controller.bindings.installed ? Color.accent
-                     : (root.adoptableCount > 0 ? root.fg : root.dim)
+                     : ((controller.bindings.conflicts || []).length > 0
+                        ? Color.urgent : (root.adoptableCount > 0 ? root.fg : root.dim))
               font.family: root.ff; font.pixelSize: Style.font.caption
             }
           }
@@ -667,7 +670,7 @@ Panel {
             color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
           }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Only the marked omarchy-tts block in bindings.lua is managed. Every write is backed up and rolled back if Hyprland reports an error."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-          Text { width: parent.width; visible: (controller.bindings.conflicts || []).length > 0; wrapMode: Text.WordWrap; text: "Resolve these shortcuts first: " + controller.bindings.conflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; visible: (controller.bindings.conflicts || []).length > 0; wrapMode: Text.WordWrap; text: "Choose different shortcuts for: " + controller.bindings.conflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
 
         Rectangle {
@@ -688,7 +691,7 @@ Panel {
           Item {
             width: parent.width; height: testHeader.implicitHeight
             PanelSectionHeader { id: testHeader; text: "Test"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: root.activeIsCloud ? "󰅟 sample sent to " + (root.activeProvider.vendor || root.activeProvider.name) : "runs locally"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: root.activeIsCloud ? "󰅟  Sample sent to " + (root.activeProvider.vendor || root.activeProvider.name) : "Runs locally"; color: root.activeIsCloud ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }

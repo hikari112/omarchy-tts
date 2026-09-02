@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import tempfile
 import time
@@ -36,9 +37,23 @@ class CliConfigTests(unittest.TestCase):
     def test_fresh_info_creates_complete_private_config(self):
         info = json.loads(self.run_speak("--info").stdout)
         config = Path(self.temp.name, "omarchy-tts", "config.json")
+        settings = json.loads(config.read_text())
         self.assertEqual(info["provider"], "piper")
         self.assertTrue(info["sanitizer"]["stripMarkdown"])
+        self.assertNotIn("voiceId", settings["elevenlabs"])
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_partial_provider_objects_receive_missing_defaults(self):
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"openai": {"voice": "nova"},
+                                      "elevenlabs": {}}))
+        self.run_speak("--info")
+        settings = json.loads(config.read_text())
+        self.assertEqual(settings["openai"]["voice"], "nova")
+        self.assertEqual(settings["openai"]["model"], "gpt-4o-mini-tts")
+        self.assertEqual(settings["elevenlabs"]["model"], "eleven_turbo_v2_5")
+        self.assertNotIn("voiceId", settings["elevenlabs"])
 
     def test_help_does_not_require_or_create_writable_state(self):
         blocked = Path(self.temp.name, "blocked")
@@ -48,6 +63,26 @@ class CliConfigTests(unittest.TestCase):
         result = subprocess.run([SPEAK, "--help"], env=env, check=True,
                                 text=True, capture_output=True)
         self.assertIn("Usage: speak", result.stdout)
+
+    def test_combined_state_watch_emits_initial_and_config_changes(self):
+        watcher = subprocess.Popen(
+            [SPEAK, "--watch-state"], env=self.env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            self.assertTrue(select.select([watcher.stdout], [], [], 3)[0])
+            initial = json.loads(watcher.stdout.readline())
+            self.assertEqual(initial, {"status": "idle", "provider": "piper"})
+
+            self.run_speak("--set", ".provider", "espeak-ng")
+            self.assertTrue(select.select([watcher.stdout], [], [], 3)[0])
+            changed = json.loads(watcher.stdout.readline())
+            self.assertEqual(changed["provider"], "espeak-ng")
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=3)
+            watcher.stdout.close()
+            watcher.stderr.close()
 
     def test_info_never_contacts_a_cloud_provider(self):
         marker = Path(self.temp.name, "curl-was-run")
@@ -85,6 +120,28 @@ class CliConfigTests(unittest.TestCase):
             {"value": "a", "label": "alpha"},
             {"value": "b", "label": "Zulu"},
         ])
+
+    def test_first_elevenlabs_refresh_selects_an_account_voice_once(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True)
+        provider = providers / "elevenlabs"
+        provider.write_text(
+            "#!/usr/bin/env bash\n"
+            "# desc: account voices\n# kind: cloud\n# voices: remote\n"
+            "[[ ${1:-} == --voices ]] || exit 2\n"
+            "printf '%s\\n' '[{\"value\":\"voice-z\",\"label\":\"Zulu\"},"
+            "{\"value\":\"voice-a\",\"label\":\"Alpha\"}]'\n"
+        )
+        provider.chmod(0o755)
+
+        self.run_speak("--refresh-voices", "elevenlabs")
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        self.assertEqual(json.loads(config.read_text())["elevenlabs"]["voiceId"],
+                         "voice-a")
+        self.run_speak("--set", ".elevenlabs.voiceId", "voice-z")
+        self.run_speak("--refresh-voices", "elevenlabs")
+        self.assertEqual(json.loads(config.read_text())["elevenlabs"]["voiceId"],
+                         "voice-z", "refresh replaced an explicit user choice")
 
     def test_openai_static_metadata_does_not_require_a_key(self):
         provider_env = {**self.env,
@@ -229,6 +286,39 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(target.read_text().strip(),
                          'o.bind("SUPER + B", "Browser", "browser")')
 
+    def test_managed_bindings_follow_the_stable_plugin_symlink(self):
+        plugin = Path(self.temp.name, "omarchy", "plugins",
+                      "io.github.hikari112.tts")
+        first = Path(self.temp.name, "checkout-a")
+        second = Path(self.temp.name, "checkout-b")
+        for checkout in (first, second):
+            (checkout / "bin").mkdir(parents=True)
+            (checkout / "bin" / "speak").write_text("#!/bin/sh\n")
+        plugin.parent.mkdir(parents=True)
+        plugin.symlink_to(first, target_is_directory=True)
+
+        subprocess.run([BINDINGS, "install"], env=self.env, check=True,
+                       capture_output=True, text=True)
+        target = Path(self.temp.name, "hypr", "bindings.lua")
+        rendered = target.read_text()
+        self.assertIn(str(plugin / "bin" / "speak"), rendered)
+        self.assertNotIn(str(first / "bin" / "speak"), rendered)
+
+        plugin.unlink()
+        plugin.symlink_to(second, target_is_directory=True)
+        self.assertEqual((plugin / "bin" / "speak").resolve(),
+                         (second / "bin" / "speak").resolve())
+        self.assertIn(str(plugin / "bin" / "speak"), target.read_text())
+
+    def test_binding_backups_are_bounded(self):
+        target = Path(self.temp.name, "hypr", "bindings.lua")
+        target.parent.mkdir()
+        target.write_text("-- Personal keybindings\n")
+        for _ in range(6):
+            subprocess.run([BINDINGS, "install"], env=self.env, check=True,
+                           capture_output=True, text=True)
+        self.assertEqual(len(list(target.parent.glob("bindings.lua.tts.bak.*"))), 3)
+
     def test_binding_remove_is_idempotent_and_does_not_create_a_file(self):
         target = Path(self.temp.name, "hypr", "bindings.lua")
         subprocess.run([BINDINGS, "remove"], env=self.env, check=True,
@@ -275,6 +365,30 @@ class CliConfigTests(unittest.TestCase):
         stored = json.loads(config.read_text())
         self.assertEqual(stored["selection"], {"chord": "SUPER + ALT + Z"})
 
+    def test_concurrent_binding_edits_preserve_both_choices(self):
+        first = subprocess.Popen(
+            [BINDINGS, "set", "selection", "SUPER + ALT + Z"],
+            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True,
+        )
+        second = subprocess.Popen(
+            [BINDINGS, "set", "clipboard", "SUPER + ALT + V"],
+            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True,
+        )
+        first_rc = first.wait(timeout=3)
+        second_rc = second.wait(timeout=3)
+        first_error = first.stderr.read()
+        second_error = second.stderr.read()
+        first.stderr.close()
+        second.stderr.close()
+        self.assertEqual(first_rc, 0, first_error)
+        self.assertEqual(second_rc, 0, second_error)
+        config = Path(self.temp.name, "omarchy-tts", "bindings.json")
+        stored = json.loads(config.read_text())
+        self.assertEqual(stored["selection"]["chord"], "SUPER + ALT + Z")
+        self.assertEqual(stored["clipboard"]["chord"], "SUPER + ALT + V")
+
     def test_binding_manager_detects_active_default_conflicts(self):
         tools = Path(self.temp.name, "tools")
         tools.mkdir()
@@ -291,6 +405,24 @@ class CliConfigTests(unittest.TestCase):
         status = subprocess.run([BINDINGS, "status"], env=self.env,
                                 capture_output=True, text=True, check=True)
         self.assertIn("SUPER + ALT + E", json.loads(status.stdout)["conflicts"])
+
+    def test_failed_voice_catalogue_refresh_preserves_the_cache(self):
+        tools = Path(self.temp.name, "catalogue-tools")
+        tools.mkdir()
+        curl = tools / "curl"
+        curl.write_text("#!/usr/bin/env bash\nexit 22\n")
+        curl.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+        catalogue = Path(self.temp.name, "omarchy-tts", "voices.json")
+        catalogue.parent.mkdir(parents=True, exist_ok=True)
+        original = '{"preserved": {}}\n'
+        catalogue.write_text(original)
+
+        result = subprocess.run([ROOT / "bin" / "speak-voice", "refresh"],
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("existing cache was kept", result.stderr)
+        self.assertEqual(catalogue.read_text(), original)
 
     def test_setup_backend_status_and_allowlist(self):
         self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
@@ -309,6 +441,93 @@ class CliConfigTests(unittest.TestCase):
             result = subprocess.run([SETUP, "key-store", provider], input=value + "\n",
                                     env=self.env, check=True, capture_output=True, text=True)
             self.assertEqual(json.loads(result.stdout)["code"], code)
+
+    def test_setup_cleanup_requires_explicit_confirmation(self):
+        result = subprocess.run([SETUP, "cleanup"], env=self.env, text=True,
+                                capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(json.loads(result.stdout)["code"],
+                         "confirmation_required")
+
+    def test_engine_setup_pins_packages_and_supported_kokoro_python(self):
+        source = SETUP.read_text()
+        self.assertIn('PIPER_PACKAGE = "piper-tts==1.7.0"', source)
+        self.assertIn('KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")',
+                      source)
+        self.assertIn('KOKORO_PYTHON = "3.12"', source)
+
+    def test_runtime_directory_symlinks_are_rejected(self):
+        runtime = Path(self.temp.name, "omarchy-tts")
+        destination = Path(self.temp.name, "runtime-destination")
+        destination.mkdir()
+        runtime.symlink_to(destination, target_is_directory=True)
+        commands = ([SPEAK, "--status"], [ROOT / "bin" / "speak-voice", "list"],
+                    [SETUP, "status"])
+        for command in commands:
+            result = subprocess.run(command, env=self.env, text=True,
+                                    capture_output=True)
+            self.assertNotEqual(result.returncode, 0, command)
+            self.assertIn("symlink", result.stderr.lower(), command)
+
+    def test_direct_providers_honour_silent_verification(self):
+        tools = Path(self.temp.name, "silent-tools")
+        tools.mkdir()
+        marker = Path(self.temp.name, "provider-args")
+        for command in ("espeak-ng", "spd-say"):
+            tool = tools / command
+            tool.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" > \"$SILENT_MARKER\"\n"
+                "cat >/dev/null\n"
+            )
+            tool.chmod(0o755)
+        env = {**self.env, "PATH": f"{tools}:{self.env['PATH']}",
+               "TTS_PLUGIN_DIR": str(ROOT), "TTS_SILENT": "1",
+               "TTS_RATE": "1.0", "TTS_VOICE": "",
+               "SILENT_MARKER": str(marker)}
+
+        subprocess.run([ROOT / "providers" / "espeak-ng"], input="Test.",
+                       env=env, text=True, check=True, capture_output=True)
+        self.assertIn("--stdout --stdin", marker.read_text())
+        subprocess.run([ROOT / "providers" / "spd"], input="Test.",
+                       env=env, text=True, check=True, capture_output=True)
+        self.assertEqual(marker.read_text().strip(), "--list-output-modules")
+
+    def test_every_bundled_provider_has_a_silent_verification_path(self):
+        for provider in (ROOT / "providers").iterdir():
+            if not provider.is_file():
+                continue
+            source = provider.read_text()
+            self.assertTrue(
+                "TTS_SILENT" in source or "play_raw" in source or "play_file" in source,
+                f"{provider.name} bypasses the non-audible verification contract",
+            )
+
+    def test_elevenlabs_verify_initializes_voice_for_environment_keys(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True, exist_ok=True)
+        provider = providers / "elevenlabs"
+        provider.write_text(
+            "#!/usr/bin/env bash\n# kind: cloud\n"
+            "if [[ ${1:-} == --voices ]]; then\n"
+            "  printf '%s\\n' '[{\"value\":\"account-voice\",\"label\":\"Account voice\"}]'\n"
+            "  exit 0\n"
+            "fi\n"
+            "[[ ${TTS_VOICE:-} == account-voice ]] || exit 3\n"
+            "cat >/dev/null\n"
+        )
+        provider.chmod(0o755)
+        result = self.run_speak("--verify", "elevenlabs")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        self.assertEqual(json.loads(config.read_text())["elevenlabs"]["voiceId"],
+                         "account-voice")
+
+    def test_test_dock_uses_the_same_sanitizer_as_normal_speech(self):
+        controller = (ROOT / "components" / "TtsController.qml").read_text()
+        speak_line = next(line for line in controller.splitlines()
+                          if "function speak(text)" in line)
+        self.assertNotIn("--raw", speak_line)
 
     def test_setup_registers_worker_identity_before_reporting_started(self):
         tools = Path(self.temp.name, "setup-tools")
@@ -398,6 +617,16 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.status_of("worktest"), "ready")
 
+    def test_health_writer_recovers_a_truncated_cache_atomically(self):
+        health = self.home / "cache" / "omarchy-tts" / "health.json"
+        health.parent.mkdir(parents=True)
+        health.write_text('{"worktest":')
+        self.write_provider("worktest", "cat > /dev/null")
+        result = self.speak("--verify", "worktest")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(health.read_text())["worktest"]["status"], "ok")
+        self.assertEqual(health.stat().st_mode & 0o777, 0o600)
+
     def test_absent_provider_reports_missing_not_failing(self):
         # Absence and breakage are different problems with different fixes.
         self.write_provider("absenttest", "cat > /dev/null", probe="false")
@@ -433,6 +662,9 @@ class ProviderHealthTests(unittest.TestCase):
             if pid_file.exists():
                 break
             time.sleep(0.02)
+        status_file = self.home / "run" / "omarchy-tts" / "status"
+        self.assertEqual(pid_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(status_file.stat().st_mode & 0o777, 0o600)
         second = subprocess.Popen([SPEAK, "second"], text=True,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   env=self.env)
@@ -475,7 +707,8 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             "HTTP/2 200\r\nx-request-id: req_private_test\r\n"
             "x-ratelimit-limit-requests: 100\r\n"
             "x-ratelimit-remaining-requests: 99\r\n"
-            "x-ratelimit-reset-requests: 1s\r\ncharacter-cost: 7\r\n\r\n"
+            "x-ratelimit-reset-requests: 1s\r\nretry-after: 2s\r\n"
+            "character-cost: 7\r\n\r\n"
         )
         fake_curl = self.bin / "curl"
         fake_curl.write_text(
@@ -495,7 +728,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
             "[[ -z $dump ]] || cp \"$FAKE_RESPONSE_HEADERS\" \"$dump\"\n"
             "[[ ${FAKE_EMPTY_AUDIO:-0} == 1 ]] || printf fake-audio > \"$output\"\n"
-            "[[ -z $writeout ]] || printf 200\n"
+            "[[ -z $writeout ]] || printf '%s' \"${FAKE_HTTP_STATUS:-200}\"\n"
         )
         fake_curl.chmod(0o755)
         self.config = self.root / "config.json"
@@ -519,6 +752,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                    "TTS_PLUGIN_DIR": str(ROOT),
                    "TTS_CONFIG": str(self.config),
                    "TTS_SILENT": "1",
+                   "TTS_VOICE": "test-voice",
                    variable: secret}
             result = subprocess.run([ROOT / "providers" / provider], input=spoken,
                                     text=True, capture_output=True, env=env)
@@ -566,6 +800,32 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                                 text=True, capture_output=True, env=env)
         self.assertEqual(result.returncode, 74)
         self.assertIn("network request failed", result.stderr)
+
+    def test_paid_provider_limits_are_normalized_and_actionable(self):
+        metrics = self.root / "limits.json"
+        base = {**os.environ,
+                "PATH": f"{self.bin}:{os.environ['PATH']}",
+                "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+                "FAKE_CURL_HEADERS": str(self.headers),
+                "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+                "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+                "TTS_CONFIG": str(self.config), "TTS_SILENT": "1",
+                "TTS_METRICS_FILE": str(metrics),
+                "OPENAI_API_KEY": "safe-test-key"}
+        for status, returncode, error_code, message in (
+            ("429", 75, "rate_limit", "rate or concurrency limit"),
+            ("402", 69, "quota", "billing limit"),
+            ("401", 77, "auth", "API key was rejected"),
+        ):
+            result = subprocess.run(
+                [ROOT / "providers" / "openai"], input="hello", text=True,
+                capture_output=True, env={**base, "FAKE_HTTP_STATUS": status},
+            )
+            self.assertEqual(result.returncode, returncode, result.stderr)
+            self.assertIn(message, result.stderr)
+            telemetry = json.loads(metrics.read_text())
+            self.assertEqual(telemetry["lastRequest"]["errorCode"], error_code)
+            self.assertEqual(telemetry["lastRequest"]["retryAfter"], "2s")
 
     def test_empty_success_response_is_rejected(self):
         env = {**os.environ,

@@ -7,6 +7,7 @@ write and rolls back when Hyprland rejects the result.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,17 @@ import copy
 
 BEGIN = "-- >>> omarchy-tts bindings"
 END = "-- <<< omarchy-tts bindings"
-SPEAK = str(Path(__file__).resolve().parent / "speak")
+PLUGIN_ID = "io.github.hikari112.tts"
+
+
+def config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+
+# Managed bindings must name the logical plugin location, not whichever clone a
+# development symlink currently targets. That path survives both plugin updates
+# and intentional retargeting between production and development checkouts.
+SPEAK = str(config_home() / "omarchy" / "plugins" / PLUGIN_ID / "bin" / "speak")
 SPEAK_COMMAND = shlex.quote(SPEAK)
 DEFAULTS = {
     "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": f"{SPEAK_COMMAND} --toggle"},
@@ -34,8 +45,8 @@ DEFAULTS = {
 
 
 def paths() -> tuple[Path, Path]:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return config_home / "hypr" / "bindings.lua", config_home / "omarchy-tts" / "bindings.json"
+    home = config_home()
+    return home / "hypr" / "bindings.lua", home / "omarchy-tts" / "bindings.json"
 
 
 def load_config(path: Path) -> dict:
@@ -217,7 +228,13 @@ def write(target: Path, content: str) -> None:
     shutil.copy2(target, backup)
     mode = target.stat().st_mode & 0o777
     atomic_write_text(target, content, mode)
-    validate_or_restore(target, backup)
+    try:
+        validate_or_restore(target, backup)
+    finally:
+        backups = sorted(target.parent.glob(f"{target.name}.tts.bak.*"),
+                         key=lambda path: path.stat().st_mtime_ns, reverse=True)
+        for old in backups[3:]:
+            old.unlink(missing_ok=True)
 
 
 def save_config(path: Path, config: dict) -> None:
@@ -231,17 +248,7 @@ def save_config(path: Path, config: dict) -> None:
     atomic_write_text(path, json.dumps(choices, indent=2) + "\n", 0o600)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status")
-    sub.add_parser("install")
-    sub.add_parser("remove")
-    set_parser = sub.add_parser("set")
-    set_parser.add_argument("action", choices=DEFAULTS)
-    set_parser.add_argument("chord")
-    args = parser.parse_args()
-    target, config_path = paths()
+def execute(args: argparse.Namespace, target: Path, config_path: Path) -> int:
     config = load_config(config_path)
     full_text = target.read_text(errors="replace") if target.exists() else "-- Personal keybindings\n"
     without_block = replace_block(full_text, None)
@@ -282,6 +289,32 @@ def main() -> int:
     write(target, replace_block(original, block))
     print("removed" if block is None else "installed")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    sub.add_parser("install")
+    sub.add_parser("remove")
+    set_parser = sub.add_parser("set")
+    set_parser.add_argument("action", choices=DEFAULTS)
+    set_parser.add_argument("chord")
+    args = parser.parse_args()
+    target, config_path = paths()
+
+    # An install and a shortcut edit update two files as one logical action.
+    # Serialize CLI and panel callers so neither can derive its write from a
+    # stale snapshot of the other one's changes.
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(config_path.with_suffix(".lock"),
+                      os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return execute(args, target, config_path)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,9 @@ SETUP_LOCK = RUNTIME / "setup.lock"
 VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
 BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
 DEFAULT_VOICE = "en_US-amy-medium"
+PIPER_PACKAGE = "piper-tts==1.7.0"
+KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")
+KOKORO_PYTHON = "3.12"
 JOB_PID = 0
 JOB_IDENTITY = ""
 
@@ -43,8 +46,10 @@ SYSTEM_PACKAGES = {
 
 
 def ensure_private_runtime() -> None:
+    if RUNTIME.is_symlink():
+        raise RuntimeError(f"Unsafe runtime directory symlink: {RUNTIME}")
     RUNTIME.mkdir(parents=True, exist_ok=True)
-    if RUNTIME.stat().st_uid != os.getuid():
+    if RUNTIME.is_symlink() or RUNTIME.stat().st_uid != os.getuid():
         raise RuntimeError(f"Unsafe runtime directory: {RUNTIME}")
     RUNTIME.chmod(0o700)
 
@@ -132,14 +137,37 @@ def ensure_uv() -> str:
     return uv
 
 
+def ensure_venv(uv: str, target: Path, python_version: str | None = None) -> None:
+    """Create a managed venv, preserving an incompatible/partial predecessor."""
+    interpreter = target / "bin/python"
+    if interpreter.exists():
+        if python_version is None:
+            return
+        result = subprocess.run(
+            [interpreter, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            text=True, capture_output=True,
+        )
+        if result.returncode == 0 and result.stdout.strip() == python_version:
+            return
+
+    if target.exists() and any(target.iterdir()):
+        backup = target.with_name(f"{target.name}.previous.{time.time_ns()}")
+        target.replace(backup)
+    argv = [uv, "venv"]
+    if python_version is not None:
+        argv.extend(["--python", python_version])
+    argv.append(str(target))
+    run_checked(argv)
+
+
 def install_piper() -> None:
     uv = ensure_uv()
     target = ENGINE / "piper"
     write_state("running", "engine", 15, "Preparing the Piper speech engine")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not (target / "bin/python").exists():
-        run_checked([uv, "venv", str(target)])
-    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"), "piper-tts"])
+    ensure_venv(uv, target)
+    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"),
+                 PIPER_PACKAGE])
 
 
 def install_voice() -> None:
@@ -172,10 +200,12 @@ def install_kokoro() -> None:
     target = ENGINE / "kokoro"
     write_state("running", "engine", 20, "Installing the Kokoro speech engine")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not (target / "bin/python").exists():
-        run_checked([uv, "venv", str(target)])
+    # Kokoro 0.9.4 publishes Requires-Python <3.13. Omarchy can carry a newer
+    # system Python, so ask uv for a supported interpreter instead of letting
+    # installation depend on whichever version Arch happens to ship today.
+    ensure_venv(uv, target, KOKORO_PYTHON)
     python = str(target / "bin/python")
-    run_checked([uv, "pip", "install", "--python", python, "kokoro", "soundfile"])
+    run_checked([uv, "pip", "install", "--python", python, *KOKORO_PACKAGES])
     write_state("running", "engine", 60, "Installing the English language model")
     run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
 
@@ -376,7 +406,8 @@ def main() -> int:
     key_parser.add_argument("provider")
     remove_key_parser = sub.add_parser("key-remove")
     remove_key_parser.add_argument("provider")
-    sub.add_parser("cleanup")
+    cleanup_parser = sub.add_parser("cleanup")
+    cleanup_parser.add_argument("--yes", action="store_true")
     sub.add_parser("diagnostics")
     args = parser.parse_args()
     if args.command == "status": emit(**status())
@@ -388,7 +419,12 @@ def main() -> int:
     elif args.command == "cancel": cancel()
     elif args.command == "key-store": key_store(args.provider)
     elif args.command == "key-remove": key_remove(args.provider)
-    elif args.command == "cleanup": cleanup()
+    elif args.command == "cleanup":
+        if not args.yes:
+            emit(ok=False, code="confirmation_required",
+                 message="cleanup removes managed shortcuts and stored API keys; rerun with --yes")
+            return 2
+        cleanup()
     elif args.command == "diagnostics": diagnostics()
     return 0
 

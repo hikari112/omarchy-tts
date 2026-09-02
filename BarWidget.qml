@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
 import qs.Ui
 
@@ -51,21 +50,19 @@ BarWidget {
     }
   }
 
-  // Long-lived status stream: `speak --watch-status` prints only on change.
+  // One long-lived stream owns both pieces of live bar state and emits only on
+  // change. This avoids independent status/config pollers on every monitor.
   Process {
-    command: [root.speakBin, "--watch-status"]
+    command: [root.speakBin, "--watch-state"]
     running: true
     stdout: SplitParser {
-      onRead: function (line) { root.speaking = (line.trim() === "speaking") }
-    }
-  }
-
-  Process {
-    id: providerReader
-    command: [root.speakBin, "--watch-provider"]
-    running: true
-    stdout: SplitParser {
-      onRead: function (line) { if (line.trim() !== "") root.provider = line.trim() }
+      onRead: function (line) {
+        try {
+          var state = JSON.parse(line)
+          root.speaking = state.status === "speaking"
+          if (state.provider) root.provider = state.provider
+        } catch (e) {}
+      }
     }
   }
 

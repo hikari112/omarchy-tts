@@ -2,7 +2,7 @@
 # desc: local neural voice, fast and natural (default)
 # kind: local
 # probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (compgen -G "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}/*.onnx" >/dev/null || compgen -G "$HOME/.local/share/piper-voices/*.onnx" >/dev/null)
-# install: uv tool install piper-tts
+# install: managed venv · piper-tts==1.7.0
 # voices: downloadable
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"

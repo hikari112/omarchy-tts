@@ -1,8 +1,8 @@
 # Security policy
 
-Please report vulnerabilities privately through GitHub Security Advisories.
-Do not include API keys, selected text, clipboard contents, or screenshots in
-a report.
+Please [report vulnerabilities privately](https://github.com/hikari112/omarchy-tts/security/advisories/new)
+through GitHub Security Advisories. Do not include API keys, selected text,
+clipboard contents, or screenshots in a report.
 
 The project supports the latest release. Cloud-provider keys are stored in the
 desktop keyring. Diagnostic output intentionally excludes spoken and selected

@@ -18,6 +18,10 @@ OpenAI and ElevenLabs are optional voices, never silent dependencies. There is
 no narration mode, required account, subscription, browser extension, or text
 import workflow.
 
+<p align="center">
+  <img src="docs/screenshots/provider.png" alt="Omarchy TTS Provider tab showing local and optional cloud speech providers" width="620">
+</p>
+
 ## Why this exists
 
 Sometimes you do not want the entire desktop narrated. You want *this paragraph*,
@@ -51,16 +55,19 @@ guided, cancellable operations—no terminal setup or manual config editing.
 The base plugin uses `bash`, `wl-clipboard`, `jq`, `python3`, `flock`
 (util-linux), and PipeWire or ALSA. Screen-reading modes additionally use
 `tesseract`, `grim`, `slurp`, and optionally `hyprpicker`. Cloud providers use
-`curl`; secure key storage uses `secret-tool` (libsecret). These system tools
-ship with Omarchy or are installed from its configured Arch repositories.
+`curl`, as do voice-catalogue refreshes and downloads; secure key storage uses
+`secret-tool` (libsecret). These system tools ship with Omarchy or are installed
+from its configured Arch repositories.
 
 The guided local-engine setup is always explicit. It may request administrator
 approval through `pkexec` to install `uv`, `espeak-ng`, or
 `speech-dispatcher`, then uses `uv` to create an isolated environment under
-`~/.local/share/omarchy-tts/`. Piper installs the PyPI `piper-tts` package;
-Kokoro installs the PyPI `kokoro` and `soundfile` packages plus its language
-model. Voice models are downloaded only after confirmation and verified before
-installation. No installer runs merely because the plugin is added or enabled.
+`~/.local/share/omarchy-tts/`. The release pins its direct engine packages to
+known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses `kokoro==0.9.4` and
+`soundfile==0.14.0` in a supported Python 3.12 environment, plus its pinned
+language model. Voice models are downloaded only after confirmation and
+verified before installation. No installer runs merely because the plugin is
+added or enabled.
 
 ## Keys
 
@@ -72,9 +79,6 @@ installation. No installer runs merely because the plugin is added or enabled.
 | `SUPER+ALT+R` | **Drag a box, hear the text in it** (OCR) |
 | `SUPER+ALT+W` | Read the focused window — no pointer needed |
 | `SUPER+ALT+SHIFT+R` | Read the whole screen — no pointer needed |
-
-Bar widget: left-click opens settings; right-click speaks the selection or
-stops the current speech.
 
 ## CLI
 
@@ -97,7 +101,7 @@ speak --refresh-voices elevenlabs # refresh the account's private voice list
 
 ```bash
 speak-voice list                  # installed voices
-speak-voice available             # all 175, installed first
+speak-voice available             # 170+ voices, installed first
 speak-voice available --json      # same, for scripting
 speak-voice add en_GB-alba-medium # download (--async to background it)
 speak-voice use en_GB-alba-medium # make it the default
@@ -110,7 +114,7 @@ speak-voice browse                # listen to samples in a browser
 ## Settings panel
 
 Click the speaker in the bar. Right-click it to speak the selection without
-opening anything.
+opening anything, or to stop the current speech.
 
 Five tabs, and a Test dock that stays visible on all of them so you can hear
 a change straight after making it:
@@ -119,7 +123,7 @@ a change straight after making it:
   this machine. Cloud providers carry a standing note that text leaves the
   machine, and the Test dock says `runs locally` or names the vendor.
 - **Voice** — installed voice, speed, length limit, and **Browse all voices**:
-  every one of the 175 downloadable voices across 51 languages, showing which
+  over 170 downloadable voices across 50+ languages, showing which
   are installed, with size and a one-click download that reports progress and
   verifies the md5 before installing.
 - **Text** — live before/after sanitizer preview and readability rules.
@@ -132,6 +136,23 @@ Everything the panel shows
 comes from `speak --info`, and everything it changes goes through
 `speak --set`, so the panel is a front-end to the CLI rather than a second
 implementation of it.
+
+<details>
+<summary>See all five settings tabs</summary>
+
+| Provider | Voice |
+|---|---|
+| ![Provider status, privacy, models, and usage](docs/screenshots/provider.png) | ![Voice, speed, and length settings](docs/screenshots/voice.png) |
+
+| Text | Screen |
+|---|---|
+| ![Live sanitizer preview and text rules](docs/screenshots/text.png) | ![Local OCR confidence and language settings](docs/screenshots/screen.png) |
+
+| Keys |
+|---|
+| ![Managed on-demand reading shortcuts](docs/screenshots/keys.png) |
+
+</details>
 
 ## Reading the screen (OCR)
 
@@ -197,8 +218,13 @@ the same name.
 exec my-tts-engine --voice "${TTS_VOICE:-default}" --speed "${TTS_RATE:-1.0}"
 ```
 
-Environment given to providers: `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
-`TTS_CONFIG`.
+Speech providers receive `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
+`TTS_CONFIG`, `TTS_DATA_DIR`, `TTS_METRICS_FILE`, and `TTS_INPUT_CHARS`.
+Verification also sets `TTS_SILENT=1`: the provider must perform its strongest
+non-audible readiness check, produce no sound, and exit zero only on success.
+Providers that generate an audio stream can discard it; providers without a
+null output path should validate their live service connection without queuing
+speech.
 
 ### Cloud API keys
 
@@ -224,7 +250,7 @@ text, or provider response bodies.
 
 ## Remove
 
-Before removing the plugin, use **Keys → Remove TTS bindings** so no shortcuts
+Before removing the plugin, use **Keys → Remove shortcuts** so no shortcuts
 are left behind, and remove cloud keys from the Provider tab if desired. Then:
 
 ```bash
@@ -260,12 +286,23 @@ cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib
 ```bash
 python3 tests/test_sanitize.py
 python3 tests/test_cli.py
-python3 -m py_compile bin/speak-bindings bin/speak-setup
+python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
 shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 ```
 
-Because the repo is symlinked into `~/.config/omarchy/plugins/`, saving any
-file reloads the widget in the bar immediately.
+For hot reload during development, clone the repository and symlink that clone
+to Omarchy's stable plugin location:
+
+```bash
+git clone https://github.com/hikari112/omarchy-tts.git
+ln -s "$PWD/omarchy-tts" \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.hikari112.tts"
+```
+
+Saving a file in the clone then reloads the widget. The link command
+intentionally fails when that plugin path already exists; use a disposable
+profile or deliberately move an existing install aside before linking. Never
+overwrite an existing plugin directory blindly.
 
 ## License
 

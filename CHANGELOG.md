@@ -5,6 +5,27 @@ Versioning.
 
 ## Unreleased
 
+## 1.2.2 - 2026-09-02
+
+- Make provider verification silent for every bundled backend and document the
+  complete provider environment contract.
+- Select ElevenLabs voices from the user's account instead of shipping a stale
+  global voice identifier, while preserving existing user choices.
+- Keep managed shortcuts attached to the stable Omarchy plugin path when a
+  development symlink is retargeted, and retain only the newest three backups.
+- Harden runtime-directory, configured-provider, voice-id, and URL-path
+  boundaries against symlink and traversal mistakes.
+- Apply the configured sanitizer to settings-panel test speech and remove
+  redundant long-running status work.
+- Consolidate OpenAI voice metadata, reduce `--info` subprocess work, and make
+  OCR provider environments consistent across every capture source.
+- Require explicit confirmation before cleanup removes shortcuts and API keys.
+- Pin direct engine dependencies, keep Kokoro on its supported Python runtime,
+  recover truncated health state, serialize concurrent shortcut edits, and
+  preserve the voice catalogue when a forced refresh fails.
+- Refresh the README, contributor workflow, security guidance, screenshots,
+  and marketplace-facing release documentation.
+
 ## 1.2.1 - 2026-09-02
 
 - Add local OCR for image-only clipboard content while preferring text when
