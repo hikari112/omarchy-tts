@@ -61,6 +61,17 @@ jobs:
               || { echo "$f moduleName does not match manifest id ($id)"; exit 1; }
           done
 
+      - name: Bar widget exposes the Quattro panel lifecycle
+        run: |
+          for method in open close toggle closeForPopoutSwitch; do
+            grep -Eq "function ${method}\\(" BarWidget.qml \
+              || { echo "BarWidget.qml missing ${method}()"; exit 1; }
+          done
+          grep -q 'readonly property bool opened:' BarWidget.qml \
+            || { echo "BarWidget.qml missing opened state"; exit 1; }
+          grep -q 'readonly property bool popoutSwitchClosing:' BarWidget.qml \
+            || { echo "BarWidget.qml missing popout switch state"; exit 1; }
+
       - name: Providers are executable
         run: |
           for f in providers/* ocr/* bin/*; do

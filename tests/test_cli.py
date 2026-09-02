@@ -40,6 +40,15 @@ class CliConfigTests(unittest.TestCase):
         self.assertTrue(info["sanitizer"]["stripMarkdown"])
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
+    def test_help_does_not_require_or_create_writable_state(self):
+        blocked = Path(self.temp.name, "blocked")
+        blocked.write_text("not a directory")
+        env = {**self.env, "XDG_CONFIG_HOME": str(blocked),
+               "XDG_CACHE_HOME": str(blocked), "XDG_RUNTIME_DIR": str(blocked)}
+        result = subprocess.run([SPEAK, "--help"], env=env, check=True,
+                                text=True, capture_output=True)
+        self.assertIn("Usage: speak", result.stdout)
+
     def test_info_never_contacts_a_cloud_provider(self):
         marker = Path(self.temp.name, "curl-was-run")
         tools = Path(self.temp.name, "tools")
@@ -82,6 +91,14 @@ class CliConfigTests(unittest.TestCase):
                         "TTS_PLUGIN_DIR": str(ROOT),
                         "TTS_CONFIG": str(Path(self.temp.name, "missing.json")),
                         "TTS_METRICS_FILE": str(Path(self.temp.name, "missing-metrics.json"))}
+        empty_path = Path(self.temp.name, "empty-path")
+        empty_path.mkdir()
+        provider_env["PATH"] = f"{empty_path}:/usr/bin:/bin"
+        # A fake failing curl proves these local metadata operations never
+        # attempt to invoke it; curl itself may exist in the base test image.
+        fake_curl = empty_path / "curl"
+        fake_curl.write_text("#!/usr/bin/env bash\nexit 99\n")
+        fake_curl.chmod(0o755)
         voices = subprocess.run([ROOT / "providers" / "openai", "--voices"],
                                 env=provider_env, check=True, text=True,
                                 capture_output=True)
@@ -145,6 +162,7 @@ class CliConfigTests(unittest.TestCase):
         preserved = list(config.parent.glob("config.json.invalid.*"))
         self.assertEqual(len(preserved), 1)
         self.assertEqual(preserved[0].read_text(), '{"provider":')
+        self.assertEqual(preserved[0].stat().st_mode & 0o777, 0o600)
 
     def test_command_line_overrides_are_validated(self):
         for args in (("--rate", "fast", "hello"),
@@ -291,6 +309,35 @@ class CliConfigTests(unittest.TestCase):
             result = subprocess.run([SETUP, "key-store", provider], input=value + "\n",
                                     env=self.env, check=True, capture_output=True, text=True)
             self.assertEqual(json.loads(result.stdout)["code"], code)
+
+    def test_setup_registers_worker_identity_before_reporting_started(self):
+        tools = Path(self.temp.name, "setup-tools")
+        tools.mkdir()
+        for name, body in {
+            "pkexec": "exit 0",
+            "pacman": "exit 0",
+            "espeak-ng": "cat >/dev/null",
+        }.items():
+            tool = tools / name
+            tool.write_text(f"#!/usr/bin/env bash\n{body}\n")
+            tool.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+
+        started = subprocess.run([SETUP, "start", "espeak-ng"], env=self.env,
+                                 check=True, capture_output=True, text=True)
+        payload = json.loads(started.stdout)
+        self.assertTrue(payload["ok"])
+        state = Path(self.temp.name, "omarchy-tts", "setup.json")
+        registered = json.loads(state.read_text())
+        self.assertEqual(registered["pid"], payload["pid"])
+        self.assertTrue(registered["processIdentity"])
+
+        for _ in range(100):
+            current = json.loads(state.read_text())
+            if current["status"] in {"done", "error"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(current["status"], "done", current)
 
 
 class ProviderHealthTests(unittest.TestCase):

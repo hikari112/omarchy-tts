@@ -22,6 +22,7 @@ tts_config_init_unlocked() {
     local invalid
     invalid="${CONFIG}.invalid.$(date +%Y%m%dT%H%M%S).$$"
     mv "$CONFIG" "$invalid" || return 1
+    chmod 600 "$invalid" || return 1
     printf 'speak: preserved invalid configuration as %s\n' "$invalid" >&2
   fi
   if [[ ! -s "$CONFIG" ]]; then

@@ -33,7 +33,7 @@ BarWidget {
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
-  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+  function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
   readonly property bool popoutSwitchClosing: panelLoader.item
     ? panelLoader.item.popoutSwitchClosing === true : false
   function closeForPopoutSwitch() {
@@ -97,7 +97,7 @@ BarWidget {
         // Quick action, so speaking never requires opening the panel first.
         root.run(["--toggle"])
       } else {
-        root.togglePanel()
+        root.toggle()
       }
     }
   }

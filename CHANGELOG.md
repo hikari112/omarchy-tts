@@ -11,6 +11,13 @@ Versioning.
   both clipboard representations are available.
 - Reframe the public documentation around truthful on-demand, local-first
   desktop reading and explicitly distinguish it from a structural screen reader.
+- Complete the Quattro bar-widget lifecycle contract and test it in CI.
+- Make CLI help and OpenAI's local metadata independent of writable state and
+  network tooling.
+- Close the setup-worker cancellation race by requiring a verified process
+  identity before reporting that installation started.
+- Propagate private telemetry write failures instead of reporting stale data as
+  a successful account refresh.
 - Make settings-state reads network-free and cloud voice refresh explicit.
 - Use ElevenLabs' current paginated v2 voice API, with bounded pagination and
   private, atomic account-voice caching.

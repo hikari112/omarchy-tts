@@ -23,13 +23,6 @@ SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 # shellcheck disable=SC1091
 source "$PLUGIN_DIR/lib/config.sh"
 
-mkdir -p "$STATE_DIR"
-[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
-  printf 'speak: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
-}
-chmod 700 "$STATE_DIR" || exit 1
-tts_config_init || { printf 'speak: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
-
 die() { printf 'speak: %s\n' "$*" >&2; exit 1; }
 
 cfg() { # cfg <json-path> <fallback>
@@ -443,6 +436,20 @@ Voice
 Config: ~/.config/omarchy-tts/config.json
 USAGE
 }
+
+# Help is documentation, not a stateful operation. It must remain available
+# even when the session runtime or configuration directory is read-only.
+if [[ $# -eq 1 && ( "$1" == "-h" || "$1" == "--help" ) ]]; then
+  usage
+  exit 0
+fi
+
+mkdir -p "$STATE_DIR"
+[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+  printf 'speak: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
+}
+chmod 700 "$STATE_DIR" || exit 1
+tts_config_init || { printf 'speak: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
 
 OCRMODE=0
 SOURCE=stdin PROVIDER="" VOICE="" RATE="" MAXCHARS="" RAWMODE=0 OCR_ENGINE=""

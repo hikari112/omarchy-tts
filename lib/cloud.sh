@@ -93,7 +93,9 @@ cloud_store_account() { # normalized-account-json-file
   tmp="$(mktemp "${TTS_METRICS_FILE}.XXXXXX")" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
   if jq --slurpfile account "$account" '.account=$account[0] | .updatedAt=(now|todateiso8601)' \
       "$TTS_METRICS_FILE" > "$tmp" 2>/dev/null; then
-    chmod 600 "$tmp" && mv "$tmp" "$TTS_METRICS_FILE"
+    if ! chmod 600 "$tmp" || ! mv "$tmp" "$TTS_METRICS_FILE"; then
+      rm -f "$tmp"; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1
+    fi
   else
     rm -f "$tmp"; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1
   fi

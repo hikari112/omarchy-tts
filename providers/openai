@@ -9,7 +9,6 @@ set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
 source "$TTS_PLUGIN_DIR/lib/cloud.sh"
-need curl "install with: omarchy pkg add curl"
 
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.openai.voice // "alloy"' "$TTS_CONFIG" 2>/dev/null)"
@@ -33,6 +32,7 @@ if [[ "${1:-}" == "--usage" ]]; then
 fi
 
 KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
+need curl "install with: omarchy pkg add curl"
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")" || exit 1
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai-headers.XXXXXX")" || exit 1
