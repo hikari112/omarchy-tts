@@ -40,6 +40,20 @@ MD_STRIKE = re.compile(r"~~(.+?)~~", re.S)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 HTML_TAG = re.compile(r"</?[a-zA-Z][^>]{0,200}>")
 
+# --- OCR reflow -----------------------------------------------------------
+
+# A line holding one stray character (UI chrome bleeding into the grab) or a
+# short run of punctuation. "a", "A", "I" are real words and must survive.
+ORPHAN_LINE = re.compile(
+    r"^(?:[^\w\s]{1,3}"                      # ")" or "--"
+    r"|[b-hj-zB-HJ-Z0-9][^\w\s]?"            # "8", "2)"
+    r"|[^\w\s]?[b-hj-zB-HJ-Z0-9])$"          # "(a"
+)
+
+# A stray character from a neighbouring column, separated from the real text
+# by a wide gutter: "2      differences, a frictionless..."
+COLUMN_BLEED = re.compile(r"^\s*[\w\)\]]{1,2}\s{4,}(?=\S)")
+
 # --- noisy tokens ---------------------------------------------------------
 
 URL = re.compile(r"\b(?:https?://|www\.)([^\s/)>\]]+)(\S*)", re.I)
@@ -53,6 +67,42 @@ LONGNUM = re.compile(r"\b\d{7,}\b")
 REPEAT_PUNCT = re.compile(r"([!?.,;:])\1{1,}")
 MULTISPACE = re.compile(r"[ \t ]+")
 BLANKLINES = re.compile(r"\n{2,}")
+
+
+def _reflow_ocr(text: str) -> str:
+    """Rejoin OCR's wrapped lines into paragraphs.
+
+    OCR line breaks are where the *column* ended, not where the sentence did.
+    Treating them as sentence boundaries makes the voice stop. every. few.
+    words. Only a blank line is a real break.
+    """
+    paras, cur = [], []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if cur:
+                paras.append(cur)
+                cur = []
+            continue
+        line = COLUMN_BLEED.sub("", line)
+        if not line or ORPHAN_LINE.match(line):
+            continue
+        cur.append(line)
+    if cur:
+        paras.append(cur)
+
+    joined = []
+    for para in paras:
+        buf = ""
+        for line in para:
+            if not buf:
+                buf = line
+            elif buf.endswith("-"):
+                buf = buf[:-1] + line          # word split across lines
+            else:
+                buf += " " + line
+        joined.append(buf)
+    return "\n\n".join(joined)
 
 
 def _strip_control(text: str) -> str:
@@ -112,8 +162,10 @@ def _handle_table_row(line: str) -> str:
     return ", ".join(cells) + "." if cells else ""
 
 
-def sanitize(text: str, announce_code=True, max_chars=0) -> str:
+def sanitize(text: str, announce_code=True, max_chars=0, ocr=False) -> str:
     text = _strip_control(text)
+    if ocr:
+        text = _reflow_ocr(text)
     text = PUA.sub(" ", text)
     text = BOX.sub(" ", text)
     text = EMOJI.sub(" ", text)
@@ -174,13 +226,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Make text speakable.")
     ap.add_argument("--max-chars", type=int, default=0,
                     help="truncate at a sentence boundary near N chars (0 = no limit)")
+    ap.add_argument("--ocr", action="store_true",
+                    help="input came from OCR: rejoin wrapped lines, drop stray characters")
     ap.add_argument("--no-announce-code", action="store_true",
                     help="drop code blocks silently instead of naming them")
     args = ap.parse_args()
 
     raw = sys.stdin.read()
     out = sanitize(raw, announce_code=not args.no_announce_code,
-                   max_chars=args.max_chars)
+                   max_chars=args.max_chars, ocr=args.ocr)
     if not out or not re.search(r"[A-Za-z0-9]", out):
         return 1
     sys.stdout.write(out)

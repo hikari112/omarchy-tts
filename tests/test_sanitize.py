@@ -125,6 +125,47 @@ class TestReadability(unittest.TestCase):
         self.assertGreater(len(sanitize(text)), 500)
 
 
+class TestOcrReflow(unittest.TestCase):
+    """OCR line breaks are where the column ended, not where the sentence did."""
+
+    def test_wrapped_lines_do_not_become_sentences(self):
+        raw = "However, for the massive population of users\nwith low vision or cognitive processing\ndifferences, this matters."
+        out = sanitize(raw, ocr=True)
+        self.assertIn("users with low vision", out)
+        self.assertNotIn("users. with", out)
+
+    def test_hyphenated_word_is_rejoined(self):
+        out = sanitize("a friction-\nless experience", ocr=True)
+        self.assertIn("frictionless", out)
+        self.assertNotIn("friction-", out)
+
+    def test_blank_line_is_a_real_break(self):
+        out = sanitize("First paragraph here\n\nSecond paragraph here", ocr=True)
+        self.assertIn("here. Second", out)
+
+    def test_orphan_characters_are_dropped(self):
+        out = sanitize("Real text here\n8\n2)\nMore real text", ocr=True)
+        self.assertNotIn(" 8", out)
+        self.assertNotIn("2)", out)
+        self.assertIn("Real text here", out)
+        self.assertIn("More real text", out)
+
+    def test_single_letter_words_survive(self):
+        # "a" and "I" are words; "b" alone on a line is chrome.
+        out = sanitize("I\na\nb\nreal line", ocr=True)
+        self.assertIn("I", out)
+        self.assertIn("a", out)
+
+    def test_column_bleed_is_stripped(self):
+        out = sanitize("2      differences, a frictionless tool", ocr=True)
+        self.assertTrue(out.startswith("differences"), out)
+
+    def test_ocr_mode_is_opt_in(self):
+        # Without ocr=True, line breaks still mean sentence breaks (markdown).
+        out = sanitize("one\ntwo")
+        self.assertIn("one. two", out)
+
+
 class TestEmptyResults(unittest.TestCase):
     def test_whitespace_only_yields_nothing(self):
         self.assertEqual(sanitize("   \n\t  \n "), "")

@@ -22,12 +22,12 @@ jobs:
 
       - name: Shell syntax
         run: |
-          for f in bin/speak bin/speak-voice providers/*; do
+          for f in bin/speak bin/speak-voice providers/* ocr/*; do
             bash -n "$f" || exit 1
           done
 
       - name: ShellCheck
-        run: shellcheck -x bin/speak bin/speak-voice providers/*
+        run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/*
 
       - name: Manifest is valid
         run: |
@@ -47,12 +47,12 @@ jobs:
 
       - name: Providers are executable
         run: |
-          for f in providers/* bin/*; do
+          for f in providers/* ocr/* bin/*; do
             test -x "$f" || { echo "not executable: $f"; exit 1; }
           done
 
-      - name: Providers declare a description
+      - name: Providers and OCR engines declare a description
         run: |
-          for f in providers/*; do
+          for f in providers/* ocr/*; do
             grep -q '^# desc: ' "$f" || { echo "missing '# desc:' line: $f"; exit 1; }
           done

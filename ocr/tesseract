@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# desc: local OCR, fast and deterministic (default)
+# Reads a PNG on stdin, writes recognised text on stdout.
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+need tesseract "install with: omarchy pkg add tesseract tesseract-data-eng"
+
+LANGS="${TTS_OCR_LANGS:-}"
+[[ -z "$LANGS" ]] && LANGS="$(jq -r '.ocr.langs // "eng"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$LANGS" || "$LANGS" == "null" ]] && LANGS="eng"
+
+MINCONF="$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)"
+[[ "$MINCONF" =~ ^[0-9]+$ ]] || MINCONF=60
+
+# --psm 6 treats the crop as one uniform block, which is what a dragged region
+# almost always is.
+COMMON=(--oem 1 --psm 6 -l "$LANGS" --dpi 300 -c preserve_interword_spaces=1)
+
+if [[ "$MINCONF" -eq 0 ]]; then
+  exec tesseract stdin stdout "${COMMON[@]}" 2>/dev/null
+fi
+
+# Word-level output carries a confidence score. Dropping low-confidence words
+# removes the letters tesseract "sees" in icons and borders. That matters more
+# here than in a normal OCR tool: someone relying on this to read a screen they
+# cannot check has no way to notice invented words, so silence beats noise.
+# Columns 3,4,5 are block/paragraph/line, 11 is confidence, 12 the word.
+tesseract stdin stdout "${COMMON[@]}" tsv 2>/dev/null |
+  awk -F'\t' -v min="$MINCONF" '
+    NR > 1 {
+      conf = $11 + 0; word = $12
+      if (word == "" || conf < min) next
+      par = $3 "-" $4; line = par "-" $5
+      if (started) {
+        if (line != prev_line) printf (par != prev_par) ? "\n\n" : "\n"
+        else printf " "
+      }
+      printf "%s", word
+      started = 1; prev_line = line; prev_par = par
+    }
+    END { if (started) printf "\n" }
+  '

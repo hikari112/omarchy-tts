@@ -58,6 +58,46 @@ cycle_provider() {
   printf '%s\n' "$next"
 }
 
+ocr_engine_path() {
+  local name="$1"
+  for d in "$USER_DIR/ocr" "$PLUGIN_DIR/ocr"; do
+    [[ -x "$d/$name" ]] && { printf '%s' "$d/$name"; return 0; }
+  done
+  return 1
+}
+
+# capture <snip|window|screen> -> PNG on stdout
+capture() {
+  local mode="$1" geom="" mon=""
+  case "$mode" in
+    snip)
+      command -v slurp >/dev/null 2>&1 || { echo "speak: slurp not installed" >&2; return 1; }
+      # Freeze the screen first, so the grab matches what was on screen when
+      # the region was drawn rather than whatever moved underneath.
+      local pid=""
+      if command -v hyprpicker >/dev/null 2>&1; then
+        hyprpicker -r -z >/dev/null 2>&1 &
+        pid=$!
+        sleep 0.1
+      fi
+      geom="$(slurp 2>/dev/null)"
+      [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+      [[ -z "$geom" ]] && return 2          # user cancelled: not an error
+      grim -g "$geom" - 2>/dev/null
+      ;;
+    window)
+      geom="$(hyprctl activewindow -j 2>/dev/null |
+        jq -r 'if .at then "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])" else empty end')"
+      [[ -z "$geom" ]] && { echo "speak: no active window" >&2; return 1; }
+      grim -g "$geom" - 2>/dev/null
+      ;;
+    screen)
+      mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused) | .name' | head -1)"
+      if [[ -n "$mon" ]]; then grim -o "$mon" - 2>/dev/null; else grim - 2>/dev/null; fi
+      ;;
+  esac
+}
+
 list_providers() {
   local seen=""
   for d in "$USER_DIR/providers" "$PLUGIN_DIR/providers"; do
@@ -102,6 +142,12 @@ Input (default: stdin)
   -c, --clipboard      speak the clipboard
       --raw            skip the sanitizer, speak text verbatim
 
+Read the screen (OCR)
+      --snip           drag a region and speak the text in it
+      --window         speak the focused window (no pointer needed)
+      --screen         speak the focused monitor (no pointer needed)
+      --ocr-engine N   override the OCR engine
+
 Control
   -S, --stop           stop speech in progress
   -T, --toggle         stop if speaking, otherwise speak the selection
@@ -122,13 +168,18 @@ Config: ~/.config/omarchy-tts/config.json
 USAGE
 }
 
-SOURCE=stdin PROVIDER="" VOICE="" RATE="" MAXCHARS="" RAWMODE=0
+OCRMODE=0
+SOURCE=stdin PROVIDER="" VOICE="" RATE="" MAXCHARS="" RAWMODE=0 OCR_ENGINE=""
 declare -a WORDS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--selection) SOURCE=selection ;;
     -c|--clipboard) SOURCE=clipboard ;;
+    --snip) SOURCE=snip ;;
+    --window) SOURCE=window ;;
+    --screen) SOURCE=screen ;;
+    --ocr-engine) OCR_ENGINE="${2:-}"; shift ;;
     --raw) RAWMODE=1 ;;
     -S|--stop) stop_speaking; exit 0 ;;
     -T|--toggle) if is_speaking; then stop_speaking; exit 0; fi; SOURCE=selection ;;
@@ -168,6 +219,23 @@ else
     selection) TEXT="$(wl-paste --primary --no-newline 2>/dev/null)" ;;
     clipboard) TEXT="$(wl-paste --no-newline 2>/dev/null)" ;;
     stdin)     [[ -t 0 ]] && { usage; exit 1; }; TEXT="$(cat)" ;;
+    snip|window|screen)
+      OCR_ENGINE="${OCR_ENGINE:-$(cfg .ocr.engine tesseract)}"
+      OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
+        die "no such OCR engine: $OCR_ENGINE"
+      export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG"
+      PNG="$(mktemp -t speak-XXXXXX.png)"
+      trap 'rm -f "$PNG"' EXIT
+      capture "$SOURCE" > "$PNG"; rc=$?
+      [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
+      [[ $rc -ne 0 || ! -s "$PNG" ]] && die "screen capture failed"
+      TEXT="$("$OCR_BIN" < "$PNG")"
+      OCRMODE=1
+      if [[ -z "${TEXT//[[:space:]]/}" ]]; then
+        notify-send -a "Speak" "No text found" "OCR found nothing in that region." 2>/dev/null
+        exit 0
+      fi
+      ;;
   esac
 fi
 
@@ -180,7 +248,9 @@ fi
 # --- sanitize -------------------------------------------------------------
 if [[ $RAWMODE -eq 0 ]]; then
   MAXCHARS="${MAXCHARS:-$(cfg .maxChars 0)}"
-  SPOKEN="$(printf '%s' "$TEXT" | python3 "$SANITIZER" --max-chars "$MAXCHARS")" || {
+  SAN_ARGS=(--max-chars "$MAXCHARS")
+  [[ $OCRMODE -eq 1 ]] && SAN_ARGS+=(--ocr)
+  SPOKEN="$(printf '%s' "$TEXT" | python3 "$SANITIZER" "${SAN_ARGS[@]}")" || {
     notify-send -a "Speak" "Nothing speakable" "Selection was all markup or code." 2>/dev/null
     exit 0
   }
