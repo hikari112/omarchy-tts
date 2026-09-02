@@ -12,6 +12,10 @@ rather than AT-SPI, which Hyprland does not implement.
 ```bash
 omarchy plugin add https://github.com/hikari112/omarchy-tts
 omarchy plugin enable io.github.hikari112.tts right
+mkdir -p ~/.local/bin
+ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak ~/.local/bin/speak
+ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak-voice ~/.local/bin/speak-voice
+ln -sfn ~/.config/omarchy/plugins/io.github.hikari112.tts/bin/speak-bindings ~/.local/bin/speak-bindings
 ```
 
 Then install the speech engine and a voice (no root needed):
@@ -83,7 +87,7 @@ speak-voice browse                # listen to samples in a browser
 Click the speaker in the bar. Right-click it to speak the selection without
 opening anything.
 
-Three tabs, and a Test dock that stays visible on all of them so you can hear
+Five tabs, and a Test dock that stays visible on all of them so you can hear
 a change straight after making it:
 
 - **Provider** — all six at once, each showing whether it actually works on
@@ -93,9 +97,13 @@ a change straight after making it:
   every one of the 175 downloadable voices across 51 languages, showing which
   are installed, with size and a one-click download that reports progress and
   verifies the md5 before installing.
-- **Screen** — OCR confidence floor.
+- **Text** — live before/after sanitizer preview and readability rules.
+- **Screen** — OCR confidence floor and language selection.
+- **Keys** — capture, install, update, or remove the plugin-owned shortcuts.
 
-Settings write on change; there is no Save button. Everything the panel shows
+Settings write on change; there is no Save button. Configuration is created
+on first use, migrated additively, written atomically, and kept mode 0600.
+Everything the panel shows
 comes from `speak --info`, and everything it changes goes through
 `speak --set`, so the panel is a front-end to the CLI rather than a second
 implementation of it.
@@ -189,8 +197,9 @@ cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib
 ## Development
 
 ```bash
-python3 tests/test_sanitize.py      # 23 sanitizer tests
-shellcheck -x bin/* providers/*     # lint
+python3 tests/test_sanitize.py
+python3 tests/test_cli.py
+shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 ```
 
 Because the repo is symlinked into `~/.config/omarchy/plugins/`, saving any
