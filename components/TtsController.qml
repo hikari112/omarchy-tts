@@ -20,6 +20,7 @@ Item {
   property string preview: ""
   property string error: ""
   property string verifying: ""
+  property string refreshingUsage: ""
   property string pendingKey: ""
   property bool keySaving: false
   property bool speaking: false
@@ -53,16 +54,40 @@ Item {
     if (!setupJobProc.running) setupJobProc.running = true
   }
   function loadCatalogue() { restart(catalogueProc) }
-  function action(argv) { error = ""; actionProc.running = false; actionProc.command = argv; actionProc.running = true }
+  function action(argv) {
+    if (actionProc.running) {
+      error = "Another TTS action is still finishing. Please try again."
+      return false
+    }
+    error = ""
+    actionProc.command = argv
+    actionProc.running = true
+    return true
+  }
   // Writing a setting cannot change keybindings or install state, so only the
   // settings themselves are re-read. Three processes per slider release was
   // most of what made the race easy to hit.
+  property var configQueue: []
+  function runNextConfig() {
+    if (configProc.running || configQueue.length === 0) return
+    var queue = configQueue.slice()
+    var next = queue.shift()
+    configQueue = queue
+    configProc.command = [speakBin, "--set", next.path, next.value]
+    configProc.running = true
+  }
   function setConfig(path, value) {
     error = ""
     writeEpoch++
-    configProc.running = false
-    configProc.command = [speakBin, "--set", path, String(value)]
-    configProc.running = true
+    var queue = configQueue.slice()
+    // Slider drags can enqueue the same property repeatedly. Keep the newest
+    // pending value while preserving writes to unrelated settings.
+    for (var i = queue.length - 1; i >= 0; --i) {
+      if (queue[i].path === path) { queue.splice(i, 1); break }
+    }
+    queue.push({ path: path, value: String(value) })
+    configQueue = queue
+    runNextConfig()
   }
   function speak(text) { speechProc.command = [speakBin, "--raw", "--", text]; restart(speechProc) }
   function stop() { speechProc.command = [speakBin, "--stop"]; restart(speechProc) }
@@ -70,9 +95,10 @@ Item {
   // Proving a backend takes seconds and makes no sound; `verifying` lets the
   // panel say so rather than appearing to have ignored the click.
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
+  function refreshUsage(name) { refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
-  function downloadVoice(key) { action([voiceBin, "add", key, "--async"]); download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true }
-  function cancelDownload() { action([voiceBin, "cancel"]); downloadPoll.running = false }
+  function downloadVoice(key) { if (action([voiceBin, "add", key, "--async"])) { download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true } }
+  function cancelDownload() { action([voiceBin, "cancel"]) }
   function useVoice(key) { action([voiceBin, "use", key]) }
   function removeVoice(key) { action([voiceBin, "remove", key]) }
   function installBindings() { action([bindingsBin, "install"]) }
@@ -83,7 +109,7 @@ Item {
     var targets = ({ "piper": "piper", "kokoro": "kokoro", "espeak-ng": "espeak-ng", "spd": "spd" })
     if (targets[provider]) startSetup(targets[provider])
   }
-  function cancelSetup() { action([setupBin, "cancel"]); setupJobPoll.running = false }
+  function cancelSetup() { action([setupBin, "cancel"]) }
   function storeKey(provider, key) {
     if ((provider !== "openai" && provider !== "elevenlabs") || key.length < 8) return
     pendingKey = key; keySaving = true; keyResult = { ok: false, message: "" }
@@ -94,7 +120,10 @@ Item {
   Process {
     id: configProc; command: []
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
-    onRunningChanged: if (!running) root.refresh()
+    onRunningChanged: if (!running) {
+      if (root.configQueue.length > 0) Qt.callLater(root.runNextConfig)
+      else root.refresh()
+    }
   }
   Process {
     id: infoProc; command: [root.speakBin, "--info"]
@@ -125,6 +154,11 @@ Item {
     id: verifyProc; command: []
     stderr: StdioCollector { waitForEnd: true }
     onRunningChanged: if (!running) { root.verifying = ""; root.refresh() }
+  }
+  Process {
+    id: usageProc; command: []
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
+    onRunningChanged: if (!running) { root.refreshingUsage = ""; root.refresh() }
   }
   Process {
     id: actionProc; command: []

@@ -31,15 +31,39 @@ Panel {
   property string apiProvider: ""
   property string apiVendor: ""
   property bool setupSkipped: false
-  readonly property bool needsSetup: !controller.setup.ready && !setupSkipped
+  readonly property bool hasReadyProvider: {
+    var all = controller.info.providers || []
+    for (var i = 0; i < all.length; ++i) if (all[i].status === "ready") return true
+    return false
+  }
+  readonly property bool needsSetup: controller.infoLoaded && !controller.setup.ready
+                                     && !hasReadyProvider && !setupSkipped
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
   function keyName(event) {
     var key = event.text ? event.text.toUpperCase() : ""
     if (event.key === Qt.Key_BracketLeft) key = "BRACKETLEFT"
     else if (event.key === Qt.Key_BracketRight) key = "BRACKETRIGHT"
+    else if (event.key === Qt.Key_Comma) key = "COMMA"
+    else if (event.key === Qt.Key_Period) key = "PERIOD"
+    else if (event.key === Qt.Key_Slash) key = "SLASH"
+    else if (event.key === Qt.Key_Backslash) key = "BACKSLASH"
+    else if (event.key === Qt.Key_Semicolon) key = "SEMICOLON"
+    else if (event.key === Qt.Key_Apostrophe) key = "APOSTROPHE"
+    else if (event.key === Qt.Key_Minus) key = "MINUS"
+    else if (event.key === Qt.Key_Equal) key = "EQUAL"
+    else if (event.key === Qt.Key_QuoteLeft) key = "GRAVE"
     else if (event.key === Qt.Key_Space) key = "SPACE"
     else if (event.key === Qt.Key_Tab) key = "TAB"
+    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) key = "RETURN"
+    else if (event.key === Qt.Key_Backspace) key = "BACKSPACE"
+    else if (event.key === Qt.Key_Delete) key = "DELETE"
+    else if (event.key === Qt.Key_Left) key = "LEFT"
+    else if (event.key === Qt.Key_Right) key = "RIGHT"
+    else if (event.key === Qt.Key_Up) key = "UP"
+    else if (event.key === Qt.Key_Down) key = "DOWN"
+    else if (event.key >= Qt.Key_F1 && event.key <= Qt.Key_F35)
+      key = "F" + String(event.key - Qt.Key_F1 + 1)
     else if (event.key === Qt.Key_Escape) key = "ESCAPE"
     return key
   }
@@ -289,8 +313,9 @@ Panel {
               readonly property bool ready: modelData.status === "ready"
               readonly property bool failing: modelData.status === "failing"
               readonly property bool untested: modelData.status === "untested"
+              readonly property string cloudError: String((((modelData.usage || {}).lastRequest || {}).errorCode) || "")
               // Installed means "present", which is not the same as usable.
-              readonly property bool usable: ready || untested
+              readonly property bool usable: ready
               readonly property bool cloud: modelData.kind === "cloud"
               width: parent.width; height: providerCopy.implicitHeight + Style.space(12); radius: Style.space(6)
               color: selected ? root.tint(0.10) : "transparent"; border.width: selected ? 1 : 0; border.color: root.tint(0.45)
@@ -302,7 +327,7 @@ Panel {
                   Text { id: providerName; anchors.left: providerRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
                   Text { anchors.left: providerName.right; anchors.leftMargin: 6; anchors.baseline: providerName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                   Text { anchors.right: providerAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: { var d = parent.parent.parent
-                            if (d.failing) return "Not working"
+                            if (d.failing) return d.cloudError === "auth" ? "API key rejected" : "Not working"
                             if (d.untested) return "Untested"
                             if (d.ready) return d.cloud ? (d.modelData.keySource === "keyring" ? "● Key stored" : "● Key available") : "● Ready"
                             return d.modelData.status === "nokey" ? "No API key" : "Not installed" }
@@ -318,7 +343,7 @@ Panel {
                   Text {
                     id: providerAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring") || !parent.parent.parent.ready
                     text: { var d = parent.parent.parent
-                            if (d.cloud && d.ready) return "Remove key"
+                            if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
                             if (d.modelData.status === "nokey") return "Add key"
                             if (controller.verifying === d.modelData.name) return "Testing…"
                             if (d.failing || d.untested) return "Test"
@@ -326,11 +351,29 @@ Panel {
                     color: Color.accent
                     font.family: root.ff
                     font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else if (row.failing || row.untested) { controller.verifyProvider(row.modelData.name) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.modelData.keySource === "keyring") root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else if (row.failing || row.untested) { controller.verifyProvider(row.modelData.name) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
                   }
                 }
-                Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · paid"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: "Installed, but it produced no audio when tested. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · " + (parent.parent.modelData.model || "paid API"); color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Item {
+                  width: parent.width; height: cloudUsage.implicitHeight; visible: parent.parent.cloud && parent.parent.modelData.status !== "nokey"
+                  Text {
+                    id: cloudUsage; anchors.left: parent.left; anchors.right: refreshUsage.left; anchors.rightMargin: 8
+                    elide: Text.ElideRight; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                    text: { var u = parent.parent.parent.modelData.usage || {}; var a = u.account || {}; var l = u.localObserved || {}; var r = (u.rateLimits || {}).requests || {}; var last = u.lastRequest || {}
+                            if (last.outcome === "error") return (last.errorCode === "concurrency_limit" ? "Concurrency limit reached" : last.errorCode === "rate_limit" ? "Rate limit reached" : last.errorCode === "quota" ? "Credits or billing limit reached" : "Last request failed") + (last.retryAfter ? " · retry after " + last.retryAfter : "")
+                            if (a.limit !== undefined) return (a.tier || "Plan") + " · " + a.used + " / " + a.limit + " characters" + (a.resetAt ? " · resets " + new Date(a.resetAt * 1000).toLocaleDateString() : "")
+                            if (r.remaining !== undefined) return r.remaining + " / " + r.limit + " requests remain · resets " + r.reset
+                            if (l.requests) return l.requests + " local requests · " + l.characters + " characters observed"
+                            return "Usage appears after the first request" }
+                  }
+                  Text {
+                    id: refreshUsage; anchors.right: parent.right; text: parent.parent.parent.modelData.name === "elevenlabs" ? (controller.refreshingUsage === parent.parent.parent.modelData.name ? "Refreshing…" : "Refresh usage") : "Updates after speech"
+                    color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.name === "elevenlabs" && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
+                  }
+                }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? "The API key was rejected. Remove it and add a valid key, then test again." : "Installed, but it produced no audio when tested. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Text { visible: parent.parent.modelData.name === "kokoro" && !parent.parent.failing; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               }
               MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectProvider(parent.modelData.name) }

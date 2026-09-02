@@ -11,7 +11,9 @@ newer OCR work. The panel now has Provider, Voice, Text, Screen and Keys tabs.
 - provider executables declare small metadata headers consumed by `--info`.
 - `bin/speak-voice` owns Piper catalogue/download lifecycle.
 - `bin/speak-bindings` owns only the text between its markers in
-  `~/.config/hypr/bindings.lua`; it backs up and validates every write.
+  `~/.config/hypr/bindings.lua`; it backs up and validates every write. Its
+  private JSON stores only chord choices—labels, commands, and installation
+  paths are always derived from the current plugin.
 - `components/TtsController.qml` is the async bridge from QML to those CLIs.
 - `Panel.qml` owns presentation and transient interaction state.
 
@@ -23,8 +25,14 @@ the key never returns to QML or appears in a process argument.
 ## Configuration
 
 `config.json` schema version 2 is additive and backwards compatible. Startup
-fills missing defaults without replacing existing values. Writes are limited
-to an allowlist and use an atomic rename with mode 0600.
+fills missing defaults without replacing existing values. Invalid JSON is
+preserved with an `.invalid.<timestamp>` suffix before defaults are restored.
+Writes are limited to an allowlist and use an atomic rename with mode 0600.
+
+Runtime state is stored in a private, user-owned directory. Speech and
+background jobs record both process ownership and identity; callers must only
+clear state they still own. QML settings writes are serialized, with redundant
+pending writes to the same property coalesced.
 
 ## Deliberate design changes
 

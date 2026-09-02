@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,8 @@ class CliConfigTests(unittest.TestCase):
         self.env = {**os.environ, "XDG_CONFIG_HOME": self.temp.name,
                     "XDG_RUNTIME_DIR": self.temp.name}
         self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        self.env.pop("OPENAI_API_KEY", None)
+        self.env.pop("ELEVENLABS_API_KEY", None)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -34,11 +37,53 @@ class CliConfigTests(unittest.TestCase):
         self.assertTrue(info["sanitizer"]["stripMarkdown"])
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
+    def test_invalid_config_is_preserved_before_recovery(self):
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        config.parent.mkdir(parents=True)
+        config.write_text('{"provider":')
+        result = self.run_speak("--info")
+        self.assertEqual(json.loads(result.stdout)["provider"], "piper")
+        preserved = list(config.parent.glob("config.json.invalid.*"))
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual(preserved[0].read_text(), '{"provider":')
+
+    def test_command_line_overrides_are_validated(self):
+        for args in (("--rate", "fast", "hello"),
+                     ("--rate", "3", "hello"),
+                     ("--max-chars", "-1", "hello"),
+                     ("--provider", "../bad", "hello")):
+            self.assertNotEqual(self.run_speak(*args, check=False).returncode, 0)
+
+    def test_concurrent_config_updates_do_not_overwrite_each_other(self):
+        self.run_speak("--info")
+        for _ in range(5):
+            first = subprocess.Popen([SPEAK, "--set", ".rate", "1.25"],
+                                     env=self.env, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            second = subprocess.Popen([SPEAK, "--set", ".maxChars", "321"],
+                                      env=self.env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+            self.assertEqual(first.wait(timeout=3), 0)
+            self.assertEqual(second.wait(timeout=3), 0)
+            info = json.loads(self.run_speak("--info").stdout)
+            self.assertEqual((info["rate"], info["maxChars"]), (1.25, 321))
+
     def test_set_accepts_known_path_and_rejects_unknown_path(self):
         self.run_speak("--set", ".rate", "1.25")
         self.assertEqual(json.loads(self.run_speak("--info").stdout)["rate"], 1.25)
         result = self.run_speak("--set", ".apiKeys.openai", "secret", check=False)
         self.assertNotEqual(result.returncode, 0)
+
+    def test_plaintext_config_api_keys_are_not_accepted(self):
+        self.run_speak("--info")
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        data = json.loads(config.read_text())
+        data["apiKeys"] = {"openai": "plaintext-must-not-be-used"}
+        config.write_text(json.dumps(data))
+        info = json.loads(self.run_speak("--info").stdout)
+        openai = next(item for item in info["providers"] if item["name"] == "openai")
+        self.assertEqual(openai["keySource"], "none")
+        self.assertEqual(openai["status"], "nokey")
 
     def test_preview_uses_persisted_sanitizer_options(self):
         self.run_speak("--set", ".sanitizer.urls", "link")
@@ -60,6 +105,12 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(target.read_text().strip(),
                          'o.bind("SUPER + B", "Browser", "browser")')
 
+    def test_binding_remove_is_idempotent_and_does_not_create_a_file(self):
+        target = Path(self.temp.name, "hypr", "bindings.lua")
+        subprocess.run([BINDINGS, "remove"], env=self.env, check=True,
+                       capture_output=True, text=True)
+        self.assertFalse(target.exists())
+
     def test_binding_manager_adopts_legacy_documented_bindings(self):
         hypr = Path(self.temp.name, "hypr")
         hypr.mkdir()
@@ -73,6 +124,49 @@ class CliConfigTests(unittest.TestCase):
         installed = target.read_text()
         self.assertEqual(installed.count("Speak selection"), 1)
         self.assertIn("-- >>> omarchy-tts bindings", installed)
+
+    def test_binding_manager_rejects_non_chord_input(self):
+        for chord in ('SUPER + E\n")\nos.execute("bad")',
+                      "SUPER + A + B", "SUPER + SUPER + E", "SUPER"):
+            result = subprocess.run(
+                [BINDINGS, "set", "selection", chord],
+                env=self.env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_binding_config_persists_choices_not_derived_commands(self):
+        config = Path(self.temp.name, "omarchy-tts", "bindings.json")
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({
+            "selection": {"chord": "SUPER + ALT + Q",
+                          "label": "stale", "command": "/old/plugin/speak --toggle"}
+        }))
+        status = subprocess.run([BINDINGS, "status"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        binding = json.loads(status.stdout)["bindings"]["selection"]
+        self.assertEqual(binding["chord"], "SUPER + ALT + Q")
+        self.assertNotEqual(binding["command"], "/old/plugin/speak --toggle")
+        subprocess.run([BINDINGS, "set", "selection", "SUPER + ALT + Z"],
+                       env=self.env, check=True, capture_output=True, text=True)
+        stored = json.loads(config.read_text())
+        self.assertEqual(stored["selection"], {"chord": "SUPER + ALT + Z"})
+
+    def test_binding_manager_detects_active_default_conflicts(self):
+        tools = Path(self.temp.name, "tools")
+        tools.mkdir()
+        hyprctl = tools / "hyprctl"
+        hyprctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ $1 == binds ]]; then\n"
+            "  printf '%s\\n' '[{\"modmask\":72,\"key\":\"E\",\"dispatcher\":\"exec\",\"arg\":\"editor\"}]'\n"
+            "else exit 0; fi\n"
+        )
+        hyprctl.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+        self.env["HYPRLAND_INSTANCE_SIGNATURE"] = "test"
+        status = subprocess.run([BINDINGS, "status"], env=self.env,
+                                capture_output=True, text=True, check=True)
+        self.assertIn("SUPER + ALT + E", json.loads(status.stdout)["conflicts"])
 
     def test_setup_backend_status_and_allowlist(self):
         self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
@@ -164,6 +258,175 @@ class ProviderHealthTests(unittest.TestCase):
         self.speak("Hello there.")
         self.assertEqual(self.status_of("livetest"), "failing",
                          "a real failure should mark the provider without a separate test")
+
+    def test_temporary_provider_limit_does_not_poison_health(self):
+        for name, code in (("quotatest", 69), ("networktest", 74), ("ratetest", 75)):
+            self.write_provider(name, f"exit {code}")
+            self.speak("--set", ".provider", name)
+            self.speak("Hello there.")
+            self.assertEqual(self.status_of(name), "untested")
+
+    def test_superseded_speech_cannot_erase_the_new_owner(self):
+        self.write_provider(
+            "slowtest",
+            "trap 'exit 143' TERM INT\ncat > /dev/null\nsleep 30",
+        )
+        self.speak("--set", ".provider", "slowtest")
+        first = subprocess.Popen([SPEAK, "first"], text=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 env=self.env)
+        pid_file = self.home / "run" / "omarchy-tts" / "pgid"
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            time.sleep(0.02)
+        second = subprocess.Popen([SPEAK, "second"], text=True,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  env=self.env)
+        for _ in range(100):
+            if pid_file.exists() and first.poll() is not None:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.speak("--status").stdout.strip(), "speaking")
+        self.assertTrue(pid_file.exists())
+        self.speak("--stop")
+        first.wait(timeout=3)
+        second.wait(timeout=3)
+
+    def test_stale_speech_identity_cannot_signal_a_reused_pid(self):
+        sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            state = self.home / "run" / "omarchy-tts"
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "pgid").write_text(f"{sleeper.pid} definitely-wrong\n")
+            (state / "status").write_text("speaking\n")
+            self.assertEqual(self.speak("--status").stdout.strip(), "idle")
+            self.speak("--stop")
+            self.assertIsNone(sleeper.poll())
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=3)
+
+
+class CloudProviderPrivacyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.args = self.root / "curl-args"
+        self.body = self.root / "curl-body"
+        self.headers = self.root / "curl-headers"
+        self.response_headers = self.root / "response-headers"
+        self.response_headers.write_text(
+            "HTTP/2 200\r\nx-request-id: req_private_test\r\n"
+            "x-ratelimit-limit-requests: 100\r\n"
+            "x-ratelimit-remaining-requests: 99\r\n"
+            "x-ratelimit-reset-requests: 1s\r\ncharacter-cost: 7\r\n\r\n"
+        )
+        fake_curl = self.bin / "curl"
+        fake_curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
+            "[[ ${FAKE_CURL_EXIT:-0} == 0 ]] || exit \"$FAKE_CURL_EXIT\"\n"
+            "output=\n"
+            "dump=\n"
+            "writeout=\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == --output ]]; then output=$2; shift; fi\n"
+            "  if [[ $1 == --dump-header ]]; then dump=$2; shift; fi\n"
+            "  if [[ $1 == --write-out ]]; then writeout=$2; shift; fi\n"
+            "  shift\n"
+            "done\n"
+            "cat > \"$FAKE_CURL_BODY\"\n"
+            "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
+            "[[ -z $dump ]] || cp \"$FAKE_RESPONSE_HEADERS\" \"$dump\"\n"
+            "[[ ${FAKE_EMPTY_AUDIO:-0} == 1 ]] || printf fake-audio > \"$output\"\n"
+            "[[ -z $writeout ]] || printf 200\n"
+        )
+        fake_curl.chmod(0o755)
+        self.config = self.root / "config.json"
+        self.config.write_text("{}")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_cloud_secrets_and_text_stay_out_of_curl_arguments(self):
+        secret = "secret-key-that-must-not-leak"
+        spoken = "private highlighted text that must not leak"
+        for provider, variable in (("openai", "OPENAI_API_KEY"),
+                                   ("elevenlabs", "ELEVENLABS_API_KEY")):
+            env = {**os.environ,
+                   "PATH": f"{self.bin}:{os.environ['PATH']}",
+                   "FAKE_CURL_ARGS": str(self.args),
+                   "FAKE_CURL_BODY": str(self.body),
+                   "FAKE_CURL_HEADERS": str(self.headers),
+                   "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+                   "XDG_RUNTIME_DIR": str(self.root),
+                   "TTS_PLUGIN_DIR": str(ROOT),
+                   "TTS_CONFIG": str(self.config),
+                   "TTS_SILENT": "1",
+                   variable: secret}
+            result = subprocess.run([ROOT / "providers" / provider], input=spoken,
+                                    text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = self.args.read_text()
+            self.assertNotIn(secret, arguments)
+            self.assertNotIn(spoken, arguments)
+            payload = json.loads(self.body.read_text())
+            self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
+            self.assertIn(secret, self.headers.read_text())
+
+    def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
+        metrics = self.root / "metrics.json"
+        metrics.write_text("not json")
+        spoken = "private words"
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "TTS_SILENT": "1",
+               "TTS_INPUT_CHARS": str(len(spoken)), "TTS_METRICS_FILE": str(metrics),
+               "OPENAI_API_KEY": "secret-key-that-must-not-leak"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input=spoken,
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(metrics.read_text())
+        self.assertEqual(data["localObserved"],
+                         {"requests": 1, "characters": len(spoken), "billedUnits": 0})
+        self.assertEqual(data["rateLimits"]["requests"]["remaining"], "99")
+        self.assertNotIn(spoken, metrics.read_text())
+        self.assertEqual(metrics.stat().st_mode & 0o777, 0o600)
+
+    def test_network_failure_is_reported_as_temporary(self):
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_CURL_EXIT": "28", "XDG_RUNTIME_DIR": str(self.root),
+               "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(self.config),
+               "TTS_SILENT": "1", "OPENAI_API_KEY": "safe-test-key"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input="hello",
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 74)
+        self.assertIn("network request failed", result.stderr)
+
+    def test_empty_success_response_is_rejected(self):
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_EMPTY_AUDIO": "1", "XDG_RUNTIME_DIR": str(self.root),
+               "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(self.config),
+               "TTS_SILENT": "1", "OPENAI_API_KEY": "safe-test-key"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input="hello",
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 74)
+        self.assertIn("returned no audio", result.stderr)
 
 
 class BindingAdoptionTests(unittest.TestCase):

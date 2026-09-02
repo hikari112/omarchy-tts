@@ -29,7 +29,7 @@ play_raw() {
 # play_file <path> — a container file (wav/mp3/etc).
 play_file() {
   local f="$1"
-  if [[ "${TTS_SILENT:-0}" == "1" ]]; then exec cat > /dev/null; fi
+  if [[ "${TTS_SILENT:-0}" == "1" ]]; then return 0; fi
   if command -v mpv >/dev/null 2>&1; then
     exec mpv --really-quiet --no-video --audio-display=no "$f"
   elif command -v ffplay >/dev/null 2>&1; then

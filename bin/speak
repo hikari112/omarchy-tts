@@ -12,9 +12,11 @@ USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts"
 CONFIG="$USER_DIR/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
+STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
+STATE_DIR="${STATE_DIR:-/tmp/omarchy-tts-$UID}"
 PID_FILE="$STATE_DIR/pgid"
 STATUS_FILE="$STATE_DIR/status"
+SPEECH_LOCK="$STATE_DIR/speech.lock"
 SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 
 # Resolved from the installed plugin directory.
@@ -22,6 +24,10 @@ SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 source "$PLUGIN_DIR/lib/config.sh"
 
 mkdir -p "$STATE_DIR"
+[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+  printf 'speak: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
+}
+chmod 700 "$STATE_DIR" || exit 1
 tts_config_init || { printf 'speak: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
 
 die() { printf 'speak: %s\n' "$*" >&2; exit 1; }
@@ -55,13 +61,7 @@ cycle_provider() {
   next="$(provider_names | awk -v c="$cur" '
     { a[NR]=$0 } END { for (i=1;i<=NR;i++) if (a[i]==c) { print a[i%NR+1]; exit } print a[1] }')"
   [[ -z "$next" ]] && return 1
-  local tmp; tmp="$(mktemp)"
-  if jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null; then
-    mv "$tmp" "$CONFIG"
-  else
-    rm -f "$tmp"
-    return 1
-  fi
+  tts_config_set .provider "$next" || return 1
   printf '%s\n' "$next"
 }
 
@@ -88,7 +88,10 @@ capture() {
         sleep 0.1
       fi
       geom="$(slurp 2>/dev/null)"
-      [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+      if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null || true
+      fi
       [[ -z "$geom" ]] && return 2          # user cancelled: not an error
       grim -g "$geom" - 2>/dev/null
       ;;
@@ -131,6 +134,12 @@ meta_of() { # meta_of <file> <field>
 # selected as default, and silently killed every keybinding. So installation
 # and proof are tracked separately, and only proof earns the word "ready".
 HEALTH="$CACHE_DIR/health.json"
+CLOUD_DIR="$CACHE_DIR/cloud"
+
+cloud_metrics_of() { # cloud_metrics_of <provider>
+  local file="$CLOUD_DIR/$1.json"
+  [[ -s "$file" ]] && jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}'
+}
 
 health_of() { # health_of <provider> -> ok | failed | untested
   [[ -s "$HEALTH" ]] || { printf 'untested'; return; }
@@ -140,14 +149,25 @@ health_of() { # health_of <provider> -> ok | failed | untested
 
 health_set() { # health_set <provider> <ok|failed> [note]
   mkdir -p "$CACHE_DIR"
+  local lock_fd
+  exec {lock_fd}>"${HEALTH}.lock"
+  flock "$lock_fd"
   [[ -s "$HEALTH" ]] || printf '{}' > "$HEALTH"
-  local tmp; tmp="$(mktemp)"
+  local tmp
+  if ! tmp="$(mktemp "${HEALTH}.XXXXXX")"; then
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    return 1
+  fi
   if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
         '.[$p] = {status:$s, note:$n, at:$t}' "$HEALTH" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp"
     mv "$tmp" "$HEALTH"
   else
     rm -f "$tmp"
   fi
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
 }
 
 provider_installed() { # 0 if the probe passes
@@ -181,13 +201,17 @@ verify_provider() { # verify_provider <name>
   provider_installed "$bin" || return 2
   local rc=0
   # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
-  timeout 90 env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
+  timeout --kill-after=5s 90s env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
       TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+      TTS_METRICS_FILE="$CLOUD_DIR/$name.json" TTS_INPUT_CHARS=5 \
       bash -c 'exec "$0"' "$bin" <<< "Test." >/dev/null 2>&1 || rc=$?
   if [[ $rc -eq 0 ]]; then
     health_set "$name" ok ""
     return 0
   fi
+  # A valid paid provider can be temporarily unavailable without becoming a
+  # broken installation. Keep its last proven health for quota/rate outages.
+  [[ $rc -eq 69 || $rc -eq 74 || $rc -eq 75 ]] && return 1
   health_set "$name" failed "exit $rc"
   return 1
 }
@@ -200,9 +224,15 @@ key_source() { # env | keyring | config | none
       secret-tool lookup service omarchy-tts key "$name" >/dev/null 2>&1; then
     printf keyring; return
   fi
-  jq -e --arg name "$name" '.apiKeys[$name] // empty' "$CONFIG" >/dev/null 2>&1 &&
-    { printf config; return; }
   printf none
+}
+
+provider_model() {
+  case "$1" in
+    openai) cfg .openai.model gpt-4o-mini-tts ;;
+    elevenlabs) cfg .elevenlabs.model eleven_turbo_v2_5 ;;
+    *) printf '' ;;
+  esac
 }
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
@@ -221,10 +251,14 @@ emit_info() {
              --arg install "$(meta_of "$b" install)" \
              --arg vendor "$(meta_of "$b" vendor)" \
              --arg voices "$(meta_of "$b" voices)" \
+             --arg maxChars "$(meta_of "$b" maxchars)" \
              --arg keySource "$(key_source "$n")" \
+             --arg model "$(provider_model "$n")" \
+             --argjson usage "$(cloud_metrics_of "$n")" \
              '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor,
-               keySource:$keySource,
+               keySource:$keySource, model:(if $model=="" then null else $model end), usage:$usage,
+               maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
@@ -236,7 +270,7 @@ emit_info() {
         sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
     openai)
       voice="$(cfg .openai.voice alloy)"; voice_path=.openai.voice
-      vs='["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]' ;;
+      vs='["alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse"]' ;;
     elevenlabs)
       voice="$(cfg .elevenlabs.voiceId 21m00Tcm4TlvDq8ikWAM)"; voice_path=.elevenlabs.voiceId
       vs="$(jq -nc --arg voice "$voice" '[$voice]')" ;;
@@ -281,10 +315,13 @@ emit_info() {
 
 set_config() { tts_config_set "$1" "$2"; }
 
-stop_speaking() {
-  local pgid=""
-  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
-  if [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null; then
+stop_speaking_unlocked() {
+  local pgid="" identity="" current_identity=""
+  [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
+  [[ "$pgid" =~ ^[0-9]+$ ]] &&
+    current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+  if [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
+      kill -0 -- "-$pgid" 2>/dev/null; then
     kill -TERM -- "-$pgid" 2>/dev/null
     sleep 0.15
     kill -KILL -- "-$pgid" 2>/dev/null
@@ -293,10 +330,22 @@ stop_speaking() {
   set_status idle
 }
 
+stop_speaking() {
+  local lock_fd
+  exec {lock_fd}>"$SPEECH_LOCK"
+  flock "$lock_fd"
+  stop_speaking_unlocked
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+}
+
 is_speaking() {
-  local pgid=""
-  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
-  [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null
+  local pgid="" identity="" current_identity=""
+  [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
+  [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
+  current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+  [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
+    kill -0 -- "-$pgid" 2>/dev/null
 }
 
 usage() {
@@ -331,6 +380,7 @@ Voice
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
       --info           print all state as JSON (used by the settings panel)
+      --usage NAME     refresh and print cloud account usage when supported
       --set P V        write a config value, e.g. --set .rate 1.2
       --preview        sanitize stdin and print the exact text that would be spoken
       --preview-text T sanitize one argument (used by the settings panel)
@@ -355,7 +405,11 @@ while [[ $# -gt 0 ]]; do
     --raw) RAWMODE=1 ;;
     -S|--stop) stop_speaking; exit 0 ;;
     -T|--toggle) if is_speaking; then stop_speaking; exit 0; fi; SOURCE=selection ;;
-    --status) cat "$STATUS_FILE" 2>/dev/null || echo idle; exit 0 ;;
+    --status)
+      if is_speaking; then cat "$STATUS_FILE" 2>/dev/null || echo speaking
+      else echo idle
+      fi
+      exit 0 ;;
     --watch-status)
       last=""
       while :; do
@@ -382,6 +436,14 @@ while [[ $# -gt 0 ]]; do
         notify-send -a "Speak" "Voice provider" "$new" 2>/dev/null
       printf '%s\n' "$new"; exit 0 ;;
     --info) emit_info; exit 0 ;;
+    --usage)
+      usage_name="${2:-$(cfg .provider piper)}"
+      [[ "$usage_name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
+      usage_bin="$(provider_path "$usage_name")" || die "no such provider: $usage_name"
+      [[ "$(meta_of "$usage_bin" kind)" == cloud ]] || die "$usage_name is not a cloud provider"
+      export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR"
+      export TTS_METRICS_FILE="$CLOUD_DIR/$usage_name.json"
+      "$usage_bin" --usage; exit $? ;;
     --set)
       [[ -n "${2:-}" && -n "${3:-}" ]] || die "--set needs a path and a value"
       [[ "$2" == ".provider" ]] && stop_speaking
@@ -415,6 +477,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+[[ -z "$RATE" ]] || awk -v value="$RATE" 'BEGIN { exit !(value >= 0.5 && value <= 2.0) }' ||
+  die "rate must be between 0.5 and 2.0"
+[[ -z "$MAXCHARS" || "$MAXCHARS" =~ ^[0-9]+$ ]] || die "max-chars must be a non-negative integer"
+[[ -z "$PROVIDER" || "$PROVIDER" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
+[[ -z "$VOICE" || "$VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] || die "invalid voice name"
+[[ -z "$OCR_ENGINE" || "$OCR_ENGINE" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid OCR engine name"
+
 # --- gather input ---------------------------------------------------------
 if [[ ${#WORDS[@]} -gt 0 ]]; then
   TEXT="${WORDS[*]}"
@@ -428,7 +497,7 @@ else
       OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
         die "no such OCR engine: $OCR_ENGINE"
       export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG"
-      PNG="$(mktemp -t speak-XXXXXX.png)"
+      PNG="$(mktemp -t speak-XXXXXX.png)" || die "could not create temporary capture"
       trap 'rm -f "$PNG"' EXIT
       capture "$SOURCE" > "$PNG"; rc=$?
       [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
@@ -471,6 +540,13 @@ export TTS_RATE="${RATE:-$(cfg .rate 1.0)}"
 export TTS_PLUGIN_DIR="$PLUGIN_DIR"
 export TTS_CONFIG="$CONFIG"
 export TTS_DATA_DIR="$DATA_DIR"
+export TTS_METRICS_FILE="$CLOUD_DIR/$PROVIDER.json"
+export TTS_INPUT_CHARS="${#SPOKEN}"
+
+provider_max="$(meta_of "$PROV_BIN" maxchars)"
+if [[ "$provider_max" =~ ^[0-9]+$ && ${#SPOKEN} -gt $provider_max ]]; then
+  die "$PROVIDER accepts at most $provider_max characters per request; shorten the selection or set a length limit"
+fi
 
 if [[ -z "$TTS_VOICE" ]]; then
   case "$PROVIDER" in
@@ -485,16 +561,35 @@ if [[ -z "$TTS_VOICE" ]]; then
 fi
 
 # --- speak ----------------------------------------------------------------
-stop_speaking   # never let two voices overlap
-
-set_status speaking
+exec {speech_lock_fd}>"$SPEECH_LOCK"
+flock "$speech_lock_fd"
+stop_speaking_unlocked   # never let two voices overlap
+if ! set_status speaking; then
+  flock -u "$speech_lock_fd"
+  exec {speech_lock_fd}>&-
+  die "could not write speech state"
+fi
 # $0 is deliberately single-quoted: it must expand in the inner shell, where
 # it becomes $PROV_BIN, not here.
 # shellcheck disable=SC2016
 setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
 child=$!
 pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
-printf '%s\n' "${pgid:-$child}" > "$PID_FILE"
+speech_pgid="${pgid:-$child}"
+speech_identity="$(awk '{print $22}' "/proc/$speech_pgid/stat" 2>/dev/null || true)"
+speech_owner=""
+if [[ -n "$speech_identity" ]]; then
+  speech_owner="$speech_pgid $speech_identity"
+  if ! printf '%s\n' "$speech_owner" > "$PID_FILE"; then
+    kill -KILL -- "-$speech_pgid" 2>/dev/null || true
+    flock -u "$speech_lock_fd"
+    exec {speech_lock_fd}>&-
+    wait "$child" 2>/dev/null || true
+    die "could not register speech process"
+  fi
+fi
+flock -u "$speech_lock_fd"
+exec {speech_lock_fd}>&-
 
 wait "$child"
 rc=$?
@@ -502,13 +597,30 @@ rc=$?
 # Real use is the best evidence there is. A cancellation is not a failure.
 if [[ $rc -eq 0 ]]; then
   health_set "$PROVIDER" ok ""
-elif [[ $rc -ne 143 && $rc -ne 137 ]]; then
+elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 74 && $rc -ne 69 ]]; then
   health_set "$PROVIDER" failed "exit $rc"
   notify-send -a "Speak" "$PROVIDER could not speak" \
     "Marked as failing. Pick another provider in the panel." 2>/dev/null
 fi
-rm -f "$PID_FILE"
-set_status idle
+case "$rc" in
+  69) notify-send -a "Speak" "$PROVIDER billing limit reached" \
+        "Provider health was preserved. Refresh cloud usage in the panel." 2>/dev/null ;;
+  74) notify-send -a "Speak" "$PROVIDER is temporarily unavailable" \
+        "Check the network or try again shortly. Provider health was preserved." 2>/dev/null ;;
+  75) notify-send -a "Speak" "$PROVIDER rate limit reached" \
+        "Wait for the limit to reset. Provider health was preserved." 2>/dev/null ;;
+esac
+# A superseding invocation owns these files now. Never erase its state when
+# this older provider finally notices that it was cancelled.
+exec {speech_lock_fd}>"$SPEECH_LOCK"
+flock "$speech_lock_fd"
+current_owner="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [[ "$current_owner" == "$speech_owner" ]]; then
+  rm -f "$PID_FILE"
+  set_status idle
+fi
+flock -u "$speech_lock_fd"
+exec {speech_lock_fd}>&-
 
 # 143/137 = we cancelled it on purpose, not a failure
 [[ $rc -eq 143 || $rc -eq 137 ]] && exit 0

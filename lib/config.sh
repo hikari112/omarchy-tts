@@ -2,9 +2,29 @@
 # Configuration helpers shared by the CLI tools.  All writers go through an
 # atomic replace so the QML panel can never observe half-written JSON.
 
-tts_config_init() {
+tts_with_config_lock() { # function [args...]
+  local lock_fd rc
   mkdir -p "$(dirname "$CONFIG")"
-  if [[ ! -s "$CONFIG" ]] || ! jq -e 'type == "object"' "$CONFIG" >/dev/null 2>&1; then
+  exec {lock_fd}>"${CONFIG}.lock" || return 1
+  flock "$lock_fd" || { exec {lock_fd}>&-; return 1; }
+  "$@"; rc=$?
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+  return "$rc"
+}
+
+tts_config_init() {
+  tts_with_config_lock tts_config_init_unlocked
+}
+
+tts_config_init_unlocked() {
+  if [[ -e "$CONFIG" ]] && ! jq -e 'type == "object"' "$CONFIG" >/dev/null 2>&1; then
+    local invalid
+    invalid="${CONFIG}.invalid.$(date +%Y%m%dT%H%M%S).$$"
+    mv "$CONFIG" "$invalid" || return 1
+    printf 'speak: preserved invalid configuration as %s\n' "$invalid" >&2
+  fi
+  if [[ ! -s "$CONFIG" ]]; then
     local tmp
     tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
     cat >"$tmp" <<'JSON'
@@ -65,6 +85,10 @@ JSON
 }
 
 tts_config_set() { # jq path, JSON-or-string value
+  tts_with_config_lock tts_config_set_unlocked "$@"
+}
+
+tts_config_set_unlocked() { # jq path, JSON-or-string value
   local path="$1" value="$2" tmp
   case "$path" in
     .provider|.rate|.maxChars|.piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|\

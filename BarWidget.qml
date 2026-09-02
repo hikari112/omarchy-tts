@@ -34,6 +34,11 @@ BarWidget {
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+  readonly property bool popoutSwitchClosing: panelLoader.item
+    ? panelLoader.item.popoutSwitchClosing === true : false
+  function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
 
   Loader {
     id: panelLoader
@@ -67,6 +72,8 @@ BarWidget {
   Process { id: runner; running: false; command: [] }
 
   function run(args) {
+    // Only the idempotent quick toggle uses this runner. Replacing an older
+    // invocation is intentional; the CLI owns the provider transition.
     runner.running = false
     runner.command = [root.speakBin].concat(args)
     runner.running = true
