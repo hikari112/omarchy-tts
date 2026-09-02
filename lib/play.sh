@@ -2,24 +2,15 @@
 # Shared playback helpers for TTS providers. Sourced, not executed.
 
 # play_raw <rate> <channels> — raw s16le PCM on stdin to the default sink.
-# The stream is passed through a short fade so it never begins or ends on a
-# large sample. A stream that stops mid-waveform is a step change, which is
-# what a click is; kokoro ends sentences near full scale. Set TTS_FADE=0 to
-# send the engine output through untouched.
 play_raw() {
   local rate="${1:-22050}" ch="${2:-1}"
   # Verification drives a provider end to end; it must not be audible.
   if [[ "${TTS_SILENT:-0}" == "1" ]]; then exec cat > /dev/null; fi
 
-  local fader=(cat)
-  if [[ "${TTS_FADE:-1}" != "0" && -r "${TTS_PLUGIN_DIR:-}/lib/fade.py" ]]; then
-    fader=(python3 "${TTS_PLUGIN_DIR}/lib/fade.py" --rate "$rate")
-  fi
-
   if command -v pw-cat >/dev/null 2>&1; then
-    "${fader[@]}" | pw-cat --playback --format=s16 --rate="$rate" --channels="$ch" --raw -
+    exec pw-cat --playback --format=s16 --rate="$rate" --channels="$ch" --raw -
   elif command -v aplay >/dev/null 2>&1; then
-    "${fader[@]}" | aplay -q -f S16_LE -r "$rate" -c "$ch" -
+    exec aplay -q -f S16_LE -r "$rate" -c "$ch" -
   else
     echo "speak: no raw audio player (need pipewire or alsa-utils)" >&2
     return 1
