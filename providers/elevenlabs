@@ -22,20 +22,50 @@ MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/n
 # already in the config, and shows it as the identifier it is.
 if [[ "${1:-}" == "--voices" ]]; then
   body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-voices.XXXXXX")" || exit 1
-  trap 'rm -f "$body"' EXIT
-  curl_rc=0
-  status="$(curl -sS --connect-timeout 15 --max-time 30 \
-    https://api.elevenlabs.io/v1/voices -H @/dev/fd/3 \
-    --output "$body" --write-out '%{http_code}' \
-    3<<< "xi-api-key: $KEY")" || curl_rc=$?
-  [[ $curl_rc -eq 0 && "$status" =~ ^2[0-9][0-9]$ ]] || {
-    printf 'ElevenLabs: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
+  aggregate="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-all-voices.XXXXXX")" || {
+    rm -f "$body"; exit 1; }
+  next="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-next-voices.XXXXXX")" || {
+    rm -f "$body" "$aggregate"; exit 1; }
+  trap 'rm -f "$body" "$aggregate" "$next"' EXIT
+  printf '[]\n' > "$aggregate"
+  token=""; previous_token=""; pages=0
+  while :; do
+    curl_rc=0
+    if [[ -z "$token" ]]; then
+      status="$(curl -sS --connect-timeout 15 --max-time 30 \
+        'https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=false' \
+        -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
+        3<<< "xi-api-key: $KEY")" || curl_rc=$?
+    else
+      status="$(curl -sS --connect-timeout 15 --max-time 30 --get \
+        'https://api.elevenlabs.io/v2/voices' --data-urlencode page_size=100 \
+        --data-urlencode include_total_count=false --data-urlencode "next_page_token=$token" \
+        -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
+        3<<< "xi-api-key: $KEY")" || curl_rc=$?
+    fi
+    [[ $curl_rc -eq 0 && "$status" =~ ^2[0-9][0-9]$ ]] || {
+      printf 'ElevenLabs: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
+    jq -e '.voices|type=="array"' "$body" >/dev/null 2>&1 || {
+      printf 'ElevenLabs: invalid voice-list response\n' >&2; exit 74; }
+    # Merge through files, not --argjson. Large accounts can have thousands
+    # of voices; putting the accumulated metadata on jq's command line both
+    # exposes it in the process table and eventually exceeds ARG_MAX.
+    jq -s '.[0] + .[1].voices' "$aggregate" "$body" > "$next" || exit 1
+    mv "$next" "$aggregate" || exit 1
+    next="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-next-voices.XXXXXX")" || exit 1
+    pages=$((pages + 1))
+    jq -e '.has_more == true' "$body" >/dev/null 2>&1 || break
+    token="$(jq -r '.next_page_token // empty' "$body")"
+    [[ -n "$token" && "$token" != "$previous_token" && $pages -lt 100 ]] || {
+      printf 'ElevenLabs: invalid voice-list pagination\n' >&2; exit 74; }
+    previous_token="$token"
+  done
   # A cloned voice is worth distinguishing from a stock one; otherwise the
   # vendor's own name is what the user recognises from the website.
-  jq -c '[.voices[]? | {
+  jq '[.[]? | {
       value: .voice_id,
       label: (.name + (if (.category // "premade") == "premade" then "" else " · " + .category end))
-    }] | map(select(.value != null and .label != null))' "$body"
+    }] | map(select(.value != null and .label != null))' "$aggregate"
   exit 0
 fi
 

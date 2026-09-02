@@ -21,7 +21,9 @@ Item {
   property string error: ""
   property string verifying: ""
   property string refreshingUsage: ""
+  property string refreshingVoices: ""
   property string pendingKey: ""
+  property string pendingKeyProvider: ""
   property bool keySaving: false
   property bool speaking: false
   signal actionFinished
@@ -96,6 +98,7 @@ Item {
   // panel say so rather than appearing to have ignored the click.
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
   function refreshUsage(name) { refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
+  function refreshVoices(name) { refreshingVoices = name; voiceRefreshProc.command = [speakBin, "--refresh-voices", name]; restart(voiceRefreshProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { if (action([voiceBin, "add", key, "--async"])) { download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true } }
   function cancelDownload() { action([voiceBin, "cancel"]) }
@@ -112,7 +115,7 @@ Item {
   function cancelSetup() { action([setupBin, "cancel"]) }
   function storeKey(provider, key) {
     if ((provider !== "openai" && provider !== "elevenlabs") || key.length < 8) return
-    pendingKey = key; keySaving = true; keyResult = { ok: false, message: "" }
+    pendingKey = key; pendingKeyProvider = provider; keySaving = true; keyResult = { ok: false, message: "" }
     keyProc.command = [setupBin, "key-store", provider]; restart(keyProc)
   }
   function removeKey(provider) { if (provider === "openai" || provider === "elevenlabs") action([setupBin, "key-remove", provider]) }
@@ -161,6 +164,11 @@ Item {
     onRunningChanged: if (!running) { root.refreshingUsage = ""; root.refresh() }
   }
   Process {
+    id: voiceRefreshProc; command: []
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
+    onRunningChanged: if (!running) { root.refreshingVoices = ""; root.refresh() }
+  }
+  Process {
     id: actionProc; command: []
     stdout: StdioCollector { waitForEnd: true }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
@@ -183,7 +191,7 @@ Item {
     id: keyProc; command: []; stdinEnabled: true
     onStarted: { write(root.pendingKey + "\n"); root.pendingKey = "" }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { var result = JSON.parse(text); root.keyResult = { ok: result.ok === true, message: result.ok ? "Key saved securely." : (result.message || "Could not save the key.") } } catch (e) { root.keyResult = { ok: false, message: "Could not save the key." } } } }
-    onRunningChanged: if (!running) { root.keySaving = false; root.refresh() }
+    onRunningChanged: if (!running) { root.keySaving = false; if (root.keyResult.ok && root.pendingKeyProvider === "elevenlabs") root.refreshVoices(root.pendingKeyProvider); root.pendingKeyProvider = ""; root.refresh() }
   }
   Timer { id: downloadPoll; interval: 500; repeat: true; running: false; onTriggered: root.restart(downloadStatusProc) }
   Timer { id: setupJobPoll; interval: 650; repeat: true; running: false; onTriggered: root.restart(setupJobProc) }

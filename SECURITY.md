@@ -14,3 +14,7 @@ counts, timestamps, provider request IDs, normalized error codes, and returned
 limit headers; it never records selected text, credentials, or response bodies.
 Provider errors shown to users are normalized rather than echoing remote bodies,
 which can contain request details.
+
+Account-specific cloud voice metadata is fetched only by an explicit refresh,
+stored in a mode 0600 cache, and never printed by the refresh command. Opening
+the settings panel is a local-only operation and does not contact cloud APIs.

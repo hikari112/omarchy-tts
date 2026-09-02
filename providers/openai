@@ -10,7 +10,6 @@ source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
 source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
-KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
 
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.openai.voice // "alloy"' "$TTS_CONFIG" 2>/dev/null)"
@@ -32,6 +31,8 @@ if [[ "${1:-}" == "--usage" ]]; then
     jq -nc --arg model "$MODEL" '{provider:"openai",model:$model,account:{source:"request_headers",note:"Rate limits appear after the first speech request."}}'
   exit 0
 fi
+
+KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")" || exit 1
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai-headers.XXXXXX")" || exit 1

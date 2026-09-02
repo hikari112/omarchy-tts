@@ -49,6 +49,7 @@ speak --stop                  # stop
 speak --list                  # list providers
 speak --provider espeak-ng    # override for one run
 speak --usage elevenlabs      # refresh paid-plan usage (JSON)
+speak --refresh-voices elevenlabs # refresh the account's private voice list
 ```
 
 ## Voices
@@ -161,9 +162,15 @@ OpenAI request and token limits update from response headers; organization-wide
 usage is deliberately not queried with the normal speech key because that API
 requires a separate organization admin key.
 
-Cloud telemetry is stored mode 0600 under `~/.cache/omarchy-tts/cloud/` and
-contains counts, timestamps, request IDs, limits, and normalized error codes.
-It never contains API keys, selected text, or provider response bodies.
+ElevenLabs voice names are fetched only when **Refresh cloud voices** is
+pressed (or `speak --refresh-voices elevenlabs` is run). Merely opening the
+panel never contacts a provider. The account-specific list is kept in the
+private cache and refresh output reports only its item count.
+
+Cloud telemetry and voice metadata are stored mode 0600 under
+`~/.cache/omarchy-tts/`. Telemetry contains counts, timestamps, request IDs,
+limits, and normalized error codes. Neither cache contains API keys, selected
+text, or provider response bodies.
 
 ## Remove
 

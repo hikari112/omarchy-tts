@@ -18,7 +18,10 @@ class CliConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.env = {**os.environ, "XDG_CONFIG_HOME": self.temp.name,
-                    "XDG_RUNTIME_DIR": self.temp.name}
+                    "XDG_CACHE_HOME": self.temp.name,
+                    "XDG_DATA_HOME": self.temp.name,
+                    "XDG_RUNTIME_DIR": self.temp.name,
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent"}
         self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
         self.env.pop("OPENAI_API_KEY", None)
         self.env.pop("ELEVENLABS_API_KEY", None)
@@ -36,6 +39,58 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(info["provider"], "piper")
         self.assertTrue(info["sanitizer"]["stripMarkdown"])
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_info_never_contacts_a_cloud_provider(self):
+        marker = Path(self.temp.name, "curl-was-run")
+        tools = Path(self.temp.name, "tools")
+        tools.mkdir()
+        curl = tools / "curl"
+        curl.write_text(f"#!/usr/bin/env bash\nprintf touched > {marker}\nexit 99\n")
+        curl.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+        self.env["ELEVENLABS_API_KEY"] = "safe-test-key"
+        self.run_speak("--info")
+        self.assertFalse(marker.exists(), "a read-only state query made a network request")
+
+    def test_cloud_voice_refresh_is_explicit_private_and_normalized(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True)
+        provider = providers / "cloudtest"
+        provider.write_text(
+            "#!/usr/bin/env bash\n"
+            "# desc: test cloud voice catalogue\n"
+            "# kind: cloud\n"
+            "[[ ${1:-} == --voices ]] || exit 2\n"
+            "printf '%s\\n' '[{\"value\":\"b\",\"label\":\"Zulu\"},"
+            "{\"value\":\"a\",\"label\":\"alpha\"},"
+            "{\"value\":\"a\",\"label\":\"duplicate\"}]'\n"
+        )
+        provider.chmod(0o755)
+
+        result = self.run_speak("--refresh-voices", "cloudtest")
+        self.assertEqual(json.loads(result.stdout),
+                         {"provider": "cloudtest", "count": 2})
+        cache = Path(self.temp.name, "omarchy-tts", "voices", "cloudtest.json")
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(cache.read_text()), [
+            {"value": "a", "label": "alpha"},
+            {"value": "b", "label": "Zulu"},
+        ])
+
+    def test_openai_static_metadata_does_not_require_a_key(self):
+        provider_env = {**self.env,
+                        "TTS_PLUGIN_DIR": str(ROOT),
+                        "TTS_CONFIG": str(Path(self.temp.name, "missing.json")),
+                        "TTS_METRICS_FILE": str(Path(self.temp.name, "missing-metrics.json"))}
+        voices = subprocess.run([ROOT / "providers" / "openai", "--voices"],
+                                env=provider_env, check=True, text=True,
+                                capture_output=True)
+        self.assertIn("cedar", {item["value"] for item in json.loads(voices.stdout)})
+        usage = subprocess.run([ROOT / "providers" / "openai", "--usage"],
+                               env=provider_env, check=True, text=True,
+                               capture_output=True)
+        self.assertEqual(json.loads(usage.stdout)["account"]["source"],
+                         "request_headers")
 
     def test_invalid_config_is_preserved_before_recovery(self):
         config = Path(self.temp.name, "omarchy-tts", "config.json")

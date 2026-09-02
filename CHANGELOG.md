@@ -5,6 +5,11 @@ Versioning.
 
 ## Unreleased
 
+- Make settings-state reads network-free and cloud voice refresh explicit.
+- Use ElevenLabs' current paginated v2 voice API, with bounded pagination and
+  private, atomic account-voice caching.
+- Isolate CLI tests from the user's real cache, keyring, and session bus.
+
 ## 1.2.0 - 2026-09-02
 
 - Add privacy-safe paid-provider telemetry, live ElevenLabs subscription usage,

@@ -236,27 +236,37 @@ provider_model() {
 }
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
-# Voices a provider has to be asked about, cached because asking costs a
-# network round trip and the answer changes rarely. A stale list beats no list:
-# offline, the names already seen are still more use than a bare identifier.
-VOICE_CACHE_MAX_AGE_MIN=1440
-
-remote_voices() { # remote_voices <name> <bin>
-  local name="$1" bin="$2" out=""
+# Account-specific voice lists are cached, but --info is deliberately local:
+# opening the panel must never block on a vendor, consume rate capacity, or
+# disclose that it was opened. Refresh is an explicit action instead.
+cached_remote_voices() { # cached_remote_voices <name>
+  local name="$1"
   local cache="$CACHE_DIR/voices/$name.json"
-  mkdir -p "$CACHE_DIR/voices" 2>/dev/null
-  if [[ -s "$cache" && -z "$(find "$cache" -mmin +$VOICE_CACHE_MAX_AGE_MIN 2>/dev/null)" ]]; then
-    cat "$cache"; return 0
-  fi
-  out="$(TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
-         timeout 30 "$bin" --voices 2>/dev/null)"
-  if jq -e 'type == "array" and length > 0' <<< "$out" >/dev/null 2>&1; then
-    printf '%s' "$out" > "$cache"
-    printf '%s' "$out"
-    return 0
-  fi
-  if [[ -s "$cache" ]]; then cat "$cache"; return 0; fi
+  if [[ -s "$cache" ]] && jq -e 'type == "array"' "$cache" >/dev/null 2>&1; then cat "$cache"; return 0; fi
   printf '[]'
+}
+
+refresh_remote_voices() { # refresh_remote_voices <name>
+  local name="$1" bin out cache tmp
+  bin="$(provider_path "$name")" || return 2
+  [[ "$(meta_of "$bin" kind)" == cloud ]] || return 2
+  out="$(TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+         timeout --kill-after=2s 30s "$bin" --voices)" || return $?
+  jq -e 'type == "array" and all(.[]; (.value|type)=="string" and length>0 and (.label|type)=="string" and length>0)' \
+    <<< "$out" >/dev/null 2>&1 || return 1
+  cache="$CACHE_DIR/voices/$name.json"
+  mkdir -p "$(dirname "$cache")" || return 1
+  chmod 700 "$(dirname "$cache")" || return 1
+  tmp="$(mktemp "${cache}.XXXXXX")" || return 1
+  if jq -c 'unique_by(.value) | sort_by(.label | ascii_downcase)' <<< "$out" > "$tmp"; then
+    if ! chmod 600 "$tmp" || ! mv "$tmp" "$cache"; then rm -f "$tmp"; return 1; fi
+  else
+    rm -f "$tmp"; return 1
+  fi
+  # Return a confirmation, not the account-specific names. The cache is read
+  # privately by --info and the panel reload that follows this command.
+  jq -nc --arg provider "$name" --argjson count "$(jq length "$cache")" \
+    '{provider:$provider,count:$count}'
 }
 
 emit_info() {
@@ -293,10 +303,10 @@ emit_info() {
         sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
     openai)
       voice="$(cfg .openai.voice alloy)"; voice_path=.openai.voice
-      vs="$(remote_voices openai "$(provider_path openai)")" ;;
+      vs='[{"value":"alloy","label":"alloy"},{"value":"ash","label":"ash"},{"value":"ballad","label":"ballad"},{"value":"cedar","label":"cedar"},{"value":"coral","label":"coral"},{"value":"echo","label":"echo"},{"value":"fable","label":"fable"},{"value":"marin","label":"marin"},{"value":"nova","label":"nova"},{"value":"onyx","label":"onyx"},{"value":"sage","label":"sage"},{"value":"shimmer","label":"shimmer"},{"value":"verse","label":"verse"}]' ;;
     elevenlabs)
       voice_path=.elevenlabs.voiceId
-      vs="$(remote_voices elevenlabs "$(provider_path elevenlabs)")"
+      vs="$(cached_remote_voices elevenlabs)"
       voice="$(cfg .elevenlabs.voiceId "")"
       # With nothing chosen, take the account's first voice rather than a fixed
       # id: the vendor's premade roster changes, and a default that ages out
@@ -412,7 +422,7 @@ Voice
   -m, --max-chars N    truncate near N characters (0 = unlimited)
   -l, --list           list available providers
       --verify [NAME]  prove a provider can actually speak (silent)
-      --refresh-voices re-fetch cloud voice lists
+      --refresh-voices [NAME]  safely re-fetch cloud voice lists
       --cycle-provider switch to the next provider
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
@@ -506,8 +516,9 @@ while [[ $# -gt 0 ]]; do
       done
       exit $vrc ;;
     --refresh-voices)
-      rm -rf "$CACHE_DIR/voices"
-      echo "voice lists cleared; they will be fetched again on next use"
+      voice_target="${2:-$(cfg .provider piper)}"
+      [[ "$voice_target" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
+      refresh_remote_voices "$voice_target" || die "could not refresh voices for $voice_target"
       exit 0 ;;
     -l|--list) list_providers; exit 0 ;;
     -h|--help) usage; exit 0 ;;
