@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sanitizer tests
+        run: python3 tests/test_sanitize.py
+
+      - name: Shell syntax
+        run: |
+          for f in bin/speak bin/speak-voice providers/*; do
+            bash -n "$f" || exit 1
+          done
+
+      - name: ShellCheck
+        run: shellcheck -x bin/speak bin/speak-voice providers/*
+
+      - name: Manifest is valid
+        run: |
+          jq -e . manifest.json > /dev/null
+          for field in schemaVersion id name version author description kinds entryPoints; do
+            jq -e "has(\"$field\")" manifest.json > /dev/null \
+              || { echo "manifest.json missing required field: $field"; exit 1; }
+          done
+          entry=$(jq -r '.entryPoints.barWidget' manifest.json)
+          test -f "$entry" || { echo "entry point not found: $entry"; exit 1; }
+
+      - name: Plugin id matches QML moduleName
+        run: |
+          id=$(jq -r '.id' manifest.json)
+          grep -q "moduleName: \"$id\"" BarWidget.qml \
+            || { echo "BarWidget.qml moduleName does not match manifest id ($id)"; exit 1; }
+
+      - name: Providers are executable
+        run: |
+          for f in providers/* bin/*; do
+            test -x "$f" || { echo "not executable: $f"; exit 1; }
+          done
+
+      - name: Providers declare a description
+        run: |
+          for f in providers/*; do
+            grep -q '^# desc: ' "$f" || { echo "missing '# desc:' line: $f"; exit 1; }
+          done

@@ -1,5 +1,7 @@
 # omarchy-tts — speak highlighted text
 
+[![CI](https://github.com/hikari112/omarchy-tts/actions/workflows/ci.yml/badge.svg)](https://github.com/hikari112/omarchy-tts/actions/workflows/ci.yml)
+
 On-demand text-to-speech for Omarchy. Highlight anything, press a key, hear it.
 Works in any app that supports the Wayland primary selection — terminal,
 browser, PDF viewer — because it never touches AT-SPI.
@@ -116,6 +118,16 @@ Test it standalone:
 ```bash
 cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib/sanitize.py
 ```
+
+## Development
+
+```bash
+python3 tests/test_sanitize.py      # 23 sanitizer tests
+shellcheck -x bin/* providers/*     # lint
+```
+
+Because the repo is symlinked into `~/.config/omarchy/plugins/`, saving any
+file reloads the widget in the bar immediately.
 
 ## License
 

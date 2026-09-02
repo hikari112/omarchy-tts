@@ -49,7 +49,12 @@ cycle_provider() {
     { a[NR]=$0 } END { for (i=1;i<=NR;i++) if (a[i]==c) { print a[i%NR+1]; exit } print a[1] }')"
   [[ -z "$next" ]] && return 1
   local tmp; tmp="$(mktemp)"
-  jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$CONFIG" || rm -f "$tmp"
+  if jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$CONFIG"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
   printf '%s\n' "$next"
 }
 
@@ -196,6 +201,9 @@ export TTS_CONFIG="$CONFIG"
 stop_speaking   # never let two voices overlap
 
 set_status speaking
+# $0 is deliberately single-quoted: it must expand in the inner shell, where
+# it becomes $PROV_BIN, not here.
+# shellcheck disable=SC2016
 setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
 child=$!
 pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
