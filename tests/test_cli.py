@@ -166,5 +166,61 @@ class ProviderHealthTests(unittest.TestCase):
                          "a real failure should mark the provider without a separate test")
 
 
+class BindingAdoptionTests(unittest.TestCase):
+    """Shortcuts a user set up by hand are ours to adopt, not to duplicate."""
+
+    LUA = """-- Personal keybindings
+o.bind("SUPER + SHIFT + S", "Screenshot", "omarchy-capture-screenshot")
+o.bind("SUPER + ALT + P", "Unrelated", "/usr/bin/speaker-test --nonsense")
+o.bind("SUPER + ALT + E", "Speak selection", "/home/someone/.local/bin/speak --toggle")
+o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
+"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        (self.home / "hypr").mkdir(parents=True)
+        (self.home / "omarchy-tts").mkdir(parents=True)
+        self.lua = self.home / "hypr" / "bindings.lua"
+        self.lua.write_text(self.LUA)
+        self.env = {**os.environ, "XDG_CONFIG_HOME": str(self.home)}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_bindings(self, *args):
+        return subprocess.run([BINDINGS, *args], text=True, capture_output=True,
+                              env=self.env, check=False)
+
+    def test_hand_written_bindings_are_adoptable_not_conflicts(self):
+        state = json.loads(self.run_bindings("status").stdout)
+        self.assertFalse(state["installed"])
+        self.assertEqual(state["conflicts"], [])
+        self.assertIn("SUPER + ALT + E", state["adoptable"])
+        self.assertTrue(state["canInstall"], "adoption must not be a dead end")
+
+    def test_install_adopts_without_duplicating(self):
+        self.run_bindings("install")
+        text = self.lua.read_text()
+        self.assertEqual(text.count("SUPER + ALT + E"), 1, "chord bound twice")
+        self.assertIn("Screenshot", text, "unrelated binding was removed")
+
+    def test_similarly_named_program_is_left_alone(self):
+        # speaker-test is not speak; adopting it would break the user's setup.
+        self.run_bindings("install")
+        self.assertIn("speaker-test", self.lua.read_text())
+
+    def test_genuine_conflict_still_refuses_and_changes_nothing(self):
+        self.lua.write_text('o.bind("SUPER + ALT + E", "Open editor", "code")\n')
+        before = self.lua.read_text()
+        state = json.loads(self.run_bindings("status").stdout)
+        self.assertEqual(state["conflicts"], ["SUPER + ALT + E"])
+        self.assertFalse(state["canInstall"])
+        result = self.run_bindings("install")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.lua.read_text(), before)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

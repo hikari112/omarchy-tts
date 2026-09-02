@@ -69,14 +69,46 @@ def replace_block(text: str, block: str | None) -> str:
     return text
 
 
+# Flags only this tool's CLI accepts. A binding that runs a program called
+# "speak" with one of these is ours however it was written - by hand, by an
+# older README, through ~/.local/bin, or straight out of the plugin directory.
+OUR_FLAGS = {"--toggle", "--clipboard", "--stop", "--snip", "--window",
+             "--screen", "--selection"}
+BIND_LINE = re.compile(r'\bo\.bind\(\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*"([^"]*)"')
+
+
+def is_our_command(command: str) -> bool:
+    """True when this command line invokes our speak CLI.
+
+    Deliberately strict: the executable must be named `speak` and must carry
+    one of our own flags, so an unrelated binding is never adopted or removed.
+    """
+    parts = command.split()
+    if not parts:
+        return False
+    if Path(parts[0]).name != "speak":
+        return False
+    return any(part in OUR_FLAGS for part in parts[1:])
+
+
+def adoptable_bindings(text: str) -> list[str]:
+    """Chords bound to our CLI outside the managed block."""
+    found = []
+    for line in text.splitlines():
+        match = BIND_LINE.search(line)
+        if match and is_our_command(match.group(1)):
+            chord = re.search(r'o\.bind\(\s*"([^"]*)"', line)
+            if chord:
+                found.append(chord.group(1))
+    return found
+
+
 def migrate_manual_tts_lines(text: str) -> str:
-    """Remove only the exact one-line bindings previously documented by us."""
-    commands = {item["command"] for item in DEFAULTS.values()}
-    commands.update({"speak --toggle", "speak --clipboard", "speak --stop",
-                     "speak --snip", "speak --window", "speak --screen"})
+    """Drop bindings that invoke our CLI, so they can be re-added as a block."""
     kept = []
     for line in text.splitlines():
-        if "o.bind(" in line and any(f'"{command}"' in line for command in commands):
+        match = BIND_LINE.search(line)
+        if match and is_our_command(match.group(1)):
             continue
         kept.append(line)
     return "\n".join(kept).rstrip() + "\n"
@@ -144,8 +176,10 @@ def main() -> int:
         # our managed block; do not present them as user conflicts.
         conflict_source = without_block if installed else migrate_manual_tts_lines(without_block)
         conflicts = conflicting_chords(conflict_source, config)
+        adoptable = [] if installed else adoptable_bindings(without_block)
         print(json.dumps({"installed": installed, "bindings": config,
-                          "conflicts": conflicts, "canInstall": not conflicts}))
+                          "conflicts": conflicts, "adoptable": adoptable,
+                          "canInstall": not conflicts}))
         return 0
     if args.command == "set":
         candidate = copy.deepcopy(config)
