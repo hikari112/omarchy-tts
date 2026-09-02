@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # desc: local neural voice, fast and natural (default)
 # kind: local
-# probe: command -v piper >/dev/null 2>&1 && compgen -G "${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}/*.onnx" >/dev/null
+# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (compgen -G "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}/*.onnx" >/dev/null || compgen -G "$HOME/.local/share/piper-voices/*.onnx" >/dev/null)
 # install: uv tool install piper-tts
 # voices: downloadable
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
-need piper "install with: uv tool install piper-tts"
+PIPER_BIN="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper"
+[[ -x "$PIPER_BIN" ]] || PIPER_BIN="$(command -v piper || true)"
+[[ -n "$PIPER_BIN" ]] || need piper "install it from the Provider tab"
 
-VOICES_DIR="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+VOICES_DIR="${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.piper.voice // "en_US-amy-medium"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="en_US-amy-medium"
 
 if [[ -f "$VOICE" ]]; then MODEL="$VOICE"; else MODEL="$VOICES_DIR/$VOICE.onnx"; fi
+[[ -f "$MODEL" ]] || MODEL="$HOME/.local/share/piper-voices/$VOICE.onnx"
 
 if [[ ! -f "$MODEL" ]]; then
   echo "speak: piper voice not found: $MODEL" >&2
@@ -28,4 +31,4 @@ RATE_HZ="$(jq -r '.audio.sample_rate // 22050' "$MODEL.json" 2>/dev/null)"
 # length-scale is inverse speed: 0.5 = twice as fast.
 LEN="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ if (r<=0) r=1; printf "%.3f", 1/r }')"
 
-piper -m "$MODEL" --output-raw --length-scale "$LEN" 2>/dev/null | play_raw "$RATE_HZ" 1
+"$PIPER_BIN" -m "$MODEL" --output-raw --length-scale "$LEN" 2>/dev/null | play_raw "$RATE_HZ" 1

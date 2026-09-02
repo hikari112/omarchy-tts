@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SPEAK = ROOT / "bin" / "speak"
 BINDINGS = ROOT / "bin" / "speak-bindings"
+SETUP = ROOT / "bin" / "speak-setup"
 
 
 class CliConfigTests(unittest.TestCase):
@@ -58,6 +59,38 @@ class CliConfigTests(unittest.TestCase):
                        capture_output=True, text=True)
         self.assertEqual(target.read_text().strip(),
                          'o.bind("SUPER + B", "Browser", "browser")')
+
+    def test_binding_manager_adopts_legacy_documented_bindings(self):
+        hypr = Path(self.temp.name, "hypr")
+        hypr.mkdir()
+        target = hypr / "bindings.lua"
+        target.write_text('o.bind("SUPER + ALT + E", "Speak selection", "speak --toggle")\n')
+        status = subprocess.run([BINDINGS, "status"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        self.assertTrue(json.loads(status.stdout)["canInstall"])
+        subprocess.run([BINDINGS, "install"], env=self.env, check=True,
+                       capture_output=True, text=True)
+        installed = target.read_text()
+        self.assertEqual(installed.count("Speak selection"), 1)
+        self.assertIn("-- >>> omarchy-tts bindings", installed)
+
+    def test_setup_backend_status_and_allowlist(self):
+        self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
+        status = subprocess.run([SETUP, "status"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        payload = json.loads(status.stdout)
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["defaultVoice"], "en_US-amy-medium")
+        rejected = subprocess.run([SETUP, "start", "anything-else"], env=self.env,
+                                  check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(rejected.stdout)["code"], "unknown_target")
+
+    def test_setup_rejects_short_or_unknown_keys_without_storing(self):
+        for provider, value, code in (("openai", "short", "invalid_key"),
+                                      ("other", "long-enough-key", "unknown_provider")):
+            result = subprocess.run([SETUP, "key-store", provider], input=value + "\n",
+                                    env=self.env, check=True, capture_output=True, text=True)
+            self.assertEqual(json.loads(result.stdout)["code"], code)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ set -uo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts"
 CONFIG="$USER_DIR/config.json"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
 PID_FILE="$STATE_DIR/pgid"
@@ -129,7 +130,7 @@ provider_status() { # ready | missing | nokey
   probe="$(meta_of "$bin" probe)"
   kind="$(meta_of "$bin" kind)"
   [[ -z "$probe" ]] && { printf 'ready'; return; }
-  if TTS_CONFIG="$CONFIG" bash -c "$probe" >/dev/null 2>&1; then
+  if TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" bash -c "$probe" >/dev/null 2>&1; then
     printf 'ready'
   elif [[ "$kind" == "cloud" ]]; then
     printf 'nokey'
@@ -153,7 +154,8 @@ key_source() { # env | keyring | config | none
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
 emit_info() {
-  local voices_dir="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+  local voices_dir="${PIPER_VOICES_DIR:-$DATA_DIR/voices/piper}"
+  local legacy_voices_dir="$HOME/.local/share/piper-voices"
   local provs="[]" vs="[]" active voice voice_path
   provs="$(
     provider_names | while read -r n; do
@@ -176,8 +178,8 @@ emit_info() {
   case "$active" in
     piper)
       voice="$(cfg .piper.voice en_US-amy-medium)"; voice_path=.piper.voice
-      vs="$(for m in "$voices_dir"/*.onnx; do [[ -e "$m" ]] && basename "$m" .onnx; done |
-        jq -Rsc 'split("\n") | map(select(length>0))')" ;;
+      vs="$(for m in "$voices_dir"/*.onnx "$legacy_voices_dir"/*.onnx; do [[ -e "$m" ]] && basename "$m" .onnx; done |
+        sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
     openai)
       voice="$(cfg .openai.voice alloy)"; voice_path=.openai.voice
       vs='["alloy","ash","ballad","coral","echo","fable","nova","onyx","sage","shimmer","verse"]' ;;
@@ -392,6 +394,7 @@ export TTS_VOICE="${VOICE:-$(cfg .voice "")}"
 export TTS_RATE="${RATE:-$(cfg .rate 1.0)}"
 export TTS_PLUGIN_DIR="$PLUGIN_DIR"
 export TTS_CONFIG="$CONFIG"
+export TTS_DATA_DIR="$DATA_DIR"
 
 if [[ -z "$TTS_VOICE" ]]; then
   case "$PROVIDER" in

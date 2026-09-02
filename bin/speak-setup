@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Graphical-frontend backend for first-run setup and repair.
+
+All public commands emit one JSON object. Long operations run as detached jobs
+whose progress is read by the settings panel. Installation targets are a fixed
+allowlist; no command supplied by QML or provider metadata is executed.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+PLUGIN = Path(__file__).resolve().parents[1]
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-tts"
+DATA = DATA_HOME / "omarchy-tts"
+ENGINE = DATA / "engines"
+VOICES = DATA / "voices" / "piper"
+STATE = RUNTIME / "setup.json"
+VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
+BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
+DEFAULT_VOICE = "en_US-amy-medium"
+JOB_PID = 0
+JOB_IDENTITY = ""
+
+SYSTEM_PACKAGES = {
+    "espeak-ng": ["espeak-ng"],
+    "spd": ["speech-dispatcher"],
+}
+
+
+def emit(**values) -> None:
+    print(json.dumps(values, ensure_ascii=False), flush=True)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False) + "\n")
+    os.replace(temporary, path)
+
+
+def write_state(status: str, step: str = "", progress: int = 0,
+                message: str = "", **extra) -> None:
+    if JOB_PID:
+        extra.setdefault("pid", JOB_PID)
+        extra.setdefault("processIdentity", JOB_IDENTITY)
+    current = {"status": status, "step": step, "progress": progress,
+               "message": message, **extra}
+    atomic_json(STATE, current)
+
+
+def process_identity(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split()[21]
+    except (OSError, IndexError):
+        return ""
+
+
+def piper_binary() -> Path:
+    return ENGINE / "piper" / "bin" / "piper"
+
+
+def status() -> dict:
+    voice = VOICES / f"{DEFAULT_VOICE}.onnx"
+    legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
+    engine_ready = piper_binary().is_file() or shutil.which("piper") is not None
+    voice_ready = voice.is_file() or legacy_voice.is_file()
+    bindings = False
+    try:
+        result = subprocess.run([BINDINGS_TOOL, "status"], text=True,
+                                capture_output=True, timeout=3)
+        bindings = result.returncode == 0 and json.loads(result.stdout).get("installed", False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return {
+        "ok": True,
+        "ready": engine_ready and voice_ready,
+        "engineReady": engine_ready,
+        "voiceReady": voice_ready,
+        "bindingsReady": bindings,
+        "defaultVoice": DEFAULT_VOICE,
+        "dataPath": str(DATA),
+    }
+
+
+def run_checked(argv: list[str], *, env: dict | None = None) -> None:
+    result = subprocess.run(argv, env=env, text=True, capture_output=True)
+    if result.returncode:
+        message = result.stderr.strip() or result.stdout.strip() or f"{argv[0]} failed"
+        raise RuntimeError(message[-800:])
+
+
+def ensure_uv() -> str:
+    uv = shutil.which("uv")
+    if uv:
+        return uv
+    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
+    if not pkexec or not pacman:
+        raise RuntimeError("The uv installer is unavailable")
+    write_state("running", "permission", 5, "Administrator approval is required to install uv")
+    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", "uv"])
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv was installed but could not be found")
+    return uv
+
+
+def install_piper() -> None:
+    uv = ensure_uv()
+    target = ENGINE / "piper"
+    write_state("running", "engine", 15, "Preparing the Piper speech engine")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not (target / "bin/python").exists():
+        run_checked([uv, "venv", str(target)])
+    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"), "piper-tts"])
+
+
+def install_voice() -> None:
+    write_state("running", "voice", 55, "Downloading and verifying the Amy voice")
+    env = {**os.environ, "PIPER_VOICES_DIR": str(VOICES)}
+    VOICES.mkdir(parents=True, exist_ok=True)
+    run_checked([VOICE_TOOL, "add", DEFAULT_VOICE], env=env)
+    run_checked([VOICE_TOOL, "use", DEFAULT_VOICE], env=env)
+
+
+def install_system_provider(provider: str) -> None:
+    packages = SYSTEM_PACKAGES[provider]
+    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
+    if not pkexec or not pacman:
+        raise RuntimeError("Graphical package installation is unavailable")
+    write_state("running", "permission", 10, "Waiting for administrator approval")
+    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", *packages])
+
+
+def install_kokoro() -> None:
+    uv = ensure_uv()
+    target = ENGINE / "kokoro"
+    write_state("running", "engine", 20, "Installing the Kokoro speech engine")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not (target / "bin/python").exists():
+        run_checked([uv, "venv", str(target)])
+    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"),
+                 "kokoro", "soundfile"])
+
+
+def worker(target: str) -> int:
+    global JOB_PID, JOB_IDENTITY
+    JOB_PID = os.getpid()
+    JOB_IDENTITY = process_identity(JOB_PID)
+    try:
+        if target in ("recommended", "piper"):
+            install_piper()
+            install_voice()
+        elif target == "kokoro":
+            install_kokoro()
+        elif target in SYSTEM_PACKAGES:
+            install_system_provider(target)
+        else:
+            raise RuntimeError("Unknown installation target")
+        write_state("done", "complete", 100, "Ready")
+        return 0
+    except Exception as exc:  # boundary: convert backend failures to UI state
+        write_state("error", "failed", 0, str(exc), retryable=True)
+        return 1
+
+
+def start(target: str) -> None:
+    if target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
+        emit(ok=False, code="unknown_target", message="Unknown installation target")
+        return
+    try:
+        current = json.loads(STATE.read_text())
+        pid = int(current.get("pid", 0))
+        identity = str(current.get("processIdentity", ""))
+        if current.get("status") in {"starting", "running"} and pid > 1 \
+                and identity and process_identity(pid) == identity:
+            emit(ok=False, code="already_running", message="Setup is already running")
+            return
+    except (OSError, ValueError, TypeError):
+        pass
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    write_state("starting", "prepare", 1, "Preparing setup", target=target)
+    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_worker", target],
+                               start_new_session=True, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    emit(ok=True, started=True, pid=process.pid)
+
+
+def cancel() -> None:
+    try:
+        state = json.loads(STATE.read_text())
+        pid = int(state.get("pid", 0))
+        identity = str(state.get("processIdentity", ""))
+        if pid > 1 and identity and process_identity(pid) == identity:
+            os.killpg(pid, signal.SIGTERM)
+        write_state("cancelled", "cancelled", 0, "Cancelled")
+        emit(ok=True)
+    except (OSError, ValueError, TypeError):
+        emit(ok=False, code="not_running", message="No setup job is running")
+
+
+def key_store(provider: str) -> None:
+    if provider not in {"openai", "elevenlabs"}:
+        emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
+        return
+    key = sys.stdin.readline().rstrip("\r\n")
+    if len(key) < 8:
+        emit(ok=False, code="invalid_key", message="The API key is too short")
+        return
+    tool = shutil.which("secret-tool")
+    if not tool:
+        emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
+        return
+    result = subprocess.run([tool, "store", f"--label=omarchy-tts {provider}",
+                             "service", "omarchy-tts", "key", provider],
+                            input=key, text=True, capture_output=True)
+    key = ""
+    if result.returncode:
+        emit(ok=False, code="keyring_failed", message="Could not save the API key")
+    else:
+        emit(ok=True)
+
+
+def key_remove(provider: str) -> None:
+    if provider not in {"openai", "elevenlabs"}:
+        emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
+        return
+    tool = shutil.which("secret-tool")
+    if not tool:
+        emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
+        return
+    result = subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
+                            capture_output=True)
+    emit(ok=result.returncode == 0,
+         message="API key removed" if result.returncode == 0 else "No stored key was found")
+
+
+def cleanup() -> None:
+    result = {"ok": True, "removed": []}
+    subprocess.run([BINDINGS_TOOL, "remove"], capture_output=True)
+    result["removed"].append("shortcuts")
+    tool = shutil.which("secret-tool")
+    if tool:
+        for provider in ("openai", "elevenlabs"):
+            subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
+                           capture_output=True)
+        result["removed"].append("API keys")
+    emit(**result)
+
+
+def diagnostics() -> None:
+    details = status()
+    details.update({
+        "version": json.loads((PLUGIN / "manifest.json").read_text()).get("version"),
+        "commands": {name: bool(shutil.which(name)) for name in
+                     ("wl-paste", "grim", "slurp", "tesseract", "secret-tool", "pw-cat")},
+        "provider": "configured",  # deliberately excludes selected/spoken text
+    })
+    emit(**details)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    start_parser = sub.add_parser("start")
+    start_parser.add_argument("target")
+    worker_parser = sub.add_parser("_worker")
+    worker_parser.add_argument("target")
+    sub.add_parser("job")
+    sub.add_parser("cancel")
+    key_parser = sub.add_parser("key-store")
+    key_parser.add_argument("provider")
+    remove_key_parser = sub.add_parser("key-remove")
+    remove_key_parser.add_argument("provider")
+    sub.add_parser("cleanup")
+    sub.add_parser("diagnostics")
+    args = parser.parse_args()
+    if args.command == "status": emit(**status())
+    elif args.command == "start": start(args.target)
+    elif args.command == "_worker": return worker(args.target)
+    elif args.command == "job":
+        try: print(STATE.read_text(), end="")
+        except OSError: emit(status="idle", step="", progress=0, message="")
+    elif args.command == "cancel": cancel()
+    elif args.command == "key-store": key_store(args.provider)
+    elif args.command == "key-remove": key_remove(args.provider)
+    elif args.command == "cleanup": cleanup()
+    elif args.command == "diagnostics": diagnostics()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

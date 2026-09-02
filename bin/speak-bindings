@@ -15,16 +15,18 @@ import shutil
 import subprocess
 import sys
 import time
+import copy
 
 BEGIN = "-- >>> omarchy-tts bindings"
 END = "-- <<< omarchy-tts bindings"
+SPEAK = str(Path(__file__).resolve().parent / "speak")
 DEFAULTS = {
-    "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": "speak --toggle"},
-    "clipboard": {"chord": "SUPER + ALT + A", "label": "Speak clipboard", "command": "speak --clipboard"},
-    "stop": {"chord": "SUPER + ALT + X", "label": "Stop speaking", "command": "speak --stop"},
-    "snip": {"chord": "SUPER + ALT + R", "label": "Speak screen region", "command": "speak --snip"},
-    "window": {"chord": "SUPER + ALT + W", "label": "Speak focused window", "command": "speak --window"},
-    "screen": {"chord": "SUPER + ALT + SHIFT + R", "label": "Speak whole screen", "command": "speak --screen"},
+    "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": f"{SPEAK} --toggle"},
+    "clipboard": {"chord": "SUPER + ALT + A", "label": "Speak clipboard", "command": f"{SPEAK} --clipboard"},
+    "stop": {"chord": "SUPER + ALT + X", "label": "Stop speaking", "command": f"{SPEAK} --stop"},
+    "snip": {"chord": "SUPER + ALT + R", "label": "Speak screen region", "command": f"{SPEAK} --snip"},
+    "window": {"chord": "SUPER + ALT + W", "label": "Speak focused window", "command": f"{SPEAK} --window"},
+    "screen": {"chord": "SUPER + ALT + SHIFT + R", "label": "Speak whole screen", "command": f"{SPEAK} --screen"},
 }
 
 
@@ -35,7 +37,7 @@ def paths() -> tuple[Path, Path]:
 
 def load_config(path: Path) -> dict:
     if not path.exists():
-        return DEFAULTS
+        return copy.deepcopy(DEFAULTS)
     try:
         data = json.loads(path.read_text())
         return {key: {**value, **data.get(key, {})} for key, value in DEFAULTS.items()}
@@ -70,6 +72,8 @@ def replace_block(text: str, block: str | None) -> str:
 def migrate_manual_tts_lines(text: str) -> str:
     """Remove only the exact one-line bindings previously documented by us."""
     commands = {item["command"] for item in DEFAULTS.values()}
+    commands.update({"speak --toggle", "speak --clipboard", "speak --stop",
+                     "speak --snip", "speak --window", "speak --screen"})
     kept = []
     for line in text.splitlines():
         if "o.bind(" in line and any(f'"{command}"' in line for command in commands):
@@ -111,6 +115,14 @@ def write(target: Path, content: str) -> None:
     validate_or_restore(target, backup)
 
 
+def save_config(path: Path, config: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(config, indent=2) + "\n")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -123,18 +135,33 @@ def main() -> int:
     args = parser.parse_args()
     target, config_path = paths()
     config = load_config(config_path)
+    full_text = target.read_text(errors="replace") if target.exists() else "-- Personal keybindings\n"
+    without_block = replace_block(full_text, None)
 
     if args.command == "status":
-        installed = target.exists() and BEGIN in target.read_text(errors="replace")
-        print(json.dumps({"installed": installed, "bindings": config}))
+        installed = BEGIN in full_text
+        # Exact shortcuts from older README versions are safe to adopt into
+        # our managed block; do not present them as user conflicts.
+        conflict_source = without_block if installed else migrate_manual_tts_lines(without_block)
+        conflicts = conflicting_chords(conflict_source, config)
+        print(json.dumps({"installed": installed, "bindings": config,
+                          "conflicts": conflicts, "canInstall": not conflicts}))
         return 0
     if args.command == "set":
-        config[args.action]["chord"] = args.chord.upper().strip()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(config, indent=2) + "\n")
-    original = target.read_text() if target.exists() else "-- Personal keybindings\n"
-    original = replace_block(original, None)
-    original = migrate_manual_tts_lines(original)
+        candidate = copy.deepcopy(config)
+        candidate[args.action]["chord"] = args.chord.upper().strip()
+        conflicts = conflicting_chords(without_block, candidate)
+        if conflicts:
+            raise ValueError("shortcut already used: " + ", ".join(conflicts))
+        block = render(candidate) if BEGIN in full_text else None
+        if block:
+            write(target, replace_block(without_block, block))
+        save_config(config_path, candidate)
+        print("updated")
+        return 0
+    original = without_block
+    if args.command == "install":
+        original = migrate_manual_tts_lines(original)
     block = None if args.command == "remove" else render(config)
     conflicts = conflicting_chords(original, config) if block else []
     if conflicts:
