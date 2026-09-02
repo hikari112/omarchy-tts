@@ -212,13 +212,21 @@ Panel {
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
           Dropdown { width: parent.width; showLabel: false; foreground: root.fg; options: controller.info.voices?.length ? controller.info.voices : ["No voice installed"]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
           Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
-          Item { width: parent.width; height: speedHeader.implicitHeight; PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }; Text { anchors.right: parent.right; text: Number(controller.info.rate || 1).toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption } }
+          Item {
+            width: parent.width; height: speedHeader.implicitHeight
+            PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: Number(controller.info.rate || 1).toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
           Row { width: parent.width; spacing: 8
             Button { width: 32; text: "−"; bordered: true; onClicked: controller.setConfig(".rate", Math.max(.5, Number(controller.info.rate)-.1).toFixed(2)) }
             PanelSlider { width: parent.width - 80; bar: root.bar; minimum: .5; maximum: 2; step: .05; value: controller.info.rate || 1; onValueChanged: if (!dragging && Math.abs(value - Number(controller.info.rate || 1)) > .001) controller.setConfig(".rate", value.toFixed(2)) }
             Button { width: 32; text: "+"; bordered: true; onClicked: controller.setConfig(".rate", Math.min(2, Number(controller.info.rate)+.1).toFixed(2)) }
           }
-          Item { width: parent.width; height: limitHeader.implicitHeight; PanelSectionHeader { id: limitHeader; text: "Length limit"; foreground: root.fg }; Text { anchors.right: parent.right; text: controller.info.maxChars > 0 ? "~" + Math.max(1, Math.round(controller.info.maxChars / 900)) + " min" : "unlimited"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption } }
+          Item {
+            width: parent.width; height: limitHeader.implicitHeight
+            PanelSectionHeader { id: limitHeader; text: "Length limit"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: controller.info.maxChars > 0 ? "~" + Math.max(1, Math.round(controller.info.maxChars / 900)) + " min" : "unlimited"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
           Row { width: parent.width; spacing: 8
             Button { width: 48; text: "−500"; bordered: true; onClicked: controller.setConfig(".maxChars", Math.max(0, Number(controller.info.maxChars)-500)) }
             TextField { width: parent.width - 112; text: String(controller.info.maxChars || 0); foreground: root.fg; onEditingFinished: controller.setConfig(".maxChars", Math.max(0, Number(text)||0)) }
@@ -227,7 +235,11 @@ Panel {
         }
         Column {
           width: parent.width; spacing: 8; visible: root.currentTab === 1 && root.browsing
-          Item { width: parent.width; height: browseHeader.implicitHeight; PanelSectionHeader { id: browseHeader; text: "Browse voices · Piper"; foreground: root.fg }; Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } } }
+          Item {
+            width: parent.width; height: browseHeader.implicitHeight
+            PanelSectionHeader { id: browseHeader; text: "Browse voices · Piper"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } }
+          }
           TextField { width: parent.width; text: root.voiceFilter; foreground: root.fg; onTextChanged: root.voiceFilter = text }
           ListView {
             width: parent.width; height: Style.space(240); clip: true; model: root.filteredVoices; spacing: 2
@@ -265,7 +277,11 @@ Panel {
           width: parent.width; spacing: 10; visible: root.currentTab === 3
           PanelSectionHeader { text: "Reading the screen"; foreground: root.fg }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Region, focused-window and focused-monitor OCR stay local. Recognised text only leaves your computer when a cloud speech provider is active."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-          Item { width: parent.width; height: ocrHeader.implicitHeight; PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }; Text { anchors.right: parent.right; text: controller.info.ocr?.minConfidence > 0 ? controller.info.ocr.minConfidence + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption } }
+          Item {
+            width: parent.width; height: ocrHeader.implicitHeight
+            PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: controller.info.ocr?.minConfidence > 0 ? controller.info.ocr.minConfidence + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
           PanelSlider { width: parent.width; bar: root.bar; minimum: 0; maximum: 95; step: 5; integer: true; value: controller.info.ocr?.minConfidence ?? 60; onValueChanged: if (!dragging && Math.round(value) !== Number(controller.info.ocr?.minConfidence ?? 60)) controller.setConfig(".ocr.minConfidence", Math.round(value)) }
           TextField { width: parent.width; text: controller.info.ocr?.langs || "eng"; foreground: root.fg; onEditingFinished: controller.setConfig(".ocr.langs", text) }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Tesseract language codes joined with + (for example eng+fra). Install the corresponding language data first."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
@@ -274,7 +290,11 @@ Panel {
         // Keys -------------------------------------------------------------
         Column {
           width: parent.width; spacing: 4; visible: root.currentTab === 4
-          Item { width: parent.width; height: keysHeader.implicitHeight; PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }; Text { anchors.right: parent.right; text: controller.bindings.installed ? "● Installed" : "Not installed"; color: controller.bindings.installed ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption } }
+          Item {
+            width: parent.width; height: keysHeader.implicitHeight
+            PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: controller.bindings.installed ? "● Installed" : "Not installed"; color: controller.bindings.installed ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
           Repeater {
             model: ["selection", "clipboard", "stop", "snip", "window", "screen"]
             delegate: KeyRow {
@@ -306,7 +326,11 @@ Panel {
         PanelSeparator { width: parent.width; foreground: root.fg }
         Column {
           width: parent.width; spacing: 8
-          Item { width: parent.width; height: testHeader.implicitHeight; PanelSectionHeader { id: testHeader; text: "Test"; foreground: root.fg }; Text { anchors.right: parent.right; text: root.activeIsCloud ? "󰅟 sample sent to " + (root.activeProvider.vendor || root.activeProvider.name) : "runs locally"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption } }
+          Item {
+            width: parent.width; height: testHeader.implicitHeight
+            PanelSectionHeader { id: testHeader; text: "Test"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: root.activeIsCloud ? "󰅟 sample sent to " + (root.activeProvider.vendor || root.activeProvider.name) : "runs locally"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
           Row { width: parent.width; spacing: 8
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
             Button { id: testButton; width: 96; text: controller.info.speaking ? "Stop" : "Speak"; iconText: controller.info.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.info.speaking ? Color.urgent : root.fg; accent: controller.info.speaking ? Color.urgent : Color.accent; onClicked: controller.info.speaking ? controller.stop() : controller.speak(root.sampleText) }
