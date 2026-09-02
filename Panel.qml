@@ -315,7 +315,11 @@ Panel {
               readonly property bool untested: modelData.status === "untested"
               readonly property string cloudError: String((((modelData.usage || {}).lastRequest || {}).errorCode) || "")
               // Installed means "present", which is not the same as usable.
-              readonly property bool usable: ready
+              // Unproven is not unusable. A provider that is installed, or a
+              // cloud one with a key, can be selected; only one proven unable
+              // to speak is refused. Requiring `ready` meant a freshly keyed
+              // cloud provider could never be turned on.
+              readonly property bool usable: ready || untested
               readonly property bool cloud: modelData.kind === "cloud"
               width: parent.width; height: providerCopy.implicitHeight + Style.space(12); radius: Style.space(6)
               color: selected ? root.tint(0.10) : "transparent"; border.width: selected ? 1 : 0; border.color: root.tint(0.45)
@@ -341,17 +345,34 @@ Panel {
                     font.pixelSize: Style.font.caption
                   }
                   Text {
-                    id: providerAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring") || !parent.parent.parent.ready
+                    id: providerAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: !parent.parent.parent.ready || (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring")
                     text: { var d = parent.parent.parent
-                            if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
-                            if (d.modelData.status === "nokey") return "Add key"
                             if (controller.verifying === d.modelData.name) return "Testing…"
+                            if (d.modelData.status === "nokey") return "Add key"
+                            // A cloud provider that cannot speak is almost always
+                            // a bad key, and testing it again proves nothing.
+                            if (d.cloud && d.failing) return "Replace key"
                             if (d.failing || d.untested) return "Test"
+                            if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
                             return "Install" }
                     color: Color.accent
                     font.family: root.ff
                     font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.modelData.keySource === "keyring") root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else if (row.failing || row.untested) { controller.verifyProvider(row.modelData.name) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                        var row = parent.parent.parent.parent
+                        if (row.modelData.status === "nokey" || (row.cloud && row.failing)) {
+                          root.apiProvider = row.modelData.name
+                          root.apiVendor = row.modelData.vendor || row.modelData.name
+                          controller.keyResult = ({ ok: false, message: "" })
+                        } else if (row.failing || row.untested) {
+                          controller.verifyProvider(row.modelData.name)
+                        } else if (row.cloud && row.modelData.keySource === "keyring") {
+                          root.confirmKeyRemove = row.modelData.name
+                        } else {
+                          root.confirmProvider = row.modelData.name
+                          root.confirmInstall = row.modelData.install
+                        }
+                      } }
                   }
                 }
                 Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · " + (parent.parent.modelData.model || "paid API"); color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
