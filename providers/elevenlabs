@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# desc: opt-in cloud, needs ELEVENLABS_API_KEY, text leaves your machine
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+need curl "install with: omarchy pkg add curl"
+KEY="$(get_key ELEVENLABS_API_KEY elevenlabs)" || exit 1
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.elevenlabs.voiceId // "21m00Tcm4TlvDq8ikWAM"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="21m00Tcm4TlvDq8ikWAM"
+MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
+
+BODY="$(jq -n --arg t "$(cat)" --arg m "$MODEL" '{text:$t, model_id:$m}')"
+
+curl -sS --fail-with-body \
+  "https://api.elevenlabs.io/v1/text-to-speech/$VOICE?output_format=mp3_44100_128" \
+  -H "xi-api-key: $KEY" -H "Content-Type: application/json" \
+  -d "$BODY" --output - | play_file -

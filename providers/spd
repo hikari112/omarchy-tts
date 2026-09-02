@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# desc: speech-dispatcher, the standard Linux a11y stack
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+need spd-say "install with: omarchy pkg add speech-dispatcher"
+
+RATE="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ v=(r-1)*100; if(v>100)v=100; if(v<-100)v=-100; printf "%d", v }')"
+TEXT="$(cat)"
+ARGS=(-w -r "$RATE")
+[[ -n "${TTS_VOICE:-}" ]] && ARGS+=(-y "$TTS_VOICE")
+exec spd-say "${ARGS[@]}" -- "$TEXT"

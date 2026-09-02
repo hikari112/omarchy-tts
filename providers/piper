@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# desc: local neural voice, fast and natural (default)
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+need piper "install with: uv tool install piper-tts"
+
+VOICES_DIR="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.piper.voice // "en_US-amy-medium"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="en_US-amy-medium"
+
+if [[ -f "$VOICE" ]]; then MODEL="$VOICE"; else MODEL="$VOICES_DIR/$VOICE.onnx"; fi
+
+if [[ ! -f "$MODEL" ]]; then
+  echo "speak: piper voice not found: $MODEL" >&2
+  notify-send -a "Speak" "Voice missing" "Download it: speak-voice add $VOICE" 2>/dev/null
+  exit 1
+fi
+
+# Model config carries the real sample rate; guessing here causes chipmunks.
+RATE_HZ="$(jq -r '.audio.sample_rate // 22050' "$MODEL.json" 2>/dev/null)"
+[[ "$RATE_HZ" =~ ^[0-9]+$ ]] || RATE_HZ=22050
+
+# length-scale is inverse speed: 0.5 = twice as fast.
+LEN="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ if (r<=0) r=1; printf "%.3f", 1/r }')"
+
+piper -m "$MODEL" --output-raw --length-scale "$LEN" 2>/dev/null | play_raw "$RATE_HZ" 1

@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# speak - read text aloud through a pluggable TTS provider.
+#
+# Providers are executables that read text on stdin and play it. User
+# providers in ~/.config/omarchy-tts/providers/ shadow the bundled ones,
+# so bringing your own voice means dropping in a file.
+
+set -uo pipefail
+
+PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts"
+CONFIG="$USER_DIR/config.json"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
+PID_FILE="$STATE_DIR/pgid"
+STATUS_FILE="$STATE_DIR/status"
+SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
+
+mkdir -p "$STATE_DIR"
+
+die() { printf 'speak: %s\n' "$*" >&2; exit 1; }
+
+cfg() { # cfg <json-path> <fallback>
+  local v=""
+  [[ -r "$CONFIG" ]] && v="$(jq -r "$1 // empty" "$CONFIG" 2>/dev/null)"
+  [[ -n "$v" && "$v" != "null" ]] && printf '%s' "$v" || printf '%s' "$2"
+}
+
+set_status() {
+  printf '%s\n' "$1" > "$STATUS_FILE"
+}
+
+provider_path() { # first match wins: user overrides bundled
+  local name="$1"
+  for d in "$USER_DIR/providers" "$PLUGIN_DIR/providers"; do
+    [[ -x "$d/$name" ]] && { printf '%s' "$d/$name"; return 0; }
+  done
+  return 1
+}
+
+provider_names() {
+  { ls -1 "$USER_DIR/providers" 2>/dev/null; ls -1 "$PLUGIN_DIR/providers" 2>/dev/null; } |
+    sort -u | while read -r n; do provider_path "$n" >/dev/null && printf '%s\n' "$n"; done
+}
+
+cycle_provider() {
+  local cur next
+  cur="$(cfg .provider piper)"
+  next="$(provider_names | awk -v c="$cur" '
+    { a[NR]=$0 } END { for (i=1;i<=NR;i++) if (a[i]==c) { print a[i%NR+1]; exit } print a[1] }')"
+  [[ -z "$next" ]] && return 1
+  local tmp; tmp="$(mktemp)"
+  jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null && mv "$tmp" "$CONFIG" || rm -f "$tmp"
+  printf '%s\n' "$next"
+}
+
+list_providers() {
+  local seen=""
+  for d in "$USER_DIR/providers" "$PLUGIN_DIR/providers"; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do
+      [[ -x "$f" && -f "$f" ]] || continue
+      local n; n="$(basename "$f")"
+      [[ " $seen " == *" $n "* ]] && continue
+      seen="$seen $n"
+      local origin="bundled"; [[ "$d" == "$USER_DIR/providers" ]] && origin="user"
+      local mark="  "; [[ "$n" == "$(cfg .provider piper)" ]] && mark="* "
+      printf '%s%-14s %-8s %s\n' "$mark" "$n" "$origin" \
+        "$(sed -n 's/^# desc: //p' "$f" | head -1)"
+    done
+  done
+}
+
+stop_speaking() {
+  local pgid=""
+  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
+  if [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null; then
+    kill -TERM -- "-$pgid" 2>/dev/null
+    sleep 0.15
+    kill -KILL -- "-$pgid" 2>/dev/null
+  fi
+  rm -f "$PID_FILE"
+  set_status idle
+}
+
+is_speaking() {
+  local pgid=""
+  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
+  [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: speak [options] [text...]
+
+Input (default: stdin)
+  -s, --selection      speak the highlighted text (primary selection)
+  -c, --clipboard      speak the clipboard
+      --raw            skip the sanitizer, speak text verbatim
+
+Control
+  -S, --stop           stop speech in progress
+  -T, --toggle         stop if speaking, otherwise speak the selection
+      --status         print current status and exit
+      --watch-status   stream status changes (used by the bar widget)
+
+Voice
+  -p, --provider NAME  override the configured provider
+  -v, --voice NAME     override the configured voice
+  -r, --rate N         speed multiplier (provider-dependent)
+  -m, --max-chars N    truncate near N characters (0 = unlimited)
+  -l, --list           list available providers
+      --cycle-provider switch to the next provider
+      --current-provider  print the active provider
+  -h, --help           this text
+
+Config: ~/.config/omarchy-tts/config.json
+USAGE
+}
+
+SOURCE=stdin PROVIDER="" VOICE="" RATE="" MAXCHARS="" RAWMODE=0
+declare -a WORDS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s|--selection) SOURCE=selection ;;
+    -c|--clipboard) SOURCE=clipboard ;;
+    --raw) RAWMODE=1 ;;
+    -S|--stop) stop_speaking; exit 0 ;;
+    -T|--toggle) if is_speaking; then stop_speaking; exit 0; fi; SOURCE=selection ;;
+    --status) cat "$STATUS_FILE" 2>/dev/null || echo idle; exit 0 ;;
+    --watch-status)
+      last=""
+      while :; do
+        cur="$(cat "$STATUS_FILE" 2>/dev/null || echo idle)"
+        is_speaking || cur=idle
+        [[ "$cur" != "$last" ]] && { printf '%s\n' "$cur"; last="$cur"; }
+        sleep 0.4
+      done ;;
+    -p|--provider) PROVIDER="${2:-}"; shift ;;
+    -v|--voice) VOICE="${2:-}"; shift ;;
+    -r|--rate) RATE="${2:-}"; shift ;;
+    -m|--max-chars) MAXCHARS="${2:-}"; shift ;;
+    --current-provider) cfg .provider piper; echo; exit 0 ;;
+    --cycle-provider)
+      new="$(cycle_provider)" || die "no providers available"
+      command -v notify-send >/dev/null 2>&1 &&
+        notify-send -a "Speak" "Voice provider" "$new" 2>/dev/null
+      printf '%s\n' "$new"; exit 0 ;;
+    -l|--list) list_providers; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; WORDS+=("$@"); break ;;
+    -*) die "unknown option: $1 (try --help)" ;;
+    *) WORDS+=("$1") ;;
+  esac
+  shift
+done
+
+# --- gather input ---------------------------------------------------------
+if [[ ${#WORDS[@]} -gt 0 ]]; then
+  TEXT="${WORDS[*]}"
+else
+  case "$SOURCE" in
+    selection) TEXT="$(wl-paste --primary --no-newline 2>/dev/null)" ;;
+    clipboard) TEXT="$(wl-paste --no-newline 2>/dev/null)" ;;
+    stdin)     [[ -t 0 ]] && { usage; exit 1; }; TEXT="$(cat)" ;;
+  esac
+fi
+
+[[ -n "${TEXT//[[:space:]]/}" ]] || { 
+  [[ "$SOURCE" == selection ]] && notify-send -a "Speak" "Nothing selected" \
+    "Highlight some text first." 2>/dev/null
+  exit 0
+}
+
+# --- sanitize -------------------------------------------------------------
+if [[ $RAWMODE -eq 0 ]]; then
+  MAXCHARS="${MAXCHARS:-$(cfg .maxChars 0)}"
+  SPOKEN="$(printf '%s' "$TEXT" | python3 "$SANITIZER" --max-chars "$MAXCHARS")" || {
+    notify-send -a "Speak" "Nothing speakable" "Selection was all markup or code." 2>/dev/null
+    exit 0
+  }
+else
+  SPOKEN="$TEXT"
+fi
+
+# --- resolve provider -----------------------------------------------------
+PROVIDER="${PROVIDER:-$(cfg .provider piper)}"
+PROV_BIN="$(provider_path "$PROVIDER")" || die "no such provider: $PROVIDER (try --list)"
+
+export TTS_VOICE="${VOICE:-$(cfg .voice "")}"
+export TTS_RATE="${RATE:-$(cfg .rate 1.0)}"
+export TTS_PLUGIN_DIR="$PLUGIN_DIR"
+export TTS_CONFIG="$CONFIG"
+
+# --- speak ----------------------------------------------------------------
+stop_speaking   # never let two voices overlap
+
+set_status speaking
+setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
+child=$!
+pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
+printf '%s\n' "${pgid:-$child}" > "$PID_FILE"
+
+wait "$child"
+rc=$?
+rm -f "$PID_FILE"
+set_status idle
+
+# 143/137 = we cancelled it on purpose, not a failure
+[[ $rc -eq 143 || $rc -eq 137 ]] && exit 0
+exit $rc

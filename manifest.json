@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "hikari.tts",
+  "name": "Text to Speech",
+  "version": "1.0.0",
+  "author": "hikari",
+  "description": "Speak highlighted text aloud through a pluggable TTS provider",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Text to Speech",
+    "description": "Click to speak the selection, right-click to change voice",
+    "category": "Info",
+    "allowMultiple": false
+  }
+}

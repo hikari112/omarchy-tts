@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# desc: opt-in cloud, needs OPENAI_API_KEY, text leaves your machine
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+need curl "install with: omarchy pkg add curl"
+KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.openai.voice // "alloy"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="alloy"
+MODEL="$(jq -r '.openai.model // "gpt-4o-mini-tts"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="gpt-4o-mini-tts"
+
+BODY="$(jq -n --arg m "$MODEL" --arg v "$VOICE" --arg t "$(cat)" \
+  --argjson s "${TTS_RATE:-1.0}" \
+  '{model:$m, voice:$v, input:$t, speed:$s, response_format:"mp3"}')"
+
+curl -sS --fail-with-body https://api.openai.com/v1/audio/speech \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d "$BODY" --output - | play_file -
