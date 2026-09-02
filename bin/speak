@@ -115,6 +115,75 @@ list_providers() {
   done
 }
 
+meta_of() { # meta_of <file> <field>
+  sed -n "s/^# $2: //p" "$1" | head -1
+}
+
+provider_status() { # ready | missing | nokey
+  local bin="$1" probe kind
+  probe="$(meta_of "$bin" probe)"
+  kind="$(meta_of "$bin" kind)"
+  [[ -z "$probe" ]] && { printf 'ready'; return; }
+  if TTS_CONFIG="$CONFIG" bash -c "$probe" >/dev/null 2>&1; then
+    printf 'ready'
+  elif [[ "$kind" == "cloud" ]]; then
+    printf 'nokey'
+  else
+    printf 'missing'
+  fi
+}
+
+# One JSON blob so the settings panel makes a single call instead of a dozen.
+emit_info() {
+  local voices_dir="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+  local provs="[]" vs="[]"
+  provs="$(
+    provider_names | while read -r n; do
+      local b; b="$(provider_path "$n")" || continue
+      jq -nc --arg name "$n" \
+             --arg kind "$(meta_of "$b" kind)" \
+             --arg desc "$(meta_of "$b" desc)" \
+             --arg status "$(provider_status "$b")" \
+             '{name:$name, kind:(if $kind=="" then "local" else $kind end),
+               desc:$desc, status:$status}'
+    done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
+  )"
+  vs="$(
+    for m in "$voices_dir"/*.onnx; do
+      [[ -e "$m" ]] || continue
+      basename "$m" .onnx
+    done | jq -Rsc 'split("\n") | map(select(length>0))'
+  )"
+  local speaking=false
+  is_speaking && speaking=true
+  jq -nc \
+    --argjson providers "$provs" \
+    --argjson voices "$vs" \
+    --arg provider "$(cfg .provider piper)" \
+    --arg voice "$(cfg .piper.voice en_US-amy-medium)" \
+    --argjson rate "$(cfg .rate 1.0)" \
+    --argjson maxChars "$(cfg .maxChars 0)" \
+    --arg ocrEngine "$(cfg .ocr.engine tesseract)" \
+    --arg ocrLangs "$(cfg .ocr.langs eng)" \
+    --argjson ocrMinConf "$(cfg .ocr.minConfidence 60)" \
+    --argjson speaking "$speaking" \
+    '{provider:$provider, voice:$voice, rate:$rate, maxChars:$maxChars,
+      speaking:$speaking, providers:$providers, voices:$voices,
+      ocr:{engine:$ocrEngine, langs:$ocrLangs, minConfidence:$ocrMinConf}}'
+}
+
+set_config() { # set_config <dot.path> <value>
+  local path="$1" val="$2" tmp
+  tmp="$(mktemp)"
+  # Numbers and booleans must land untyped; everything else is a string.
+  if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ || "$val" == "true" || "$val" == "false" ]]; then
+    jq --argjson v "$val" "$path = \$v" "$CONFIG" > "$tmp"
+  else
+    jq --arg v "$val" "$path = \$v" "$CONFIG" > "$tmp"
+  fi
+  if [[ -s "$tmp" ]]; then mv "$tmp" "$CONFIG"; else rm -f "$tmp"; return 1; fi
+}
+
 stop_speaking() {
   local pgid=""
   [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
@@ -162,6 +231,8 @@ Voice
   -l, --list           list available providers
       --cycle-provider switch to the next provider
       --current-provider  print the active provider
+      --info           print all state as JSON (used by the settings panel)
+      --set P V        write a config value, e.g. --set .rate 1.2
   -h, --help           this text
 
 Config: ~/.config/omarchy-tts/config.json
@@ -202,6 +273,11 @@ while [[ $# -gt 0 ]]; do
       command -v notify-send >/dev/null 2>&1 &&
         notify-send -a "Speak" "Voice provider" "$new" 2>/dev/null
       printf '%s\n' "$new"; exit 0 ;;
+    --info) emit_info; exit 0 ;;
+    --set)
+      [[ -n "${2:-}" && -n "${3:-}" ]] || die "--set needs a path and a value"
+      set_config "$2" "$3" || die "could not write $2"
+      shift 2; exit 0 ;;
     -l|--list) list_providers; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; WORDS+=("$@"); break ;;

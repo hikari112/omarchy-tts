@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # desc: opt-in local, best quality, slow cold start
+# kind: local
+# probe: [[ -x "${KOKORO_PYTHON:-$HOME/.local/share/omarchy-tts/kokoro-venv/bin/python}" ]]
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 

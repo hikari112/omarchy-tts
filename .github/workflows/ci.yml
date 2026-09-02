@@ -42,8 +42,10 @@ jobs:
       - name: Plugin id matches QML moduleName
         run: |
           id=$(jq -r '.id' manifest.json)
-          grep -q "moduleName: \"$id\"" BarWidget.qml \
-            || { echo "BarWidget.qml moduleName does not match manifest id ($id)"; exit 1; }
+          for f in BarWidget.qml Panel.qml; do
+            grep -q "moduleName: \"$id\"" "$f" \
+              || { echo "$f moduleName does not match manifest id ($id)"; exit 1; }
+          done
 
       - name: Providers are executable
         run: |

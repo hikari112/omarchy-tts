@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # desc: local OCR, fast and deterministic (default)
+# kind: local
+# probe: command -v tesseract >/dev/null 2>&1
 # Reads a PNG on stdin, writes recognised text on stdout.
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"

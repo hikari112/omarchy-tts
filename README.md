@@ -73,6 +73,25 @@ speak-voice use en_GB-alba-medium
 speak-voice browse            # sample the catalogue
 ```
 
+## Settings panel
+
+Click the speaker in the bar. Right-click it to speak the selection without
+opening anything.
+
+Three tabs, and a Test dock that stays visible on all of them so you can hear
+a change straight after making it:
+
+- **Provider** — all six at once, each showing whether it actually works on
+  this machine. Cloud providers carry a standing note that text leaves the
+  machine, and the Test dock says `runs locally` or names the vendor.
+- **Voice** — installed voice, speed, length limit.
+- **Screen** — OCR confidence floor.
+
+Settings write on change; there is no Save button. Everything the panel shows
+comes from `speak --info`, and everything it changes goes through
+`speak --set`, so the panel is a front-end to the CLI rather than a second
+implementation of it.
+
 ## Reading the screen (OCR)
 
 Text in an image, a scanned PDF, a locked menu, a paused video frame — none of

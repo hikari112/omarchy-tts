@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # desc: speech-dispatcher, the standard Linux a11y stack
+# kind: local
+# probe: command -v spd-say >/dev/null 2>&1
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need spd-say "install with: omarchy pkg add speech-dispatcher"

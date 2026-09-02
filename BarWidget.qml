@@ -14,15 +14,43 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // The bar host injects `bar` and `settings` into the widget, not into the
+  // panel it loads, so they have to be handed down by hand.
+  function injectPanel() {
+    var p = panelLoader.item
+    if (!p) return
+    if ("bar" in p) p.bar = root.bar
+    if ("settings" in p) p.settings = root.settings
+    if ("anchorItem" in p) p.anchorItem = button
+    if ("hostWidget" in p) p.hostWidget = root
+  }
+
+  onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
+
+  // Shape the bar expects when routing summon/hide to a widget's panel.
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function close() { if (panelLoader.item) panelLoader.item.close() }
+  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
   // Long-lived status stream: `speak --watch-status` prints only on change.
   Process {
-    id: statusWatcher
     command: ["bash", "-c", "exec " + root.speakBin + " --watch-status"]
     running: true
     stdout: SplitParser {
-      onRead: function (line) {
-        root.speaking = (line.trim() === "speaking")
-      }
+      onRead: function (line) { root.speaking = (line.trim() === "speaking") }
     }
   }
 
@@ -31,9 +59,7 @@ BarWidget {
     command: ["bash", "-c", "exec " + root.speakBin + " --current-provider"]
     running: true
     stdout: SplitParser {
-      onRead: function (line) {
-        if (line.trim() !== "") root.provider = line.trim()
-      }
+      onRead: function (line) { if (line.trim() !== "") root.provider = line.trim() }
     }
   }
 
@@ -53,19 +79,17 @@ BarWidget {
     text: "󰕾"
     active: root.speaking
     tooltipText: root.speaking
-      ? "Speaking — click to stop"
-      : "Speak selection (" + root.provider + ")"
+      ? "Speaking — right-click to stop"
+      : "Text to speech (" + root.provider + ") — click for settings"
 
-    // Gentle pulse so it reads as "busy" without stealing attention.
     opacity: root.speaking ? pulse.value : 1.0
 
     onPressed: function (btn) {
       if (btn === Qt.RightButton) {
-        root.run("--cycle-provider")
-        providerReader.running = false
-        providerReader.running = true
-      } else {
+        // Quick action, so speaking never requires opening the panel first.
         root.run("--toggle")
+      } else {
+        root.togglePanel()
       }
     }
   }

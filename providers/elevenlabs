@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # desc: opt-in cloud, needs ELEVENLABS_API_KEY, text leaves your machine
+# kind: cloud
+# probe: [[ -n "${ELEVENLABS_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key elevenlabs >/dev/null 2>&1 || jq -e ".apiKeys.elevenlabs // empty" "$TTS_CONFIG" >/dev/null 2>&1
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # desc: robotic but instant, tiny, never fails
+# kind: local
+# probe: command -v espeak-ng >/dev/null 2>&1
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need espeak-ng "install with: omarchy pkg add espeak-ng"
