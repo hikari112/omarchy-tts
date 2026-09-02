@@ -57,7 +57,7 @@ BarWidget {
 
   Process {
     id: providerReader
-    command: [root.speakBin, "--current-provider"]
+    command: [root.speakBin, "--watch-provider"]
     running: true
     stdout: SplitParser {
       onRead: function (line) { if (line.trim() !== "") root.provider = line.trim() }
@@ -81,7 +81,7 @@ BarWidget {
     active: root.speaking
     tooltipText: root.speaking
       ? "Speaking — right-click to stop"
-      : "Text to speech (" + root.provider + ") — click for settings"
+      : "Text to speech (" + root.provider + ") — click for settings, right-click to speak selection"
 
     opacity: root.speaking ? pulse.value : 1.0
 

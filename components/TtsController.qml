@@ -18,7 +18,6 @@ Item {
   property var setupJob: ({ status: "idle", step: "", progress: 0, message: "" })
   property var keyResult: ({ ok: false, message: "" })
   property string preview: ""
-  property string selectionText: ""
   property string error: ""
   property string pendingKey: ""
   property bool keySaving: false
@@ -30,7 +29,6 @@ Item {
   function refreshBindings() { restart(bindingsProc) }
   function refreshSetup() { restart(setupStatusProc); restart(setupJobProc) }
   function loadCatalogue() { restart(catalogueProc) }
-  function loadSelection() { restart(selectionProc) }
   function action(argv) { error = ""; actionProc.running = false; actionProc.command = argv; actionProc.running = true }
   function setConfig(path, value) { action([speakBin, "--set", path, String(value)]) }
   function speak(text) { speechProc.command = [speakBin, "--raw", "--", text]; restart(speechProc) }
@@ -39,6 +37,7 @@ Item {
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { action([voiceBin, "add", key, "--async"]); download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true }
   function cancelDownload() { action([voiceBin, "cancel"]); downloadPoll.running = false }
+  function useVoice(key) { action([voiceBin, "use", key]) }
   function removeVoice(key) { action([voiceBin, "remove", key]) }
   function installBindings() { action([bindingsBin, "install"]) }
   function removeBindings() { action([bindingsBin, "remove"]) }
@@ -56,7 +55,6 @@ Item {
   }
   function removeKey(provider) { if (provider === "openai" || provider === "elevenlabs") action([setupBin, "key-remove", provider]) }
 
-  Process { id: selectionProc; command: ["wl-paste", "--primary", "--no-newline"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.selectionText = text } }
   Process {
     id: infoProc; command: [root.speakBin, "--info"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.info = JSON.parse(text); root.error = "" } catch (e) { root.error = "Could not read TTS settings" } } }

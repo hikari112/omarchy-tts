@@ -274,6 +274,7 @@ Voice
   -l, --list           list available providers
       --cycle-provider switch to the next provider
       --current-provider  print the active provider
+      --watch-provider    stream provider changes (used by the bar widget)
       --info           print all state as JSON (used by the settings panel)
       --set P V        write a config value, e.g. --set .rate 1.2
       --preview        sanitize stdin and print the exact text that would be spoken
@@ -313,6 +314,13 @@ while [[ $# -gt 0 ]]; do
     -r|--rate) RATE="${2:-}"; shift ;;
     -m|--max-chars) MAXCHARS="${2:-}"; shift ;;
     --current-provider) cfg .provider piper; echo; exit 0 ;;
+    --watch-provider)
+      last=""
+      while :; do
+        cur="$(cfg .provider piper)"
+        [[ "$cur" != "$last" ]] && { printf '%s\n' "$cur"; last="$cur"; }
+        sleep 0.5
+      done ;;
     --cycle-provider)
       new="$(cycle_provider)" || die "no providers available"
       command -v notify-send >/dev/null 2>&1 &&

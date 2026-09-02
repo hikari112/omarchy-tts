@@ -34,6 +34,6 @@ Item {
       color: root.checked ? Color.popups.background : root.foreground
       Behavior on x { NumberAnimation { duration: 150 } }
     }
-    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggled(!root.checked) }
   }
+  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.toggled(!root.checked) }
 }

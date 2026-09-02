@@ -16,9 +16,9 @@ newer OCR work. The panel now has Provider, Voice, Text, Screen and Keys tabs.
 - `Panel.qml` owns presentation and transient interaction state.
 
 QML uses argv arrays for user-controlled values. Shell interpretation is
-limited to reviewed provider install commands opened visibly in a terminal.
-Cloud keys are entered in a terminal and stored with Secret Service; the key
-never returns to QML or appears in a process argument.
+limited to a fixed allowlist handled by the graphical setup backend.
+Cloud keys are entered in a masked panel field and stored with Secret Service;
+the key never returns to QML or appears in a process argument.
 
 ## Configuration
 

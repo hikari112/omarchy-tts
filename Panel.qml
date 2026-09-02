@@ -27,9 +27,12 @@ Panel {
   property string confirmInstall: ""
   property string confirmProvider: ""
   property string confirmKeyRemove: ""
+  property string confirmVoiceRemove: ""
   property string apiProvider: ""
   property string apiVendor: ""
   property bool setupSkipped: false
+  property real speedPreview: Number(controller.info.rate || 1)
+  property int confidencePreview: Number(controller.info.ocr?.minConfidence ?? 60)
   readonly property bool needsSetup: !controller.setup.ready && !setupSkipped
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
@@ -73,19 +76,30 @@ Panel {
   }
 
   TtsController { id: controller }
-  Connections {
-    target: controller
-    function onSelectionTextChanged() {
-      if (controller.selectionText.trim()) root.previewSource = controller.selectionText.slice(0, 4000)
-    }
-  }
   onOpenedChanged: if (opened) {
-    controller.refresh(); controller.refreshBindings(); controller.refreshSetup(); controller.loadSelection()
+    controller.refresh(); controller.refreshBindings(); controller.refreshSetup()
     Qt.callLater(function() {
       root.currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
       root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
       controller.previewText(root.previewSource)
     })
+  }
+  Connections {
+    target: controller
+    function onInfoChanged() {
+      root.speedPreview = Number(controller.info.rate || 1)
+      root.confidencePreview = Number(controller.info.ocr?.minConfidence ?? 60)
+      if (!sampleField.activeFocus) {
+        root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
+        Qt.callLater(function() { sampleField.cursorPosition = 0 })
+      }
+    }
+    function onKeyResultChanged() {
+      if (controller.keyResult.ok) {
+        root.apiProvider = ""
+        root.apiVendor = ""
+      }
+    }
   }
   onCurrentTabChanged: if (opened) controller.setConfig(".ui.lastTab", currentTab)
 
@@ -234,12 +248,12 @@ Panel {
           Item {
             width: parent.width; height: speedHeader.implicitHeight
             PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: Number(controller.info.rate || 1).toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: root.speedPreview.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: 32; text: "−"; bordered: true; onClicked: controller.setConfig(".rate", Math.max(.5, Number(controller.info.rate)-.1).toFixed(2)) }
-            PanelSlider { width: parent.width - 80; bar: root.bar; minimum: .5; maximum: 2; step: .05; value: controller.info.rate || 1; onValueChanged: if (!dragging && Math.abs(value - Number(controller.info.rate || 1)) > .001) controller.setConfig(".rate", value.toFixed(2)) }
-            Button { width: 32; text: "+"; bordered: true; onClicked: controller.setConfig(".rate", Math.min(2, Number(controller.info.rate)+.1).toFixed(2)) }
+            Button { width: 32; text: "−"; bordered: true; onClicked: { root.speedPreview = Math.max(.5, root.speedPreview - .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
+            PanelSlider { width: parent.width - 80; bar: root.bar; minimum: .5; maximum: 2; step: .05; value: Number(controller.info.rate || 1); onMoved: function(v) { root.speedPreview = Math.round(v * 20) / 20 }; onReleased: function(v) { var snapped = Math.round(v * 20) / 20; root.speedPreview = snapped; controller.setConfig(".rate", snapped.toFixed(2)) } }
+            Button { width: 32; text: "+"; bordered: true; onClicked: { root.speedPreview = Math.min(2, root.speedPreview + .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
           }
           Item {
             width: parent.width; height: limitHeader.implicitHeight
@@ -266,9 +280,24 @@ Panel {
               required property var modelData
               readonly property bool busy: controller.download.status === "downloading" && controller.download.voice === modelData.key
               width: ListView.view.width; height: 42; radius: 5; color: modelData.installed ? root.tint(.07) : "transparent"
-              Text { anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.modelData.name + " · " + parent.modelData.quality + " · " + parent.modelData.lang; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
-              Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? controller.download.percent + "% · Cancel" : "󰇚 " + parent.modelData.sizeMB + " MB"); color: parent.modelData.installed || parent.busy ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-              MouseArea { anchors.fill: parent; enabled: parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: { if (parent.busy) controller.cancelDownload(); else if (parent.modelData.installed) controller.removeVoice(parent.modelData.key); else controller.downloadVoice(parent.modelData.key) } }
+              Text { anchors.left: parent.left; anchors.right: parent.right; anchors.rightMargin: 112; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; text: parent.modelData.name + " · " + parent.modelData.quality + " · " + parent.modelData.lang; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text {
+                id: voiceAction; z: 2; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? controller.download.percent + "% · Cancel" : "󰇚 " + parent.modelData.sizeMB + " MB")
+                color: parent.modelData.installed || parent.busy ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                MouseArea { anchors.fill: parent; enabled: parent.parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: { var row = parent.parent; if (row.busy) controller.cancelDownload(); else if (row.modelData.installed) root.confirmVoiceRemove = row.modelData.key; else controller.downloadVoice(row.modelData.key) } }
+              }
+              MouseArea { anchors.fill: parent; z: 1; enabled: parent.modelData.installed && parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.useVoice(parent.modelData.key) }
+            }
+          }
+          Rectangle {
+            width: parent.width; height: voiceRemoveRow.implicitHeight + 16; radius: 6
+            visible: root.confirmVoiceRemove !== ""; color: root.tint(0.08); border.width: 1; border.color: Color.popups.border
+            Row {
+              id: voiceRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
+              Text { width: parent.width - cancelVoice.width - removeVoice.width - 24; elide: Text.ElideMiddle; text: "Remove " + root.confirmVoiceRemove + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Button { id: cancelVoice; text: "Cancel"; bordered: true; onClicked: root.confirmVoiceRemove = "" }
+              Button { id: removeVoice; text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeVoice(root.confirmVoiceRemove); root.confirmVoiceRemove = "" } }
             }
           }
           Text { text: "Storage: ~/.local/share/omarchy-tts/voices/piper"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
@@ -280,8 +309,8 @@ Panel {
           PanelSectionHeader { text: "What gets spoken"; foreground: root.fg }
           Row {
             width: parent.width; spacing: 8
-            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; background: null; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
-            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; color: root.tint(.06); border.width: 1; border.color: Color.popups.border; Text { anchors.fill: parent; anchors.margins: 6; text: controller.preview || "Spoken preview"; color: root.fg; wrapMode: Text.WordWrap; font.family: root.ff; font.pixelSize: Style.font.caption } }
+            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
+            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: root.tint(.06); border.width: 1; border.color: Color.popups.border; Text { anchors.fill: parent; anchors.margins: 6; text: controller.preview || "Spoken preview"; color: root.fg; wrapMode: Text.WordWrap; clip: true; elide: Text.ElideRight; maximumLineCount: 5; font.family: root.ff; font.pixelSize: Style.font.caption } }
           }
           SettingToggle { label: "Read URLs as ‘link’"; checked: controller.info.sanitizer?.urls === "link"; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.urls", value ? "link" : "domain") }
           SettingToggle { label: "Read inline code"; checked: controller.info.sanitizer?.inlineCode !== false; foreground: root.fg; onToggled: controller.setConfig(".sanitizer.inlineCode", value) }
@@ -299,9 +328,9 @@ Panel {
           Item {
             width: parent.width; height: ocrHeader.implicitHeight
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: controller.info.ocr?.minConfidence > 0 ? controller.info.ocr.minConfidence + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: root.confidencePreview > 0 ? root.confidencePreview + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
-          PanelSlider { width: parent.width; bar: root.bar; minimum: 0; maximum: 95; step: 5; integer: true; value: controller.info.ocr?.minConfidence ?? 60; onValueChanged: if (!dragging && Math.round(value) !== Number(controller.info.ocr?.minConfidence ?? 60)) controller.setConfig(".ocr.minConfidence", Math.round(value)) }
+          PanelSlider { width: parent.width; bar: root.bar; minimum: 0; maximum: 95; step: 5; integer: true; value: Number(controller.info.ocr?.minConfidence ?? 60); onMoved: function(v) { root.confidencePreview = Math.round(v / 5) * 5 }; onReleased: function(v) { var snapped = Math.round(v / 5) * 5; root.confidencePreview = snapped; controller.setConfig(".ocr.minConfidence", snapped) } }
           TextField { width: parent.width; text: controller.info.ocr?.langs || "eng"; foreground: root.fg; onEditingFinished: controller.setConfig(".ocr.langs", text) }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Tesseract language codes joined with + (for example eng+fra). Install the corresponding language data first."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
@@ -338,7 +367,7 @@ Panel {
             Text { text: root.capturedChord || "Waiting for keys…"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.subtitle }
             Row { spacing: 8
               Button { text: "Cancel"; bordered: true; onClicked: { root.captureAction = ""; root.capturedChord = "" } }
-              Button { text: "Use shortcut"; bordered: true; enabled: root.capturedChord !== ""; foreground: Color.accent; onClicked: controller.setBinding(root.captureAction, root.capturedChord) }
+              Button { text: "Use shortcut"; bordered: true; enabled: root.capturedChord !== ""; foreground: Color.accent; onClicked: { controller.setBinding(root.captureAction, root.capturedChord); root.captureAction = ""; root.capturedChord = "" } }
             }
           }
         }
@@ -352,7 +381,7 @@ Panel {
             Text { anchors.right: parent.right; text: root.activeIsCloud ? "󰅟 sample sent to " + (root.activeProvider.vendor || root.activeProvider.name) : "runs locally"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
+            TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
             Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
           Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + controller.info.voice : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
