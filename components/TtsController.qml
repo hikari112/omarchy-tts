@@ -96,7 +96,7 @@ Item {
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { if (action([voiceBin, "add", key, "--async"])) { download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true } }
-  function cancelDownload() { action([voiceBin, "cancel"]); downloadPoll.running = false }
+  function cancelDownload() { action([voiceBin, "cancel"]) }
   function useVoice(key) { action([voiceBin, "use", key]) }
   function removeVoice(key) { action([voiceBin, "remove", key]) }
   function installBindings() { action([bindingsBin, "install"]) }
@@ -107,7 +107,7 @@ Item {
     var targets = ({ "piper": "piper", "kokoro": "kokoro", "espeak-ng": "espeak-ng", "spd": "spd" })
     if (targets[provider]) startSetup(targets[provider])
   }
-  function cancelSetup() { action([setupBin, "cancel"]); setupJobPoll.running = false }
+  function cancelSetup() { action([setupBin, "cancel"]) }
   function storeKey(provider, key) {
     if ((provider !== "openai" && provider !== "elevenlabs") || key.length < 8) return
     pendingKey = key; keySaving = true; keyResult = { ok: false, message: "" }

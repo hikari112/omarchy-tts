@@ -8,6 +8,7 @@ allowlist; no command supplied by QML or provider metadata is executed.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ DATA = DATA_HOME / "omarchy-tts"
 ENGINE = DATA / "engines"
 VOICES = DATA / "voices" / "piper"
 STATE = RUNTIME / "setup.json"
+SETUP_LOCK = RUNTIME / "setup.lock"
 VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
 BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
 DEFAULT_VOICE = "en_US-amy-medium"
@@ -87,8 +89,9 @@ def piper_binary() -> Path:
 def status() -> dict:
     voice = VOICES / f"{DEFAULT_VOICE}.onnx"
     legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
-    engine_ready = piper_binary().is_file() or shutil.which("piper") is not None
-    voice_ready = voice.is_file() or legacy_voice.is_file()
+    engine_ready = os.access(piper_binary(), os.X_OK) or shutil.which("piper") is not None
+    voice_ready = ((voice.is_file() and voice.stat().st_size > 0)
+                   or (legacy_voice.is_file() and legacy_voice.stat().st_size > 0))
     bindings = False
     try:
         result = subprocess.run([BINDINGS_TOOL, "status"], text=True,
@@ -226,6 +229,13 @@ def start(target: str) -> None:
     if target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
         emit(ok=False, code="unknown_target", message="Unknown installation target")
         return
+    lock_fd = os.open(SETUP_LOCK, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(lock_fd)
+        emit(ok=False, code="already_running", message="Setup is already running")
+        return
     try:
         current = json.loads(STATE.read_text())
         pid = int(current.get("pid", 0))
@@ -233,14 +243,21 @@ def start(target: str) -> None:
         if current.get("status") in {"starting", "running"} and pid > 1 \
                 and identity and process_identity(pid) == identity:
             emit(ok=False, code="already_running", message="Setup is already running")
+            os.close(lock_fd)
             return
     except (OSError, ValueError, TypeError):
         pass
     RUNTIME.mkdir(parents=True, exist_ok=True)
     write_state("starting", "prepare", 1, "Preparing setup", target=target)
-    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_worker", target],
-                               start_new_session=True, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "_worker", target],
+            start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(lock_fd,),
+        )
+    finally:
+        os.close(lock_fd)
     emit(ok=True, started=True, pid=process.pid)
 
 

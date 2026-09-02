@@ -61,14 +61,7 @@ cycle_provider() {
   next="$(provider_names | awk -v c="$cur" '
     { a[NR]=$0 } END { for (i=1;i<=NR;i++) if (a[i]==c) { print a[i%NR+1]; exit } print a[1] }')"
   [[ -z "$next" ]] && return 1
-  local tmp; tmp="$(mktemp "${CONFIG}.XXXXXX")"
-  if jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null; then
-    chmod 600 "$tmp"
-    mv "$tmp" "$CONFIG"
-  else
-    rm -f "$tmp"
-    return 1
-  fi
+  tts_config_set .provider "$next" || return 1
   printf '%s\n' "$next"
 }
 
@@ -95,7 +88,10 @@ capture() {
         sleep 0.1
       fi
       geom="$(slurp 2>/dev/null)"
-      [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+      if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null || true
+      fi
       [[ -z "$geom" ]] && return 2          # user cancelled: not an error
       grim -g "$geom" - 2>/dev/null
       ;;
@@ -147,6 +143,9 @@ health_of() { # health_of <provider> -> ok | failed | untested
 
 health_set() { # health_set <provider> <ok|failed> [note]
   mkdir -p "$CACHE_DIR"
+  local lock_fd
+  exec {lock_fd}>"${HEALTH}.lock"
+  flock "$lock_fd"
   [[ -s "$HEALTH" ]] || printf '{}' > "$HEALTH"
   local tmp; tmp="$(mktemp "${HEALTH}.XXXXXX")"
   if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
@@ -156,6 +155,8 @@ health_set() { # health_set <provider> <ok|failed> [note]
   else
     rm -f "$tmp"
   fi
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
 }
 
 provider_installed() { # 0 if the probe passes
@@ -189,7 +190,7 @@ verify_provider() { # verify_provider <name>
   provider_installed "$bin" || return 2
   local rc=0
   # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
-  timeout 90 env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
+  timeout --kill-after=5s 90s env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
       TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
       bash -c 'exec "$0"' "$bin" <<< "Test." >/dev/null 2>&1 || rc=$?
   if [[ $rc -eq 0 ]]; then
@@ -290,9 +291,12 @@ emit_info() {
 set_config() { tts_config_set "$1" "$2"; }
 
 stop_speaking_unlocked() {
-  local pgid=""
-  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
-  if [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null; then
+  local pgid="" identity="" current_identity=""
+  [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
+  [[ "$pgid" =~ ^[0-9]+$ ]] &&
+    current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+  if [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
+      kill -0 -- "-$pgid" 2>/dev/null; then
     kill -TERM -- "-$pgid" 2>/dev/null
     sleep 0.15
     kill -KILL -- "-$pgid" 2>/dev/null
@@ -311,9 +315,12 @@ stop_speaking() {
 }
 
 is_speaking() {
-  local pgid=""
-  [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
-  [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null
+  local pgid="" identity="" current_identity=""
+  [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
+  [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
+  current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+  [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
+    kill -0 -- "-$pgid" 2>/dev/null
 }
 
 usage() {
@@ -372,7 +379,11 @@ while [[ $# -gt 0 ]]; do
     --raw) RAWMODE=1 ;;
     -S|--stop) stop_speaking; exit 0 ;;
     -T|--toggle) if is_speaking; then stop_speaking; exit 0; fi; SOURCE=selection ;;
-    --status) cat "$STATUS_FILE" 2>/dev/null || echo idle; exit 0 ;;
+    --status)
+      if is_speaking; then cat "$STATUS_FILE" 2>/dev/null || echo speaking
+      else echo idle
+      fi
+      exit 0 ;;
     --watch-status)
       last=""
       while :; do
@@ -519,8 +530,13 @@ set_status speaking
 setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
 child=$!
 pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
-printf '%s\n' "${pgid:-$child}" > "$PID_FILE"
-speech_owner="${pgid:-$child}"
+speech_pgid="${pgid:-$child}"
+speech_identity="$(awk '{print $22}' "/proc/$speech_pgid/stat" 2>/dev/null || true)"
+speech_owner=""
+if [[ -n "$speech_identity" ]]; then
+  speech_owner="$speech_pgid $speech_identity"
+  printf '%s\n' "$speech_owner" > "$PID_FILE"
+fi
 flock -u "$speech_lock_fd"
 exec {speech_lock_fd}>&-
 

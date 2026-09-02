@@ -11,22 +11,25 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import copy
 
 BEGIN = "-- >>> omarchy-tts bindings"
 END = "-- <<< omarchy-tts bindings"
 SPEAK = str(Path(__file__).resolve().parent / "speak")
+SPEAK_COMMAND = shlex.quote(SPEAK)
 DEFAULTS = {
-    "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": f"{SPEAK} --toggle"},
-    "clipboard": {"chord": "SUPER + ALT + A", "label": "Speak clipboard", "command": f"{SPEAK} --clipboard"},
-    "stop": {"chord": "SUPER + ALT + X", "label": "Stop speaking", "command": f"{SPEAK} --stop"},
-    "snip": {"chord": "SUPER + ALT + R", "label": "Speak screen region", "command": f"{SPEAK} --snip"},
-    "window": {"chord": "SUPER + ALT + W", "label": "Speak focused window", "command": f"{SPEAK} --window"},
-    "screen": {"chord": "SUPER + ALT + SHIFT + R", "label": "Speak whole screen", "command": f"{SPEAK} --screen"},
+    "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": f"{SPEAK_COMMAND} --toggle"},
+    "clipboard": {"chord": "SUPER + ALT + A", "label": "Speak clipboard", "command": f"{SPEAK_COMMAND} --clipboard"},
+    "stop": {"chord": "SUPER + ALT + X", "label": "Stop speaking", "command": f"{SPEAK_COMMAND} --stop"},
+    "snip": {"chord": "SUPER + ALT + R", "label": "Speak screen region", "command": f"{SPEAK_COMMAND} --snip"},
+    "window": {"chord": "SUPER + ALT + W", "label": "Speak focused window", "command": f"{SPEAK_COMMAND} --window"},
+    "screen": {"chord": "SUPER + ALT + SHIFT + R", "label": "Speak whole screen", "command": f"{SPEAK_COMMAND} --screen"},
 }
 
 
@@ -36,13 +39,18 @@ def paths() -> tuple[Path, Path]:
 
 
 def load_config(path: Path) -> dict:
+    config = copy.deepcopy(DEFAULTS)
     if not path.exists():
-        return copy.deepcopy(DEFAULTS)
+        return config
     try:
         data = json.loads(path.read_text())
-        return {key: {**value, **data.get(key, {})} for key, value in DEFAULTS.items()}
+        for key in config:
+            stored = data.get(key, {})
+            if isinstance(stored, dict) and "chord" in stored:
+                config[key]["chord"] = normalize_chord(str(stored["chord"]))
+        return config
     except (OSError, ValueError, TypeError):
-        return DEFAULTS
+        return copy.deepcopy(DEFAULTS)
 
 
 def render(config: dict) -> str:
@@ -93,7 +101,10 @@ def is_our_command(command: str) -> bool:
     Deliberately strict: the executable must be named `speak` and must carry
     one of our own flags, so an unrelated binding is never adopted or removed.
     """
-    parts = command.split()
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
     if not parts:
         return False
     if Path(parts[0]).name != "speak":
@@ -133,6 +144,42 @@ def conflicting_chords(text: str, config: dict) -> list[str]:
     return conflicts
 
 
+MOD_MASKS = {"SHIFT": 1, "CTRL": 4, "ALT": 8, "SUPER": 64}
+
+
+def chord_signature(chord: str) -> tuple[int, str]:
+    parts = [part.strip().upper() for part in chord.split("+")]
+    modifiers = sum(MOD_MASKS.get(part, 0) for part in parts)
+    keys = [part for part in parts if part not in MOD_MASKS]
+    return modifiers, keys[-1] if keys else ""
+
+
+def active_conflicting_chords(config: dict) -> list[str]:
+    """Chords already active through defaults or another sourced Lua file."""
+    if not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or not shutil.which("hyprctl"):
+        return []
+    try:
+        result = subprocess.run(["hyprctl", "binds", "-j"], text=True,
+                                capture_output=True, timeout=3, check=True)
+        active = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    occupied = set()
+    for binding in active:
+        command = str(binding.get("arg", ""))
+        if is_our_command(command):
+            continue
+        occupied.add((int(binding.get("modmask", 0)),
+                      str(binding.get("key", "")).upper()))
+    return [item["chord"] for item in config.values()
+            if chord_signature(item["chord"]) in occupied]
+
+
+def all_conflicts(text: str, config: dict) -> list[str]:
+    return list(dict.fromkeys(conflicting_chords(text, config)
+                              + active_conflicting_chords(config)))
+
+
 def validate_or_restore(target: Path, backup: Path) -> None:
     if shutil.which("hyprctl") is None or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return
@@ -145,24 +192,38 @@ def validate_or_restore(target: Path, backup: Path) -> None:
         raise RuntimeError(message)
 
 
+def atomic_write_text(path: Path, content: str, mode: int) -> None:
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def write(target: Path, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
         target.write_text("-- Personal keybindings\n")
-    backup = target.with_name(f"{target.name}.tts.bak.{int(time.time())}")
+    backup = target.with_name(f"{target.name}.tts.bak.{time.time_ns()}")
     shutil.copy2(target, backup)
-    temporary = target.with_suffix(".lua.tts.tmp")
-    temporary.write_text(content)
-    os.replace(temporary, target)
+    mode = target.stat().st_mode & 0o777
+    atomic_write_text(target, content, mode)
     validate_or_restore(target, backup)
 
 
 def save_config(path: Path, config: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(config, indent=2) + "\n")
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
+    choices = {key: {"chord": value["chord"]} for key, value in config.items()}
+    if path.exists():
+        try:
+            json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            path.replace(path.with_name(f"{path.name}.invalid.{time.time_ns()}"))
+    atomic_write_text(path, json.dumps(choices, indent=2) + "\n", 0o600)
 
 
 def main() -> int:
@@ -185,7 +246,7 @@ def main() -> int:
         # Exact shortcuts from older README versions are safe to adopt into
         # our managed block; do not present them as user conflicts.
         conflict_source = without_block if installed else migrate_manual_tts_lines(without_block)
-        conflicts = conflicting_chords(conflict_source, config)
+        conflicts = all_conflicts(conflict_source, config)
         adoptable = [] if installed else adoptable_bindings(without_block)
         print(json.dumps({"installed": installed, "bindings": config,
                           "conflicts": conflicts, "adoptable": adoptable,
@@ -194,7 +255,7 @@ def main() -> int:
     if args.command == "set":
         candidate = copy.deepcopy(config)
         candidate[args.action]["chord"] = normalize_chord(args.chord)
-        conflicts = conflicting_chords(without_block, candidate)
+        conflicts = all_conflicts(without_block, candidate)
         if conflicts:
             raise ValueError("shortcut already used: " + ", ".join(conflicts))
         block = render(candidate) if BEGIN in full_text else None
@@ -204,10 +265,13 @@ def main() -> int:
         print("updated")
         return 0
     original = without_block
+    if args.command == "remove" and BEGIN not in full_text:
+        print("removed")
+        return 0
     if args.command == "install":
         original = migrate_manual_tts_lines(original)
     block = None if args.command == "remove" else render(config)
-    conflicts = conflicting_chords(original, config) if block else []
+    conflicts = all_conflicts(original, config) if block else []
     if conflicts:
         raise ValueError("shortcut already used outside the TTS block: " + ", ".join(conflicts))
     write(target, replace_block(original, block))

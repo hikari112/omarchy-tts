@@ -9,6 +9,7 @@ CATALOGUE="$CACHE_DIR/voices.json"
 STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
 STATE_DIR="${STATE_DIR:-/tmp/omarchy-tts-$UID}"
 DL_STATE="$STATE_DIR/download.json"
+DL_LOCK="$STATE_DIR/download.lock"
 OWNER_PID=""
 
 CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
@@ -93,7 +94,7 @@ ensure_catalogue() {
 write_state() { # write_state <status> <voice> <got> <total> [message]
   local pid="${OWNER_PID:-0}" identity="" tmp
   [[ "$pid" -gt 1 ]] && identity="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
-  tmp="${DL_STATE}.tmp.$$"
+  tmp="$(mktemp "${DL_STATE}.XXXXXX")" || return 1
   jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
         --arg m "${5:-}" \
         --argjson pid "$pid" --arg identity "$identity" \
@@ -146,7 +147,10 @@ fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <re
   local rc=0
   curl -sL --fail --retry 2 --connect-timeout 15 --max-time 900 \
     "$FILE_BASE/$path?download=true" -o "$part" || rc=$?
-  [[ -n "$poller" ]] && kill "$poller" 2>/dev/null
+  if [[ -n "$poller" ]]; then
+    kill "$poller" 2>/dev/null
+    wait "$poller" 2>/dev/null || true
+  fi
   if [[ $rc -ne 0 ]]; then rm -f "$part"; return 1; fi
   if [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 ]]; then
     local got_size; got_size="$(stat -c%s "$part" 2>/dev/null || echo 0)"
@@ -164,6 +168,20 @@ do_add() { # do_add <voice> <report>
   ensure_catalogue || { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no catalogue"; return 1; }
   jq -e --arg k "$voice" 'has($k)' "$CATALOGUE" >/dev/null 2>&1 ||
     { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no such voice"; return 1; }
+
+  # Re-running add is an idempotent repair operation. Never replace a working
+  # model merely to fill in its small metadata sidecar.
+  if is_installed "$voice"; then
+    local existing_meta existing_path existing_size existing_digest
+    existing_meta="$(file_meta "$voice" ".onnx.json")"
+    IFS=$'\t' read -r existing_path existing_size existing_digest <<< "$existing_meta"
+    if [[ ! -f "$VOICES_DIR/$voice.onnx.json" && -n "$existing_path" ]]; then
+      fetch_file "$existing_path" "$VOICES_DIR/$voice.onnx.json" \
+        "$existing_size" "$existing_digest" "$voice" no || return 1
+    fi
+    [[ "$report" == yes ]] && write_state "done" "$voice" 1 1 "Already installed"
+    return 0
+  fi
 
   local m p s d
   m="$(file_meta "$voice" ".onnx")"
@@ -212,25 +230,24 @@ case "${1:-}" in
     [[ -n "${2:-}" ]] || die "need a voice name"
     [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
     if [[ "${3:-}" == "--async" ]]; then
-      running_pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
-      running_identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
-      current_identity="$(awk '{print $22}' "/proc/$running_pid/stat" 2>/dev/null || true)"
-      if [[ "$running_pid" =~ ^[0-9]+$ && "$running_pid" -gt 1 && \
-            -n "$running_identity" && "$running_identity" == "$current_identity" ]]; then
-        die "a voice download is already running"
-      fi
+      exec {download_lock_fd}>"$DL_LOCK"
+      flock -n "$download_lock_fd" || die "a voice download is already running"
       setsid "$0" _download "$2" >/dev/null 2>&1 &
+      exec {download_lock_fd}>&-
       echo "started"
     else
+      exec {download_lock_fd}>"$DL_LOCK"
+      flock -n "$download_lock_fd" || die "a voice download is already running"
       echo "Downloading $2 ..."
       do_add "$2" no || die "download failed"
       echo "Installed. Use it with: speak-voice use $2"
+      exec {download_lock_fd}>&-
     fi
     ;;
   _download)
     OWNER_PID=$BASHPID
     export OWNER_PID
-    trap 'rm -f "$VOICES_DIR"/*.part; write_state cancelled "${2:-}" 0 0 "Cancelled"; exit 143' TERM INT
+    trap 'rm -f "$VOICES_DIR/${2:-}".onnx.part "$VOICES_DIR/${2:-}".onnx.json.part; write_state cancelled "${2:-}" 0 0 "Cancelled"; exit 143' TERM INT
     do_add "${2:-}" yes ;;
   status)
     if [[ -s "$DL_STATE" ]]; then cat "$DL_STATE"
@@ -243,8 +260,10 @@ case "${1:-}" in
     if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" && "$identity" == "$current" ]]; then
       kill -TERM -- "-$pid" 2>/dev/null || true
     fi
-    rm -f "$VOICES_DIR"/*.part
-    write_state cancelled "$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)" 0 0 "Cancelled"
+    cancelled_voice="$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)"
+    [[ "$cancelled_voice" =~ ^[A-Za-z0-9._-]+$ ]] &&
+      rm -f "$VOICES_DIR/$cancelled_voice.onnx.part" "$VOICES_DIR/$cancelled_voice.onnx.json.part"
+    write_state cancelled "$cancelled_voice" 0 0 "Cancelled"
     ;;
   remove)
     [[ -n "${2:-}" ]] || die "need a voice name"

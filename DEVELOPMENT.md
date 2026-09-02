@@ -11,7 +11,9 @@ newer OCR work. The panel now has Provider, Voice, Text, Screen and Keys tabs.
 - provider executables declare small metadata headers consumed by `--info`.
 - `bin/speak-voice` owns Piper catalogue/download lifecycle.
 - `bin/speak-bindings` owns only the text between its markers in
-  `~/.config/hypr/bindings.lua`; it backs up and validates every write.
+  `~/.config/hypr/bindings.lua`; it backs up and validates every write. Its
+  private JSON stores only chord choices—labels, commands, and installation
+  paths are always derived from the current plugin.
 - `components/TtsController.qml` is the async bridge from QML to those CLIs.
 - `Panel.qml` owns presentation and transient interaction state.
 

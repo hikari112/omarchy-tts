@@ -18,6 +18,15 @@ Versioning.
 - Pass Kokoro text outside the process environment to support large input and
   reduce exposure through process inspection.
 - Refine first-run and provider-selection states around proven readiness.
+- Validate process start identities before stopping speech, serialize config
+  and health writers, and force-kill providers that ignore verification
+  timeouts.
+- Serialize setup and voice-download jobs, make repeated voice installation
+  non-destructive, and remove progress/completion state races.
+- Detect shortcut conflicts against active Hyprland defaults and persist only
+  user-owned chord choices so plugin moves cannot leave stale command paths.
+- Match Omarchy's bar popout handoff contract and broaden keyboard shortcut
+  capture to function, navigation, and punctuation keys.
 
 ## 1.1.0 - 2026-09-02
 

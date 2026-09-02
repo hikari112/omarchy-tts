@@ -44,8 +44,26 @@ Panel {
     var key = event.text ? event.text.toUpperCase() : ""
     if (event.key === Qt.Key_BracketLeft) key = "BRACKETLEFT"
     else if (event.key === Qt.Key_BracketRight) key = "BRACKETRIGHT"
+    else if (event.key === Qt.Key_Comma) key = "COMMA"
+    else if (event.key === Qt.Key_Period) key = "PERIOD"
+    else if (event.key === Qt.Key_Slash) key = "SLASH"
+    else if (event.key === Qt.Key_Backslash) key = "BACKSLASH"
+    else if (event.key === Qt.Key_Semicolon) key = "SEMICOLON"
+    else if (event.key === Qt.Key_Apostrophe) key = "APOSTROPHE"
+    else if (event.key === Qt.Key_Minus) key = "MINUS"
+    else if (event.key === Qt.Key_Equal) key = "EQUAL"
+    else if (event.key === Qt.Key_QuoteLeft) key = "GRAVE"
     else if (event.key === Qt.Key_Space) key = "SPACE"
     else if (event.key === Qt.Key_Tab) key = "TAB"
+    else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) key = "RETURN"
+    else if (event.key === Qt.Key_Backspace) key = "BACKSPACE"
+    else if (event.key === Qt.Key_Delete) key = "DELETE"
+    else if (event.key === Qt.Key_Left) key = "LEFT"
+    else if (event.key === Qt.Key_Right) key = "RIGHT"
+    else if (event.key === Qt.Key_Up) key = "UP"
+    else if (event.key === Qt.Key_Down) key = "DOWN"
+    else if (event.key >= Qt.Key_F1 && event.key <= Qt.Key_F35)
+      key = "F" + String(event.key - Qt.Key_F1 + 1)
     else if (event.key === Qt.Key_Escape) key = "ESCAPE"
     return key
   }

@@ -52,6 +52,20 @@ class CliConfigTests(unittest.TestCase):
                      ("--provider", "../bad", "hello")):
             self.assertNotEqual(self.run_speak(*args, check=False).returncode, 0)
 
+    def test_concurrent_config_updates_do_not_overwrite_each_other(self):
+        self.run_speak("--info")
+        for _ in range(5):
+            first = subprocess.Popen([SPEAK, "--set", ".rate", "1.25"],
+                                     env=self.env, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            second = subprocess.Popen([SPEAK, "--set", ".maxChars", "321"],
+                                      env=self.env, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL)
+            self.assertEqual(first.wait(timeout=3), 0)
+            self.assertEqual(second.wait(timeout=3), 0)
+            info = json.loads(self.run_speak("--info").stdout)
+            self.assertEqual((info["rate"], info["maxChars"]), (1.25, 321))
+
     def test_set_accepts_known_path_and_rejects_unknown_path(self):
         self.run_speak("--set", ".rate", "1.25")
         self.assertEqual(json.loads(self.run_speak("--info").stdout)["rate"], 1.25)
@@ -78,6 +92,12 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(target.read_text().strip(),
                          'o.bind("SUPER + B", "Browser", "browser")')
 
+    def test_binding_remove_is_idempotent_and_does_not_create_a_file(self):
+        target = Path(self.temp.name, "hypr", "bindings.lua")
+        subprocess.run([BINDINGS, "remove"], env=self.env, check=True,
+                       capture_output=True, text=True)
+        self.assertFalse(target.exists())
+
     def test_binding_manager_adopts_legacy_documented_bindings(self):
         hypr = Path(self.temp.name, "hypr")
         hypr.mkdir()
@@ -98,6 +118,40 @@ class CliConfigTests(unittest.TestCase):
             env=self.env, capture_output=True, text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_binding_config_persists_choices_not_derived_commands(self):
+        config = Path(self.temp.name, "omarchy-tts", "bindings.json")
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({
+            "selection": {"chord": "SUPER + ALT + Q",
+                          "label": "stale", "command": "/old/plugin/speak --toggle"}
+        }))
+        status = subprocess.run([BINDINGS, "status"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        binding = json.loads(status.stdout)["bindings"]["selection"]
+        self.assertEqual(binding["chord"], "SUPER + ALT + Q")
+        self.assertNotEqual(binding["command"], "/old/plugin/speak --toggle")
+        subprocess.run([BINDINGS, "set", "selection", "SUPER + ALT + Z"],
+                       env=self.env, check=True, capture_output=True, text=True)
+        stored = json.loads(config.read_text())
+        self.assertEqual(stored["selection"], {"chord": "SUPER + ALT + Z"})
+
+    def test_binding_manager_detects_active_default_conflicts(self):
+        tools = Path(self.temp.name, "tools")
+        tools.mkdir()
+        hyprctl = tools / "hyprctl"
+        hyprctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ $1 == binds ]]; then\n"
+            "  printf '%s\\n' '[{\"modmask\":72,\"key\":\"E\",\"dispatcher\":\"exec\",\"arg\":\"editor\"}]'\n"
+            "else exit 0; fi\n"
+        )
+        hyprctl.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+        self.env["HYPRLAND_INSTANCE_SIGNATURE"] = "test"
+        status = subprocess.run([BINDINGS, "status"], env=self.env,
+                                capture_output=True, text=True, check=True)
+        self.assertIn("SUPER + ALT + E", json.loads(status.stdout)["conflicts"])
 
     def test_setup_backend_status_and_allowlist(self):
         self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
@@ -216,6 +270,20 @@ class ProviderHealthTests(unittest.TestCase):
         self.speak("--stop")
         first.wait(timeout=3)
         second.wait(timeout=3)
+
+    def test_stale_speech_identity_cannot_signal_a_reused_pid(self):
+        sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            state = self.home / "run" / "omarchy-tts"
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "pgid").write_text(f"{sleeper.pid} definitely-wrong\n")
+            (state / "status").write_text("speaking\n")
+            self.assertEqual(self.speak("--status").stdout.strip(), "idle")
+            self.speak("--stop")
+            self.assertIsNone(sleeper.poll())
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=3)
 
 
 class CloudProviderPrivacyTests(unittest.TestCase):
