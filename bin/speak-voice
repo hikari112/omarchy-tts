@@ -1,21 +1,34 @@
 #!/usr/bin/env bash
-# speak-voice - manage local piper voice models.
+# speak-voice - browse, download and switch local voice models.
 set -uo pipefail
 
 VOICES_DIR="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
-PIPER_PY="$HOME/.local/share/uv/tools/piper-tts/bin/python"
-mkdir -p "$VOICES_DIR"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
+CATALOGUE="$CACHE_DIR/voices.json"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
+DL_STATE="$STATE_DIR/download.json"
+
+CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
+FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
+CACHE_MAX_AGE_DAYS=7
+
+mkdir -p "$VOICES_DIR" "$CACHE_DIR" "$STATE_DIR"
+
+die() { printf 'speak-voice: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
 Usage: speak-voice <command>
 
-  list                installed voices (* = active)
-  add <voice>         download a voice, e.g. en_GB-alba-medium
-  remove <voice>      delete a downloaded voice
-  use <voice>         make a voice the default
-  browse              open the voice catalogue in your browser
+  list                    installed voices (* = active)
+  available [--json]      every downloadable voice
+  add <voice> [--async]   download a voice
+  remove <voice>          delete a downloaded voice
+  use <voice>             make a voice the default
+  status [--json]         progress of a download in flight
+  refresh                 re-fetch the voice catalogue
+  browse                  open the sample page in a browser
 
 Voice names look like <lang>-<name>-<quality>, e.g. en_US-amy-medium.
 USAGE
@@ -23,38 +36,161 @@ USAGE
 
 active_voice() { jq -r '.piper.voice // "en_US-amy-medium"' "$CONFIG" 2>/dev/null; }
 
+is_installed() { [[ -f "$VOICES_DIR/$1.onnx" ]]; }
+
+# The catalogue is 240K and changes rarely; refetch only when stale or absent.
+ensure_catalogue() {
+  local stale=1
+  if [[ -s "$CATALOGUE" ]]; then
+    if [[ -z "$(find "$CATALOGUE" -mtime +$CACHE_MAX_AGE_DAYS 2>/dev/null)" ]]; then stale=0; fi
+  fi
+  [[ $stale -eq 0 ]] && return 0
+  command -v curl >/dev/null 2>&1 || return 1
+  local tmp; tmp="$(mktemp)"
+  if curl -sL --fail --max-time 30 "$CATALOGUE_URL" -o "$tmp" && jq -e . "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$CATALOGUE"; return 0
+  fi
+  rm -f "$tmp"
+  # A stale catalogue still beats none at all.
+  [[ -s "$CATALOGUE" ]]
+}
+
+write_state() { # write_state <status> <voice> <got> <total> [message]
+  jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
+        --arg m "${5:-}" \
+        '{status:$s, voice:$v, bytes:$g, total:$t, message:$m,
+          percent: (if $t > 0 then (($g / $t) * 100 | floor) else 0 end)}' \
+    > "$DL_STATE" 2>/dev/null
+}
+
+emit_available() {
+  ensure_catalogue || die "could not fetch the voice catalogue (offline?)"
+  local installed; installed="$(
+    for m in "$VOICES_DIR"/*.onnx; do [[ -e "$m" ]] && basename "$m" .onnx; done |
+      jq -Rsc 'split("\n") | map(select(length > 0))'
+  )"
+  jq -c --argjson inst "$installed" '
+    to_entries
+    | map({
+        key: .key,
+        name: .value.name,
+        lang: .value.language.name_english,
+        country: (.value.language.country_english // ""),
+        code: .value.language.code,
+        quality: .value.quality,
+        sizeMB: ((( [.value.files | to_entries[] | select(.key | endswith(".onnx")) | .value.size_bytes ][0] // 0) / 1048576) | floor),
+        installed: (.key as $k | $inst | index($k) != null)
+      })
+    | sort_by((.installed | not), .lang, .name, .quality)
+  ' "$CATALOGUE"
+}
+
+file_meta() { # file_meta <voice> <suffix> -> "path<TAB>size<TAB>md5"
+  jq -r --arg k "$1" --arg sfx "$2" '
+    .[$k].files | to_entries[] | select(.key | endswith($sfx))
+    | "\(.key)\t\(.value.size_bytes)\t\(.value.md5_digest)"
+  ' "$CATALOGUE" 2>/dev/null | head -1
+}
+
+fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <report>
+  local path="$1" dest="$2" size="$3" md5="$4" voice="$5" report="$6"
+  local part="$dest.part" poller=""
+  rm -f "$part"
+  if [[ "$report" == "yes" ]]; then
+    ( while :; do
+        local got; got="$(stat -c%s "$part" 2>/dev/null || echo 0)"
+        write_state downloading "$voice" "$got" "$size"
+        sleep 0.4
+      done ) & poller=$!
+  fi
+  local rc=0
+  curl -sL --fail --retry 2 "$FILE_BASE/$path?download=true" -o "$part" || rc=$?
+  [[ -n "$poller" ]] && kill "$poller" 2>/dev/null
+  if [[ $rc -ne 0 ]]; then rm -f "$part"; return 1; fi
+  if [[ -n "$md5" && "$md5" != "null" ]] && command -v md5sum >/dev/null 2>&1; then
+    local got_md5; got_md5="$(md5sum "$part" | cut -d' ' -f1)"
+    [[ "$got_md5" == "$md5" ]] || { rm -f "$part"; return 2; }
+  fi
+  mv "$part" "$dest"
+}
+
+do_add() { # do_add <voice> <report>
+  local voice="$1" report="${2:-no}"
+  ensure_catalogue || { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no catalogue"; return 1; }
+  jq -e --arg k "$voice" 'has($k)' "$CATALOGUE" >/dev/null 2>&1 ||
+    { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no such voice"; return 1; }
+
+  local m p s d
+  m="$(file_meta "$voice" ".onnx")"
+  IFS=$'\t' read -r p s d <<< "$m"
+  [[ -n "$p" ]] || { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no model file"; return 1; }
+
+  [[ "$report" == yes ]] && write_state downloading "$voice" 0 "$s"
+  if ! fetch_file "$p" "$VOICES_DIR/$voice.onnx" "$s" "$d" "$voice" "$report"; then
+    [[ "$report" == yes ]] && write_state error "$voice" 0 "$s" "download failed"
+    return 1
+  fi
+
+  local mj pj sj dj
+  mj="$(file_meta "$voice" ".onnx.json")"
+  IFS=$'\t' read -r pj sj dj <<< "$mj"
+  if [[ -n "$pj" ]]; then
+    fetch_file "$pj" "$VOICES_DIR/$voice.onnx.json" "$sj" "$dj" "$voice" no || {
+      rm -f "$VOICES_DIR/$voice.onnx"
+      [[ "$report" == yes ]] && write_state error "$voice" 0 "$s" "config download failed"
+      return 1
+    }
+  fi
+  [[ "$report" == yes ]] && write_state "done" "$voice" "$s" "$s"
+  return 0
+}
+
 case "${1:-}" in
   list)
-    act="$(active_voice)"
-    found=0
+    act="$(active_voice)"; found=0
     for m in "$VOICES_DIR"/*.onnx; do
       [[ -e "$m" ]] || continue
-      found=1
-      n="$(basename "$m" .onnx)"
+      found=1; n="$(basename "$m" .onnx)"
       mark="  "; [[ "$n" == "$act" ]] && mark="* "
-      sz="$(du -h "$m" | cut -f1)"
-      printf '%s%-28s %s\n' "$mark" "$n" "$sz"
+      printf '%s%-28s %s\n' "$mark" "$n" "$(du -h "$m" | cut -f1)"
     done
     [[ $found -eq 0 ]] && echo "No voices installed. Try: speak-voice add en_US-amy-medium"
     ;;
+  available)
+    if [[ "${2:-}" == "--json" ]]; then
+      emit_available
+    else
+      emit_available | jq -r '.[] | "\(if .installed then "*" else " " end) \(.key)  \(.lang)  \(.quality)  \(.sizeMB)MB"'
+    fi
+    ;;
   add)
-    [[ -n "${2:-}" ]] || { echo "speak-voice: need a voice name" >&2; exit 1; }
-    [[ -x "$PIPER_PY" ]] || { echo "speak-voice: piper not installed (uv tool install piper-tts)" >&2; exit 1; }
-    echo "Downloading $2 ..."
-    (cd "$VOICES_DIR" && "$PIPER_PY" -m piper.download_voices "$2") || exit 1
-    echo "Installed. Use it with: speak-voice use $2"
+    [[ -n "${2:-}" ]] || die "need a voice name"
+    if [[ "${3:-}" == "--async" ]]; then
+      setsid bash -c "'$0' _download '$2'" >/dev/null 2>&1 &
+      echo "started"
+    else
+      echo "Downloading $2 ..."
+      do_add "$2" no || die "download failed"
+      echo "Installed. Use it with: speak-voice use $2"
+    fi
+    ;;
+  _download) do_add "${2:-}" yes ;;      # internal: async worker
+  status)
+    if [[ -s "$DL_STATE" ]]; then cat "$DL_STATE"
+    else echo '{"status":"idle","voice":"","bytes":0,"total":0,"percent":0,"message":""}'; fi
     ;;
   remove)
-    [[ -n "${2:-}" ]] || { echo "speak-voice: need a voice name" >&2; exit 1; }
+    [[ -n "${2:-}" ]] || die "need a voice name"
     rm -f "$VOICES_DIR/$2.onnx" "$VOICES_DIR/$2.onnx.json" && echo "Removed $2"
     ;;
   use)
-    [[ -n "${2:-}" ]] || { echo "speak-voice: need a voice name" >&2; exit 1; }
-    [[ -f "$VOICES_DIR/$2.onnx" ]] || { echo "speak-voice: not installed: $2" >&2; exit 1; }
+    [[ -n "${2:-}" ]] || die "need a voice name"
+    is_installed "$2" || die "not installed: $2"
     tmp="$(mktemp)"
     jq --arg v "$2" '.piper.voice = $v' "$CONFIG" > "$tmp" && mv "$tmp" "$CONFIG"
     echo "Default voice is now $2"
     ;;
+  refresh) rm -f "$CATALOGUE"; ensure_catalogue && echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
   browse) xdg-open "https://rhasspy.github.io/piper-samples/" 2>/dev/null & ;;
   *) usage ;;
 esac

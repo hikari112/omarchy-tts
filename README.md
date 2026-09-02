@@ -67,10 +67,15 @@ speak --provider espeak-ng    # override for one run
 ## Voices
 
 ```bash
-speak-voice list              # installed voices
-speak-voice add en_GB-alba-medium
-speak-voice use en_GB-alba-medium
-speak-voice browse            # sample the catalogue
+speak-voice list                  # installed voices
+speak-voice available             # all 175, installed first
+speak-voice available --json      # same, for scripting
+speak-voice add en_GB-alba-medium # download (--async to background it)
+speak-voice use en_GB-alba-medium # make it the default
+speak-voice remove <voice>        # delete one
+speak-voice status                # progress of a download in flight
+speak-voice refresh               # re-fetch the catalogue
+speak-voice browse                # listen to samples in a browser
 ```
 
 ## Settings panel
@@ -84,7 +89,10 @@ a change straight after making it:
 - **Provider** — all six at once, each showing whether it actually works on
   this machine. Cloud providers carry a standing note that text leaves the
   machine, and the Test dock says `runs locally` or names the vendor.
-- **Voice** — installed voice, speed, length limit.
+- **Voice** — installed voice, speed, length limit, and **Browse all voices**:
+  every one of the 175 downloadable voices across 51 languages, showing which
+  are installed, with size and a one-click download that reports progress and
+  verifies the md5 before installing.
 - **Screen** — OCR confidence floor.
 
 Settings write on change; there is no Save button. Everything the panel shows

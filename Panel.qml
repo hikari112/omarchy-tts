@@ -50,7 +50,7 @@ Panel {
 
   // Land on Provider every time. This panel is opened rarely and for a
   // reason; a remembered tab means guessing which reason it was.
-  onOpenedChanged: if (opened) { currentTab = 0; refresh() }
+  onOpenedChanged: if (opened) { currentTab = 0; browsing = false; refresh() }
 
   Process {
     id: infoProc
@@ -65,6 +65,75 @@ Panel {
         } catch (e) { /* keep the last good state rather than blanking the panel */ }
       }
     }
+  }
+
+  readonly property string voiceBin: "$HOME/.local/bin/speak-voice"
+
+  property bool browsing: false
+  property var catalogue: []
+  property string voiceFilter: ""
+  property var dl: ({ status: "idle", voice: "", percent: 0 })
+
+  readonly property var filteredVoices: {
+    var q = String(root.voiceFilter).toLowerCase().trim()
+    var all = root.catalogue || []
+    if (!q) return all
+    var out = []
+    for (var i = 0; i < all.length; i++) {
+      var v = all[i]
+      if (String(v.key).toLowerCase().indexOf(q) >= 0
+          || String(v.lang).toLowerCase().indexOf(q) >= 0
+          || String(v.country).toLowerCase().indexOf(q) >= 0) out.push(v)
+    }
+    return out
+  }
+
+  function loadCatalogue() { catalogueProc.running = false; catalogueProc.running = true }
+
+  function getVoice(key) {
+    runner.running = false
+    runner.command = ["bash", "-c", "exec " + root.voiceBin + " add " + key + " --async"]
+    runner.running = true
+    root.dl = { status: "downloading", voice: key, percent: 0 }
+    dlPoll.running = true
+  }
+
+  Process {
+    id: catalogueProc
+    command: ["bash", "-c", "exec " + root.voiceBin + " available --json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { root.catalogue = JSON.parse(text) } catch (e) { root.catalogue = [] }
+      }
+    }
+  }
+
+  Process {
+    id: dlStatusProc
+    command: ["bash", "-c", "exec " + root.voiceBin + " status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var st = JSON.parse(text)
+          root.dl = st
+          if (st.status === "done" || st.status === "error") {
+            dlPoll.running = false
+            root.loadCatalogue()
+            root.refresh()
+          }
+        } catch (e) { /* keep polling */ }
+      }
+    }
+  }
+
+  Timer {
+    id: dlPoll
+    interval: 500
+    repeat: true
+    running: false
+    onTriggered: { dlStatusProc.running = false; dlStatusProc.running = true }
   }
 
   Process { id: runner; running: false; command: [] }
@@ -290,7 +359,7 @@ Panel {
         Column {
           width: parent.width
           spacing: Style.space(10)
-          visible: root.currentTab === 1
+          visible: root.currentTab === 1 && !root.browsing
 
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
 
@@ -305,6 +374,17 @@ Panel {
               if (value && value !== root.info.voice && value !== "No voice installed")
                 root.setCfg(".piper.voice", value)
             }
+          }
+
+          Button {
+            width: parent.width
+            text: (root.info.voices && root.info.voices.length > 0)
+                  ? "Browse all voices" : "Download a voice"
+            iconText: "󰇚"
+            bordered: true
+            // Primary when there is nothing installed: it is the only way out.
+            foreground: (root.info.voices && root.info.voices.length > 0) ? root.fg : Color.accent
+            onClicked: { root.browsing = true; root.voiceFilter = ""; root.loadCatalogue() }
           }
 
           Item {
@@ -336,9 +416,7 @@ Panel {
             PanelSectionHeader { id: limitHdr; text: "Length limit"; foreground: root.fg }
             Text {
               anchors.right: parent.right
-              text: (root.info.maxChars > 0)
-                    ? root.info.maxChars + " characters"
-                    : "unlimited"
+              text: (root.info.maxChars > 0) ? root.info.maxChars + " characters" : "unlimited"
               color: root.dim
               font.family: root.ff
               font.pixelSize: Style.font.caption
@@ -354,6 +432,150 @@ Panel {
             integer: true
             value: root.info.maxChars || 0
             onValueChanged: if (!dragging) root.setCfg(".maxChars", Math.round(value))
+          }
+        }
+
+        // ---------- voice browser ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.currentTab === 1 && root.browsing
+
+          Item {
+            width: parent.width
+            height: browseHdr.implicitHeight
+
+            PanelSectionHeader { id: browseHdr; text: "Browse voices"; foreground: root.fg }
+
+            Text {
+              anchors.right: backBtn.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.catalogue.length > 0
+                    ? root.filteredVoices.length + " of " + root.catalogue.length
+                    : "loading…"
+              color: root.dim
+              font.family: root.ff
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              id: backBtn
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Done"
+              color: Color.accent
+              font.family: root.ff
+              font.pixelSize: Style.font.caption
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.browsing = false
+              }
+            }
+          }
+
+          TextField {
+            width: parent.width
+            text: root.voiceFilter
+            foreground: root.fg
+            onTextChanged: root.voiceFilter = text
+          }
+
+          ListView {
+            width: parent.width
+            height: Style.space(240)
+            clip: true
+            spacing: Style.space(2)
+            model: root.filteredVoices
+            boundsBehavior: Flickable.StopAtBounds
+
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool busy: root.dl.status === "downloading"
+                                           && root.dl.voice === modelData.key
+              width: ListView.view ? ListView.view.width : 0
+              height: vrow.implicitHeight + Style.space(10)
+              radius: Style.space(5)
+              color: modelData.installed ? root.tint(0.07) : "transparent"
+
+              Column {
+                id: vrow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(8)
+                spacing: Style.space(1)
+
+                Item {
+                  width: parent.width
+                  height: vname.implicitHeight
+
+                  Text {
+                    id: vname
+                    text: parent.parent.parent.modelData.name
+                    color: root.fg
+                    font.family: root.ff
+                    font.pixelSize: Style.font.body
+                  }
+                  Text {
+                    anchors.left: vname.right
+                    anchors.leftMargin: Style.space(6)
+                    anchors.baseline: vname.baseline
+                    text: parent.parent.parent.modelData.quality
+                    color: root.dim
+                    font.family: root.ff
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: {
+                      var d = parent.parent.parent
+                      if (d.modelData.installed) return "󰄬 Installed"
+                      if (d.busy) return root.dl.percent + "%"
+                      return "󰇚 " + d.modelData.sizeMB + " MB"
+                    }
+                    color: {
+                      var d = parent.parent.parent
+                      return (d.modelData.installed || d.busy) ? Color.accent : root.dim
+                    }
+                    font.family: root.ff
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  text: parent.parent.modelData.lang
+                      + (parent.parent.modelData.country ? " · " + parent.parent.modelData.country : "")
+                  color: root.dim
+                  font.family: root.ff
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                enabled: !parent.modelData.installed && !parent.busy
+                         && root.dl.status !== "downloading"
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.getVoice(parent.modelData.key)
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: root.dl.status === "downloading" || root.dl.status === "error"
+            text: root.dl.status === "error"
+                  ? ("Could not download " + root.dl.voice + (root.dl.message ? " — " + root.dl.message : ""))
+                  : ("Downloading " + root.dl.voice + " · " + root.dl.percent + "%")
+            color: root.dl.status === "error" ? Color.urgent : root.dim
+            font.family: root.ff
+            font.pixelSize: Style.font.caption
           }
         }
 
