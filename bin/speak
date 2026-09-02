@@ -134,6 +134,12 @@ meta_of() { # meta_of <file> <field>
 # selected as default, and silently killed every keybinding. So installation
 # and proof are tracked separately, and only proof earns the word "ready".
 HEALTH="$CACHE_DIR/health.json"
+CLOUD_DIR="$CACHE_DIR/cloud"
+
+cloud_metrics_of() { # cloud_metrics_of <provider>
+  local file="$CLOUD_DIR/$1.json"
+  [[ -s "$file" ]] && jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}'
+}
 
 health_of() { # health_of <provider> -> ok | failed | untested
   [[ -s "$HEALTH" ]] || { printf 'untested'; return; }
@@ -197,11 +203,15 @@ verify_provider() { # verify_provider <name>
   # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
   timeout --kill-after=5s 90s env TTS_VOICE= TTS_RATE=1.0 TTS_SILENT=1 \
       TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+      TTS_METRICS_FILE="$CLOUD_DIR/$name.json" TTS_INPUT_CHARS=5 \
       bash -c 'exec "$0"' "$bin" <<< "Test." >/dev/null 2>&1 || rc=$?
   if [[ $rc -eq 0 ]]; then
     health_set "$name" ok ""
     return 0
   fi
+  # A valid paid provider can be temporarily unavailable without becoming a
+  # broken installation. Keep its last proven health for quota/rate outages.
+  [[ $rc -eq 69 || $rc -eq 75 ]] && return 1
   health_set "$name" failed "exit $rc"
   return 1
 }
@@ -215,6 +225,14 @@ key_source() { # env | keyring | config | none
     printf keyring; return
   fi
   printf none
+}
+
+provider_model() {
+  case "$1" in
+    openai) cfg .openai.model gpt-4o-mini-tts ;;
+    elevenlabs) cfg .elevenlabs.model eleven_turbo_v2_5 ;;
+    *) printf '' ;;
+  esac
 }
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
@@ -233,10 +251,14 @@ emit_info() {
              --arg install "$(meta_of "$b" install)" \
              --arg vendor "$(meta_of "$b" vendor)" \
              --arg voices "$(meta_of "$b" voices)" \
+             --arg maxChars "$(meta_of "$b" maxchars)" \
              --arg keySource "$(key_source "$n")" \
+             --arg model "$(provider_model "$n")" \
+             --argjson usage "$(cloud_metrics_of "$n")" \
              '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor,
-               keySource:$keySource,
+               keySource:$keySource, model:(if $model=="" then null else $model end), usage:$usage,
+               maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
@@ -358,6 +380,7 @@ Voice
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
       --info           print all state as JSON (used by the settings panel)
+      --usage NAME     refresh and print cloud account usage when supported
       --set P V        write a config value, e.g. --set .rate 1.2
       --preview        sanitize stdin and print the exact text that would be spoken
       --preview-text T sanitize one argument (used by the settings panel)
@@ -413,6 +436,14 @@ while [[ $# -gt 0 ]]; do
         notify-send -a "Speak" "Voice provider" "$new" 2>/dev/null
       printf '%s\n' "$new"; exit 0 ;;
     --info) emit_info; exit 0 ;;
+    --usage)
+      usage_name="${2:-$(cfg .provider piper)}"
+      [[ "$usage_name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
+      usage_bin="$(provider_path "$usage_name")" || die "no such provider: $usage_name"
+      [[ "$(meta_of "$usage_bin" kind)" == cloud ]] || die "$usage_name is not a cloud provider"
+      export TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR"
+      export TTS_METRICS_FILE="$CLOUD_DIR/$usage_name.json"
+      "$usage_bin" --usage; exit $? ;;
     --set)
       [[ -n "${2:-}" && -n "${3:-}" ]] || die "--set needs a path and a value"
       [[ "$2" == ".provider" ]] && stop_speaking
@@ -509,6 +540,13 @@ export TTS_RATE="${RATE:-$(cfg .rate 1.0)}"
 export TTS_PLUGIN_DIR="$PLUGIN_DIR"
 export TTS_CONFIG="$CONFIG"
 export TTS_DATA_DIR="$DATA_DIR"
+export TTS_METRICS_FILE="$CLOUD_DIR/$PROVIDER.json"
+export TTS_INPUT_CHARS="${#SPOKEN}"
+
+provider_max="$(meta_of "$PROV_BIN" maxchars)"
+if [[ "$provider_max" =~ ^[0-9]+$ && ${#SPOKEN} -gt $provider_max ]]; then
+  die "$PROVIDER accepts at most $provider_max characters per request; shorten the selection or set a length limit"
+fi
 
 if [[ -z "$TTS_VOICE" ]]; then
   case "$PROVIDER" in
@@ -559,10 +597,14 @@ rc=$?
 # Real use is the best evidence there is. A cancellation is not a failure.
 if [[ $rc -eq 0 ]]; then
   health_set "$PROVIDER" ok ""
-elif [[ $rc -ne 143 && $rc -ne 137 ]]; then
+elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 69 ]]; then
   health_set "$PROVIDER" failed "exit $rc"
   notify-send -a "Speak" "$PROVIDER could not speak" \
     "Marked as failing. Pick another provider in the panel." 2>/dev/null
+fi
+if [[ $rc -eq 75 || $rc -eq 69 ]]; then
+  notify-send -a "Speak" "$PROVIDER is temporarily limited" \
+    "Provider health was preserved; see cloud usage in the panel." 2>/dev/null
 fi
 # A superseding invocation owns these files now. Never erase its state when
 # this older provider finally notices that it was cancelled.

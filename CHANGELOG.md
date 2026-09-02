@@ -5,6 +5,10 @@ Versioning.
 
 ## Unreleased
 
+- Add privacy-safe paid-provider telemetry, live ElevenLabs subscription usage,
+  OpenAI rate-limit windows, actionable quota/rate errors, and panel refresh.
+- Preserve provider health across transient rate, quota, and service failures,
+  and enforce OpenAI's documented 4096-character request boundary locally.
 - Make speech replacement race-safe so an older process cannot erase the
   active process's stop/status state.
 - Preserve malformed configuration files before recovering with defaults.

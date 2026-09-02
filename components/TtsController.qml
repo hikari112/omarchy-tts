@@ -20,6 +20,7 @@ Item {
   property string preview: ""
   property string error: ""
   property string verifying: ""
+  property string refreshingUsage: ""
   property string pendingKey: ""
   property bool keySaving: false
   property bool speaking: false
@@ -94,6 +95,7 @@ Item {
   // Proving a backend takes seconds and makes no sound; `verifying` lets the
   // panel say so rather than appearing to have ignored the click.
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
+  function refreshUsage(name) { refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { if (action([voiceBin, "add", key, "--async"])) { download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true } }
   function cancelDownload() { action([voiceBin, "cancel"]) }
@@ -152,6 +154,11 @@ Item {
     id: verifyProc; command: []
     stderr: StdioCollector { waitForEnd: true }
     onRunningChanged: if (!running) { root.verifying = ""; root.refresh() }
+  }
+  Process {
+    id: usageProc; command: []
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
+    onRunningChanged: if (!running) { root.refreshingUsage = ""; root.refresh() }
   }
   Process {
     id: actionProc; command: []

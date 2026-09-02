@@ -259,6 +259,12 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(self.status_of("livetest"), "failing",
                          "a real failure should mark the provider without a separate test")
 
+    def test_temporary_provider_limit_does_not_poison_health(self):
+        self.write_provider("limitedtest", "exit 75")
+        self.speak("--set", ".provider", "limitedtest")
+        self.speak("Hello there.")
+        self.assertEqual(self.status_of("limitedtest"), "untested")
+
     def test_superseded_speech_cannot_erase_the_new_owner(self):
         self.write_provider(
             "slowtest",
@@ -310,18 +316,31 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         self.args = self.root / "curl-args"
         self.body = self.root / "curl-body"
         self.headers = self.root / "curl-headers"
+        self.response_headers = self.root / "response-headers"
+        self.response_headers.write_text(
+            "HTTP/2 200\r\nx-request-id: req_private_test\r\n"
+            "x-ratelimit-limit-requests: 100\r\n"
+            "x-ratelimit-remaining-requests: 99\r\n"
+            "x-ratelimit-reset-requests: 1s\r\ncharacter-cost: 7\r\n\r\n"
+        )
         fake_curl = self.bin / "curl"
         fake_curl.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
             "output=\n"
+            "dump=\n"
+            "writeout=\n"
             "while [[ $# -gt 0 ]]; do\n"
             "  if [[ $1 == --output ]]; then output=$2; shift; fi\n"
+            "  if [[ $1 == --dump-header ]]; then dump=$2; shift; fi\n"
+            "  if [[ $1 == --write-out ]]; then writeout=$2; shift; fi\n"
             "  shift\n"
             "done\n"
             "cat > \"$FAKE_CURL_BODY\"\n"
             "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
+            "[[ -z $dump ]] || cp \"$FAKE_RESPONSE_HEADERS\" \"$dump\"\n"
             "printf fake-audio > \"$output\"\n"
+            "[[ -z $writeout ]] || printf 200\n"
         )
         fake_curl.chmod(0o755)
         self.config = self.root / "config.json"
@@ -340,6 +359,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                    "FAKE_CURL_ARGS": str(self.args),
                    "FAKE_CURL_BODY": str(self.body),
                    "FAKE_CURL_HEADERS": str(self.headers),
+                   "FAKE_RESPONSE_HEADERS": str(self.response_headers),
                    "XDG_RUNTIME_DIR": str(self.root),
                    "TTS_PLUGIN_DIR": str(ROOT),
                    "TTS_CONFIG": str(self.config),
@@ -354,6 +374,28 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             payload = json.loads(self.body.read_text())
             self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
             self.assertIn(secret, self.headers.read_text())
+
+    def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
+        metrics = self.root / "metrics.json"
+        spoken = "private words"
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "TTS_SILENT": "1",
+               "TTS_INPUT_CHARS": str(len(spoken)), "TTS_METRICS_FILE": str(metrics),
+               "OPENAI_API_KEY": "secret-key-that-must-not-leak"}
+        result = subprocess.run([ROOT / "providers" / "openai"], input=spoken,
+                                text=True, capture_output=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(metrics.read_text())
+        self.assertEqual(data["localObserved"],
+                         {"requests": 1, "characters": len(spoken), "billedUnits": 0})
+        self.assertEqual(data["rateLimits"]["requests"]["remaining"], "99")
+        self.assertNotIn(spoken, metrics.read_text())
+        self.assertEqual(metrics.stat().st_mode & 0o777, 0o600)
 
 
 class BindingAdoptionTests(unittest.TestCase):

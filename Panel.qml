@@ -353,7 +353,25 @@ Panel {
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var row = parent.parent.parent.parent; if (row.cloud && row.ready) root.confirmKeyRemove = row.modelData.name; else if (row.modelData.status === "nokey") { root.apiProvider = row.modelData.name; root.apiVendor = row.modelData.vendor || row.modelData.name; controller.keyResult = ({ ok: false, message: "" }) } else if (row.failing || row.untested) { controller.verifyProvider(row.modelData.name) } else { root.confirmProvider = row.modelData.name; root.confirmInstall = row.modelData.install } } }
                   }
                 }
-                Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · paid"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud; text: "󰅟 Sends highlighted text to " + (parent.parent.modelData.vendor || parent.parent.modelData.name) + " · " + (parent.parent.modelData.model || "paid API"); color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Item {
+                  width: parent.width; height: cloudUsage.implicitHeight; visible: parent.parent.cloud && parent.parent.ready
+                  Text {
+                    id: cloudUsage; anchors.left: parent.left; anchors.right: refreshUsage.left; anchors.rightMargin: 8
+                    elide: Text.ElideRight; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                    text: { var u = parent.parent.parent.modelData.usage || {}; var a = u.account || {}; var l = u.localObserved || {}; var r = (u.rateLimits || {}).requests || {}; var last = u.lastRequest || {}
+                            if (last.outcome === "error") return (last.errorCode === "concurrency_limit" ? "Concurrency limit reached" : last.errorCode === "rate_limit" ? "Rate limit reached" : last.errorCode === "quota" ? "Credits or billing limit reached" : "Last request failed") + (last.retryAfter ? " · retry after " + last.retryAfter : "")
+                            if (a.limit !== undefined) return (a.tier || "Plan") + " · " + a.used + " / " + a.limit + " characters" + (a.resetAt ? " · resets " + new Date(a.resetAt * 1000).toLocaleDateString() : "")
+                            if (r.remaining !== undefined) return r.remaining + " / " + r.limit + " requests remain · resets " + r.reset
+                            if (l.requests) return l.requests + " local requests · " + l.characters + " characters observed"
+                            return "Usage appears after the first request" }
+                  }
+                  Text {
+                    id: refreshUsage; anchors.right: parent.right; text: parent.parent.parent.modelData.name === "elevenlabs" ? (controller.refreshingUsage === parent.parent.parent.modelData.name ? "Refreshing…" : "Refresh usage") : "Updates after speech"
+                    color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.name === "elevenlabs" && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
+                  }
+                }
                 Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: "Installed, but it produced no audio when tested. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Text { visible: parent.parent.modelData.name === "kokoro" && !parent.parent.failing; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               }

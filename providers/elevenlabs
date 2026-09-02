@@ -7,6 +7,7 @@
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
+source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
 KEY="$(get_key ELEVENLABS_API_KEY elevenlabs)" || exit 1
 
@@ -16,11 +17,36 @@ VOICE="${TTS_VOICE:-}"
 MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
 
+if [[ "${1:-}" == "--usage" ]]; then
+  body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-usage.XXXXXX")" || exit 1
+  headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1
+  trap 'rm -f "$body" "$headers"' EXIT
+  status="$(curl -sS --connect-timeout 15 --max-time 30 \
+    https://api.elevenlabs.io/v1/user/subscription -H @/dev/fd/3 \
+    --dump-header "$headers" --output "$body" --write-out '%{http_code}' \
+    3<<< "xi-api-key: $KEY")" || exit $?
+  [[ "$status" =~ ^2[0-9][0-9]$ ]] || { cloud_fail ElevenLabs "$status" "$body" "$headers"; exit $?; }
+  account="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-account.XXXXXX")" || exit 1
+  trap 'rm -f "$body" "$headers" "$account"' EXIT
+  jq '{source:"provider",tier,status,used:(.character_count // 0),limit:(.character_limit // 0),
+    canExtend:(.can_extend_character_limit // false),overage:(.current_overage // 0),
+    resetAt:(.next_character_count_reset_unix // null)}' "$body" > "$account" || exit 1
+  cloud_store_account "$account" || exit 1
+  cat "$account"
+  exit 0
+fi
+
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.mp3")" || exit 1
-trap 'rm -f "$audio"' EXIT
-jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' |
-  curl -sS --fail-with-body --connect-timeout 15 --max-time 180 \
+headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1
+trap 'rm -f "$audio" "$headers"' EXIT
+status="$(jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' |
+  curl -sS --connect-timeout 15 --max-time 180 \
     "https://api.elevenlabs.io/v1/text-to-speech/$VOICE?output_format=mp3_44100_128" \
-    -H @/dev/fd/3 --data-binary @- --output "$audio" \
-    3<<< "xi-api-key: $KEY"$'\nContent-Type: application/json' || exit $?
+    -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
+    --write-out '%{http_code}' \
+    3<<< "xi-api-key: $KEY"$'\nContent-Type: application/json')" || exit $?
+[[ -n "$status" ]] || status=200
+cost="$(cloud_header "$headers" character-cost)"; [[ "$cost" =~ ^[0-9]+$ ]] || cost=0
+cloud_record elevenlabs "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" "$cost"
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail ElevenLabs "$status" "$audio" "$headers"; exit $?; fi
 play_file "$audio"

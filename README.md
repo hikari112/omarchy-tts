@@ -48,6 +48,7 @@ speak --window                # read the focused window
 speak --stop                  # stop
 speak --list                  # list providers
 speak --provider espeak-ng    # override for one run
+speak --usage elevenlabs      # refresh paid-plan usage (JSON)
 ```
 
 ## Voices
@@ -152,7 +153,17 @@ Environment given to providers: `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
 
 Add or remove keys from the **Provider** tab. They are entered in a masked
 field and stored in the system keyring, never in the plugin settings or logs.
-The panel clearly marks providers that send text off the machine.
+The panel clearly marks providers that send text off the machine. Paid
+providers also show the configured model, locally observed request/character
+counts, last request status, and rate-limit headers. **Refresh usage** reads
+ElevenLabs plan usage and reset time directly from its subscription API.
+OpenAI request and token limits update from response headers; organization-wide
+usage is deliberately not queried with the normal speech key because that API
+requires a separate organization admin key.
+
+Cloud telemetry is stored mode 0600 under `~/.cache/omarchy-tts/cloud/` and
+contains counts, timestamps, request IDs, limits, and normalized error codes.
+It never contains API keys, selected text, or provider response bodies.
 
 ## Remove
 
