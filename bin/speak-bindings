@@ -56,6 +56,16 @@ def render(config: dict) -> str:
     return "\n".join(lines)
 
 
+def normalize_chord(chord: str) -> str:
+    """Return the canonical Hyprland chord accepted by the QML capture UI."""
+    normalized = " + ".join(part.strip().upper() for part in chord.split("+"))
+    if not re.fullmatch(r"[A-Z0-9_]+(?: \+ [A-Z0-9_]+)*", normalized):
+        raise ValueError("shortcut contains unsupported characters")
+    if len(normalized) > 80:
+        raise ValueError("shortcut is too long")
+    return normalized
+
+
 def replace_block(text: str, block: str | None) -> str:
     start, end = text.find(BEGIN), text.find(END)
     if (start >= 0) != (end >= 0) or (start >= 0 and end < start):
@@ -183,7 +193,7 @@ def main() -> int:
         return 0
     if args.command == "set":
         candidate = copy.deepcopy(config)
-        candidate[args.action]["chord"] = args.chord.upper().strip()
+        candidate[args.action]["chord"] = normalize_chord(args.chord)
         conflicts = conflicting_chords(without_block, candidate)
         if conflicts:
             raise ValueError("shortcut already used: " + ", ".join(conflicts))

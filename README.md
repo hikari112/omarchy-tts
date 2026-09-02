@@ -19,7 +19,7 @@ guided, cancellable operations—no terminal setup or manual config editing.
 
 ## Requirements
 
-`wl-clipboard`, `jq`, `python3`, and PipeWire or ALSA. For the OCR modes:
+`wl-clipboard`, `jq`, `python3`, `flock` (util-linux), and PipeWire or ALSA. For the OCR modes:
 `tesseract`, `grim`, `slurp`, and optionally `hyprpicker`. All ship with Omarchy.
 
 ## Keys
@@ -33,7 +33,8 @@ guided, cancellable operations—no terminal setup or manual config editing.
 | `SUPER+ALT+W` | Read the focused window — no pointer needed |
 | `SUPER+ALT+SHIFT+R` | Read the whole screen — no pointer needed |
 
-Bar widget: left-click speaks the selection, right-click cycles providers.
+Bar widget: left-click opens settings; right-click speaks the selection or
+stops the current speech.
 
 ## CLI
 

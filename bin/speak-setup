@@ -15,12 +15,15 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 PLUGIN = Path(__file__).resolve().parents[1]
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-tts"
+RUNTIME = (Path(os.environ["XDG_RUNTIME_DIR"]) / "omarchy-tts"
+           if os.environ.get("XDG_RUNTIME_DIR")
+           else Path(f"/tmp/omarchy-tts-{os.getuid()}"))
 DATA = DATA_HOME / "omarchy-tts"
 ENGINE = DATA / "engines"
 VOICES = DATA / "voices" / "piper"
@@ -37,15 +40,27 @@ SYSTEM_PACKAGES = {
 }
 
 
+def ensure_private_runtime() -> None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    if RUNTIME.stat().st_uid != os.getuid():
+        raise RuntimeError(f"Unsafe runtime directory: {RUNTIME}")
+    RUNTIME.chmod(0o700)
+
+
 def emit(**values) -> None:
     print(json.dumps(values, ensure_ascii=False), flush=True)
 
 
 def atomic_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False) + "\n")
-    os.replace(temporary, path)
+    ensure_private_runtime()
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_state(status: str, step: str = "", progress: int = 0,
@@ -303,6 +318,7 @@ def diagnostics() -> None:
 
 
 def main() -> int:
+    ensure_private_runtime()
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")

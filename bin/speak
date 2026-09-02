@@ -12,9 +12,11 @@ USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts"
 CONFIG="$USER_DIR/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
+STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
+STATE_DIR="${STATE_DIR:-/tmp/omarchy-tts-$UID}"
 PID_FILE="$STATE_DIR/pgid"
 STATUS_FILE="$STATE_DIR/status"
+SPEECH_LOCK="$STATE_DIR/speech.lock"
 SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 
 # Resolved from the installed plugin directory.
@@ -22,6 +24,10 @@ SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 source "$PLUGIN_DIR/lib/config.sh"
 
 mkdir -p "$STATE_DIR"
+[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+  printf 'speak: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
+}
+chmod 700 "$STATE_DIR" || exit 1
 tts_config_init || { printf 'speak: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
 
 die() { printf 'speak: %s\n' "$*" >&2; exit 1; }
@@ -55,8 +61,9 @@ cycle_provider() {
   next="$(provider_names | awk -v c="$cur" '
     { a[NR]=$0 } END { for (i=1;i<=NR;i++) if (a[i]==c) { print a[i%NR+1]; exit } print a[1] }')"
   [[ -z "$next" ]] && return 1
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(mktemp "${CONFIG}.XXXXXX")"
   if jq --arg p "$next" '.provider = $p' "$CONFIG" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp"
     mv "$tmp" "$CONFIG"
   else
     rm -f "$tmp"
@@ -141,9 +148,10 @@ health_of() { # health_of <provider> -> ok | failed | untested
 health_set() { # health_set <provider> <ok|failed> [note]
   mkdir -p "$CACHE_DIR"
   [[ -s "$HEALTH" ]] || printf '{}' > "$HEALTH"
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(mktemp "${HEALTH}.XXXXXX")"
   if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
         '.[$p] = {status:$s, note:$n, at:$t}' "$HEALTH" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp"
     mv "$tmp" "$HEALTH"
   else
     rm -f "$tmp"
@@ -281,7 +289,7 @@ emit_info() {
 
 set_config() { tts_config_set "$1" "$2"; }
 
-stop_speaking() {
+stop_speaking_unlocked() {
   local pgid=""
   [[ -r "$PID_FILE" ]] && pgid="$(cat "$PID_FILE" 2>/dev/null)"
   if [[ -n "$pgid" ]] && kill -0 -- "-$pgid" 2>/dev/null; then
@@ -291,6 +299,15 @@ stop_speaking() {
   fi
   rm -f "$PID_FILE"
   set_status idle
+}
+
+stop_speaking() {
+  local lock_fd
+  exec {lock_fd}>"$SPEECH_LOCK"
+  flock "$lock_fd"
+  stop_speaking_unlocked
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
 }
 
 is_speaking() {
@@ -415,6 +432,13 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+[[ -z "$RATE" ]] || awk -v value="$RATE" 'BEGIN { exit !(value >= 0.5 && value <= 2.0) }' ||
+  die "rate must be between 0.5 and 2.0"
+[[ -z "$MAXCHARS" || "$MAXCHARS" =~ ^[0-9]+$ ]] || die "max-chars must be a non-negative integer"
+[[ -z "$PROVIDER" || "$PROVIDER" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
+[[ -z "$VOICE" || "$VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] || die "invalid voice name"
+[[ -z "$OCR_ENGINE" || "$OCR_ENGINE" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid OCR engine name"
+
 # --- gather input ---------------------------------------------------------
 if [[ ${#WORDS[@]} -gt 0 ]]; then
   TEXT="${WORDS[*]}"
@@ -485,8 +509,9 @@ if [[ -z "$TTS_VOICE" ]]; then
 fi
 
 # --- speak ----------------------------------------------------------------
-stop_speaking   # never let two voices overlap
-
+exec {speech_lock_fd}>"$SPEECH_LOCK"
+flock "$speech_lock_fd"
+stop_speaking_unlocked   # never let two voices overlap
 set_status speaking
 # $0 is deliberately single-quoted: it must expand in the inner shell, where
 # it becomes $PROV_BIN, not here.
@@ -495,6 +520,9 @@ setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
 child=$!
 pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
 printf '%s\n' "${pgid:-$child}" > "$PID_FILE"
+speech_owner="${pgid:-$child}"
+flock -u "$speech_lock_fd"
+exec {speech_lock_fd}>&-
 
 wait "$child"
 rc=$?
@@ -507,8 +535,17 @@ elif [[ $rc -ne 143 && $rc -ne 137 ]]; then
   notify-send -a "Speak" "$PROVIDER could not speak" \
     "Marked as failing. Pick another provider in the panel." 2>/dev/null
 fi
-rm -f "$PID_FILE"
-set_status idle
+# A superseding invocation owns these files now. Never erase its state when
+# this older provider finally notices that it was cancelled.
+exec {speech_lock_fd}>"$SPEECH_LOCK"
+flock "$speech_lock_fd"
+current_owner="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [[ "$current_owner" == "$speech_owner" ]]; then
+  rm -f "$PID_FILE"
+  set_status idle
+fi
+flock -u "$speech_lock_fd"
+exec {speech_lock_fd}>&-
 
 # 143/137 = we cancelled it on purpose, not a failure
 [[ $rc -eq 143 || $rc -eq 137 ]] && exit 0

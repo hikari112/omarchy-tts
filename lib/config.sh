@@ -4,7 +4,13 @@
 
 tts_config_init() {
   mkdir -p "$(dirname "$CONFIG")"
-  if [[ ! -s "$CONFIG" ]] || ! jq -e 'type == "object"' "$CONFIG" >/dev/null 2>&1; then
+  if [[ -e "$CONFIG" ]] && ! jq -e 'type == "object"' "$CONFIG" >/dev/null 2>&1; then
+    local invalid
+    invalid="${CONFIG}.invalid.$(date +%Y%m%dT%H%M%S).$$"
+    mv "$CONFIG" "$invalid" || return 1
+    printf 'speak: preserved invalid configuration as %s\n' "$invalid" >&2
+  fi
+  if [[ ! -s "$CONFIG" ]]; then
     local tmp
     tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
     cat >"$tmp" <<'JSON'

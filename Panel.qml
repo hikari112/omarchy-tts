@@ -31,7 +31,13 @@ Panel {
   property string apiProvider: ""
   property string apiVendor: ""
   property bool setupSkipped: false
-  readonly property bool needsSetup: !controller.setup.ready && !setupSkipped
+  readonly property bool hasReadyProvider: {
+    var all = controller.info.providers || []
+    for (var i = 0; i < all.length; ++i) if (all[i].status === "ready") return true
+    return false
+  }
+  readonly property bool needsSetup: controller.infoLoaded && !controller.setup.ready
+                                     && !hasReadyProvider && !setupSkipped
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
   function keyName(event) {
@@ -290,7 +296,7 @@ Panel {
               readonly property bool failing: modelData.status === "failing"
               readonly property bool untested: modelData.status === "untested"
               // Installed means "present", which is not the same as usable.
-              readonly property bool usable: ready || untested
+              readonly property bool usable: ready
               readonly property bool cloud: modelData.kind === "cloud"
               width: parent.width; height: providerCopy.implicitHeight + Style.space(12); radius: Style.space(6)
               color: selected ? root.tint(0.10) : "transparent"; border.width: selected ? 1 : 0; border.color: root.tint(0.45)

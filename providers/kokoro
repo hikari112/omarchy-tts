@@ -21,13 +21,11 @@ VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.kokoro.voice // "af_heart"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="af_heart"
 
-TEXT="$(cat)"
-
 # Torch and the HF hub client are chatty on stderr on every run; none of it is
 # actionable here, and it buries real errors.
-KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" KOKORO_TEXT="$TEXT" \
+KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" \
 PYTHONWARNINGS=ignore HF_HUB_DISABLE_TELEMETRY=1 \
-"$KPY" - <<'KOKORO_PY' 2>/dev/null | play_raw 24000 1
+"$KPY" 3<&0 - <<'KOKORO_PY' 2>/dev/null | play_raw 24000 1
 import os, sys, warnings
 warnings.filterwarnings("ignore")
 import numpy as np
@@ -35,8 +33,10 @@ from kokoro import KPipeline
 
 voice = os.environ.get("KOKORO_VOICE", "af_heart")
 pipe = KPipeline(lang_code=voice[0])
+with os.fdopen(3, encoding="utf-8") as source:
+    text = source.read()
 
-for _, _, audio in pipe(os.environ["KOKORO_TEXT"], voice=voice,
+for _, _, audio in pipe(text, voice=voice,
                         speed=float(os.environ.get("KOKORO_SPEED", "1.0"))):
     # kokoro yields a torch Tensor, which has no .astype; convert first.
     if hasattr(audio, "detach"):

@@ -23,8 +23,14 @@ the key never returns to QML or appears in a process argument.
 ## Configuration
 
 `config.json` schema version 2 is additive and backwards compatible. Startup
-fills missing defaults without replacing existing values. Writes are limited
-to an allowlist and use an atomic rename with mode 0600.
+fills missing defaults without replacing existing values. Invalid JSON is
+preserved with an `.invalid.<timestamp>` suffix before defaults are restored.
+Writes are limited to an allowlist and use an atomic rename with mode 0600.
+
+Runtime state is stored in a private, user-owned directory. Speech and
+background jobs record both process ownership and identity; callers must only
+clear state they still own. QML settings writes are serialized, with redundant
+pending writes to the same property coalesced.
 
 ## Deliberate design changes
 

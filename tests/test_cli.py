@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,23 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(info["provider"], "piper")
         self.assertTrue(info["sanitizer"]["stripMarkdown"])
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_invalid_config_is_preserved_before_recovery(self):
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        config.parent.mkdir(parents=True)
+        config.write_text('{"provider":')
+        result = self.run_speak("--info")
+        self.assertEqual(json.loads(result.stdout)["provider"], "piper")
+        preserved = list(config.parent.glob("config.json.invalid.*"))
+        self.assertEqual(len(preserved), 1)
+        self.assertEqual(preserved[0].read_text(), '{"provider":')
+
+    def test_command_line_overrides_are_validated(self):
+        for args in (("--rate", "fast", "hello"),
+                     ("--rate", "3", "hello"),
+                     ("--max-chars", "-1", "hello"),
+                     ("--provider", "../bad", "hello")):
+            self.assertNotEqual(self.run_speak(*args, check=False).returncode, 0)
 
     def test_set_accepts_known_path_and_rejects_unknown_path(self):
         self.run_speak("--set", ".rate", "1.25")
@@ -73,6 +91,13 @@ class CliConfigTests(unittest.TestCase):
         installed = target.read_text()
         self.assertEqual(installed.count("Speak selection"), 1)
         self.assertIn("-- >>> omarchy-tts bindings", installed)
+
+    def test_binding_manager_rejects_non_chord_input(self):
+        result = subprocess.run(
+            [BINDINGS, "set", "selection", 'SUPER + E\n")\nos.execute("bad")'],
+            env=self.env, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
 
     def test_setup_backend_status_and_allowlist(self):
         self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
@@ -164,6 +189,76 @@ class ProviderHealthTests(unittest.TestCase):
         self.speak("Hello there.")
         self.assertEqual(self.status_of("livetest"), "failing",
                          "a real failure should mark the provider without a separate test")
+
+    def test_superseded_speech_cannot_erase_the_new_owner(self):
+        self.write_provider(
+            "slowtest",
+            "trap 'exit 143' TERM INT\ncat > /dev/null\nsleep 30",
+        )
+        self.speak("--set", ".provider", "slowtest")
+        first = subprocess.Popen([SPEAK, "first"], text=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 env=self.env)
+        pid_file = self.home / "run" / "omarchy-tts" / "pgid"
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            time.sleep(0.02)
+        second = subprocess.Popen([SPEAK, "second"], text=True,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  env=self.env)
+        for _ in range(100):
+            if pid_file.exists() and first.poll() is not None:
+                break
+            time.sleep(0.02)
+        self.assertEqual(self.speak("--status").stdout.strip(), "speaking")
+        self.assertTrue(pid_file.exists())
+        self.speak("--stop")
+        first.wait(timeout=3)
+        second.wait(timeout=3)
+
+
+class CloudProviderPrivacyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.args = self.root / "curl-args"
+        fake_curl = self.bin / "curl"
+        fake_curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_CURL_ARGS\"\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == --output ]]; then printf fake-audio > \"$2\"; exit 0; fi\n"
+            "  shift\n"
+            "done\n"
+        )
+        fake_curl.chmod(0o755)
+        self.config = self.root / "config.json"
+        self.config.write_text("{}")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_cloud_secrets_and_text_stay_out_of_curl_arguments(self):
+        secret = "secret-key-that-must-not-leak"
+        spoken = "private highlighted text that must not leak"
+        for provider, variable in (("openai", "OPENAI_API_KEY"),
+                                   ("elevenlabs", "ELEVENLABS_API_KEY")):
+            env = {**os.environ,
+                   "PATH": f"{self.bin}:{os.environ['PATH']}",
+                   "FAKE_CURL_ARGS": str(self.args),
+                   "TTS_PLUGIN_DIR": str(ROOT),
+                   "TTS_CONFIG": str(self.config),
+                   "TTS_SILENT": "1",
+                   variable: secret}
+            result = subprocess.run([ROOT / "providers" / provider], input=spoken,
+                                    text=True, capture_output=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = self.args.read_text()
+            self.assertNotIn(secret, arguments)
+            self.assertNotIn(spoken, arguments)
 
 
 class BindingAdoptionTests(unittest.TestCase):

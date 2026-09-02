@@ -6,7 +6,8 @@ VOICES_DIR="${PIPER_VOICES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
 CATALOGUE="$CACHE_DIR/voices.json"
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
+STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
+STATE_DIR="${STATE_DIR:-/tmp/omarchy-tts-$UID}"
 DL_STATE="$STATE_DIR/download.json"
 OWNER_PID=""
 
@@ -14,7 +15,12 @@ CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.j
 FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
 CACHE_MAX_AGE_DAYS=7
 
-mkdir -p "$VOICES_DIR" "$CACHE_DIR" "$STATE_DIR"
+mkdir -p "$VOICES_DIR" "$CACHE_DIR"
+mkdir -p "$STATE_DIR"
+[[ "$(stat -c %u "$STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+  printf 'speak-voice: unsafe runtime directory: %s\n' "$STATE_DIR" >&2; exit 1;
+}
+chmod 700 "$STATE_DIR" || exit 1
 
 # Voices used to live in ~/.local/share/piper-voices. The player still reads
 # that path, so those voices work - but this tool never scanned it, so they
@@ -29,10 +35,7 @@ migrate_legacy_voices() {
   for model in "$legacy"/*.onnx; do
     [[ -e "$model" ]] || continue
     name="$(basename "$model")"
-    if [[ -e "$VOICES_DIR/$name" ]]; then
-      rm -f "$model" "$model.json"          # already migrated; drop the copy
-      continue
-    fi
+    [[ -e "$VOICES_DIR/$name" ]] && continue
     mv -n "$model" "$VOICES_DIR/$name" 2>/dev/null || continue
     [[ -e "$legacy/$name.json" ]] && mv -n "$legacy/$name.json" "$VOICES_DIR/$name.json" 2>/dev/null
   done
@@ -141,9 +144,14 @@ fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <re
       done ) & poller=$!
   fi
   local rc=0
-  curl -sL --fail --retry 2 "$FILE_BASE/$path?download=true" -o "$part" || rc=$?
+  curl -sL --fail --retry 2 --connect-timeout 15 --max-time 900 \
+    "$FILE_BASE/$path?download=true" -o "$part" || rc=$?
   [[ -n "$poller" ]] && kill "$poller" 2>/dev/null
   if [[ $rc -ne 0 ]]; then rm -f "$part"; return 1; fi
+  if [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 ]]; then
+    local got_size; got_size="$(stat -c%s "$part" 2>/dev/null || echo 0)"
+    [[ "$got_size" == "$size" ]] || { rm -f "$part"; return 2; }
+  fi
   if [[ -n "$md5" && "$md5" != "null" ]] && command -v md5sum >/dev/null 2>&1; then
     local got_md5; got_md5="$(md5sum "$part" | cut -d' ' -f1)"
     [[ "$got_md5" == "$md5" ]] || { rm -f "$part"; return 2; }
@@ -204,6 +212,13 @@ case "${1:-}" in
     [[ -n "${2:-}" ]] || die "need a voice name"
     [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
     if [[ "${3:-}" == "--async" ]]; then
+      running_pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
+      running_identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
+      current_identity="$(awk '{print $22}' "/proc/$running_pid/stat" 2>/dev/null || true)"
+      if [[ "$running_pid" =~ ^[0-9]+$ && "$running_pid" -gt 1 && \
+            -n "$running_identity" && "$running_identity" == "$current_identity" ]]; then
+        die "a voice download is already running"
+      fi
       setsid "$0" _download "$2" >/dev/null 2>&1 &
       echo "started"
     else
