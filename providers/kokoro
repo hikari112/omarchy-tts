@@ -2,6 +2,8 @@
 # desc: opt-in local, best quality, slow cold start
 # kind: local
 # probe: [[ -x "${KOKORO_PYTHON:-$HOME/.local/share/omarchy-tts/kokoro-venv/bin/python}" ]]
+# install: uv venv ~/.local/share/omarchy-tts/kokoro-venv && uv pip install --python ~/.local/share/omarchy-tts/kokoro-venv/bin/python kokoro soundfile
+# voices: bundled
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 

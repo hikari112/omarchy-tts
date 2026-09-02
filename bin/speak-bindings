@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Manage the small, explicitly-owned omarchy-tts block in bindings.lua.
+
+The tool never edits bindings outside its markers.  It backs up before every
+write and rolls back when Hyprland rejects the result.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+BEGIN = "-- >>> omarchy-tts bindings"
+END = "-- <<< omarchy-tts bindings"
+DEFAULTS = {
+    "selection": {"chord": "SUPER + ALT + E", "label": "Speak selection", "command": "speak --toggle"},
+    "clipboard": {"chord": "SUPER + ALT + A", "label": "Speak clipboard", "command": "speak --clipboard"},
+    "stop": {"chord": "SUPER + ALT + X", "label": "Stop speaking", "command": "speak --stop"},
+    "snip": {"chord": "SUPER + ALT + R", "label": "Speak screen region", "command": "speak --snip"},
+    "window": {"chord": "SUPER + ALT + W", "label": "Speak focused window", "command": "speak --window"},
+    "screen": {"chord": "SUPER + ALT + SHIFT + R", "label": "Speak whole screen", "command": "speak --screen"},
+}
+
+
+def paths() -> tuple[Path, Path]:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "hypr" / "bindings.lua", config_home / "omarchy-tts" / "bindings.json"
+
+
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        return DEFAULTS
+    try:
+        data = json.loads(path.read_text())
+        return {key: {**value, **data.get(key, {})} for key, value in DEFAULTS.items()}
+    except (OSError, ValueError, TypeError):
+        return DEFAULTS
+
+
+def render(config: dict) -> str:
+    lines = [BEGIN, "-- Managed by speak-bindings. Edit through the TTS panel or CLI."]
+    for item in config.values():
+        chord = item["chord"].replace('"', "")
+        label = item["label"].replace('"', "")
+        command = item["command"].replace('"', '\\"')
+        lines.append(f'o.bind("{chord}", "{label}", "{command}")')
+    lines.append(END)
+    return "\n".join(lines)
+
+
+def replace_block(text: str, block: str | None) -> str:
+    start, end = text.find(BEGIN), text.find(END)
+    if (start >= 0) != (end >= 0) or (start >= 0 and end < start):
+        raise ValueError("bindings.lua has incomplete omarchy-tts markers")
+    if start >= 0:
+        end = text.find("\n", end)
+        end = len(text) if end < 0 else end + 1
+        text = text[:start].rstrip() + "\n" + text[end:].lstrip("\n")
+    if block:
+        text = text.rstrip() + "\n\n" + block + "\n"
+    return text
+
+
+def migrate_manual_tts_lines(text: str) -> str:
+    """Remove only the exact one-line bindings previously documented by us."""
+    commands = {item["command"] for item in DEFAULTS.values()}
+    kept = []
+    for line in text.splitlines():
+        if "o.bind(" in line and any(f'"{command}"' in line for command in commands):
+            continue
+        kept.append(line)
+    return "\n".join(kept).rstrip() + "\n"
+
+
+def conflicting_chords(text: str, config: dict) -> list[str]:
+    conflicts = []
+    for item in config.values():
+        chord = item["chord"]
+        if re.search(r'(?:o|hl)\.bind\(\s*["\']' + re.escape(chord) + r'["\']', text, re.I):
+            conflicts.append(chord)
+    return conflicts
+
+
+def validate_or_restore(target: Path, backup: Path) -> None:
+    if shutil.which("hyprctl") is None or not os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return
+    reload_result = subprocess.run(["hyprctl", "reload"], capture_output=True, text=True)
+    errors = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True)
+    if reload_result.returncode or errors.stdout.strip():
+        shutil.copy2(backup, target)
+        subprocess.run(["hyprctl", "reload"], capture_output=True)
+        message = errors.stdout.strip() or reload_result.stderr.strip() or "Hyprland rejected the file"
+        raise RuntimeError(message)
+
+
+def write(target: Path, content: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_text("-- Personal keybindings\n")
+    backup = target.with_name(f"{target.name}.tts.bak.{int(time.time())}")
+    shutil.copy2(target, backup)
+    temporary = target.with_suffix(".lua.tts.tmp")
+    temporary.write_text(content)
+    os.replace(temporary, target)
+    validate_or_restore(target, backup)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    sub.add_parser("install")
+    sub.add_parser("remove")
+    set_parser = sub.add_parser("set")
+    set_parser.add_argument("action", choices=DEFAULTS)
+    set_parser.add_argument("chord")
+    args = parser.parse_args()
+    target, config_path = paths()
+    config = load_config(config_path)
+
+    if args.command == "status":
+        installed = target.exists() and BEGIN in target.read_text(errors="replace")
+        print(json.dumps({"installed": installed, "bindings": config}))
+        return 0
+    if args.command == "set":
+        config[args.action]["chord"] = args.chord.upper().strip()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+    original = target.read_text() if target.exists() else "-- Personal keybindings\n"
+    original = replace_block(original, None)
+    original = migrate_manual_tts_lines(original)
+    block = None if args.command == "remove" else render(config)
+    conflicts = conflicting_chords(original, config) if block else []
+    if conflicts:
+        raise ValueError("shortcut already used outside the TTS block: " + ", ".join(conflicts))
+    write(target, replace_block(original, block))
+    print("removed" if block is None else "installed")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"speak-bindings: {exc}", file=sys.stderr)
+        raise SystemExit(1)

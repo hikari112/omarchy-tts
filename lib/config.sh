@@ -1,0 +1,98 @@
+# shellcheck shell=bash
+# Configuration helpers shared by the CLI tools.  All writers go through an
+# atomic replace so the QML panel can never observe half-written JSON.
+
+tts_config_init() {
+  mkdir -p "$(dirname "$CONFIG")"
+  if [[ ! -s "$CONFIG" ]] || ! jq -e 'type == "object"' "$CONFIG" >/dev/null 2>&1; then
+    local tmp
+    tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
+    cat >"$tmp" <<'JSON'
+{
+  "schemaVersion": 2,
+  "provider": "piper",
+  "rate": 1.0,
+  "maxChars": 0,
+  "piper": { "voice": "en_US-amy-medium" },
+  "openai": { "voice": "alloy", "model": "gpt-4o-mini-tts" },
+  "elevenlabs": { "voiceId": "21m00Tcm4TlvDq8ikWAM", "model": "eleven_turbo_v2_5" },
+  "kokoro": { "voice": "af_heart" },
+  "ocr": { "engine": "tesseract", "langs": "eng", "minConfidence": 60 },
+  "sanitizer": {
+    "urls": "domain",
+    "inlineCode": true,
+    "announceCodeBlocks": true,
+    "stripMarkdown": true,
+    "expandUnits": true
+  },
+  "ui": {
+    "lastTab": 0,
+    "sampleText": "Highlight any text and press the key. This is how it sounds right now."
+  }
+}
+JSON
+    chmod 600 "$tmp"
+    mv "$tmp" "$CONFIG"
+  fi
+
+  # Additive migration. User values always win.
+  local tmp
+  tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
+  jq '
+    .schemaVersion = 2
+    | .provider //= "piper"
+    | .rate //= 1.0
+    | .maxChars //= 0
+    | .piper //= {voice:"en_US-amy-medium"}
+    | .openai //= {voice:"alloy",model:"gpt-4o-mini-tts"}
+    | .elevenlabs //= {voiceId:"21m00Tcm4TlvDq8ikWAM",model:"eleven_turbo_v2_5"}
+    | .kokoro //= {voice:"af_heart"}
+    | .ocr //= {engine:"tesseract",langs:"eng",minConfidence:60}
+    | .sanitizer //= {}
+    | .sanitizer.urls //= "domain"
+    | .sanitizer.inlineCode //= true
+    | .sanitizer.announceCodeBlocks //= true
+    | .sanitizer.stripMarkdown //= true
+    | .sanitizer.expandUnits //= true
+    | .ui //= {}
+    | .ui.lastTab //= 0
+    | .ui.sampleText //= "Highlight any text and press the key. This is how it sounds right now."
+    | .rate = (if (.rate|type)=="number" and .rate>=0.5 and .rate<=2 then .rate else 1.0 end)
+    | .maxChars = (if (.maxChars|type)=="number" and .maxChars>=0 then (.maxChars|floor) else 0 end)
+    | .ocr.minConfidence = (if (.ocr.minConfidence|type)=="number" and .ocr.minConfidence>=0 and .ocr.minConfidence<=100 then (.ocr.minConfidence|floor) else 60 end)
+    | .ui.lastTab = (if (.ui.lastTab|type)=="number" and .ui.lastTab>=0 and .ui.lastTab<=4 then (.ui.lastTab|floor) else 0 end)
+  ' "$CONFIG" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CONFIG"
+}
+
+tts_config_set() { # jq path, JSON-or-string value
+  local path="$1" value="$2" tmp
+  case "$path" in
+    .provider|.rate|.maxChars|.piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|\
+    .espeak.voice|.spd.voice|.ocr.engine|.ocr.langs|.ocr.minConfidence|\
+    .sanitizer.urls|.sanitizer.inlineCode|.sanitizer.announceCodeBlocks|\
+    .sanitizer.stripMarkdown|.sanitizer.expandUnits|.ui.lastTab|.ui.sampleText) ;;
+    *) return 2 ;;
+  esac
+  case "$path" in
+    .provider) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
+    .piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|.espeak.voice|.spd.voice)
+      [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]] || return 3 ;;
+    .rate) awk -v value="$value" 'BEGIN { exit !(value >= 0.5 && value <= 2.0) }' || return 3 ;;
+    .maxChars) [[ "$value" =~ ^[0-9]+$ ]] || return 3 ;;
+    .ocr.minConfidence) [[ "$value" =~ ^[0-9]+$ ]] && [[ "$value" -le 100 ]] || return 3 ;;
+    .ocr.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
+    .sanitizer.urls) [[ "$value" == domain || "$value" == link ]] || return 3 ;;
+    .sanitizer.inlineCode|.sanitizer.announceCodeBlocks|.sanitizer.stripMarkdown|.sanitizer.expandUnits)
+      [[ "$value" == true || "$value" == false ]] || return 3 ;;
+    .ui.lastTab) [[ "$value" =~ ^[0-4]$ ]] || return 3 ;;
+  esac
+  tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
+  if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ || "$value" == true || "$value" == false ]]; then
+    jq --argjson value "$value" "$path = \$value" "$CONFIG" >"$tmp"
+  else
+    jq --arg value "$value" "$path = \$value" "$CONFIG" >"$tmp"
+  fi
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp"
+  mv "$tmp" "$CONFIG"
+}

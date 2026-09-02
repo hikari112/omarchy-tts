@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared playback helpers for TTS providers. Sourced, not executed.
 
 # play_raw <rate> <channels> — raw s16le PCM on stdin to the default sink.

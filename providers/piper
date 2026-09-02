@@ -2,6 +2,8 @@
 # desc: local neural voice, fast and natural (default)
 # kind: local
 # probe: command -v piper >/dev/null 2>&1 && compgen -G "${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}/*.onnx" >/dev/null
+# install: uv tool install piper-tts
+# voices: downloadable
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need piper "install with: uv tool install piper-tts"

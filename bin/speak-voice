@@ -15,6 +15,12 @@ CACHE_MAX_AGE_DAYS=7
 
 mkdir -p "$VOICES_DIR" "$CACHE_DIR" "$STATE_DIR"
 
+PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Resolved from the installed plugin directory.
+# shellcheck disable=SC1091
+source "$PLUGIN_DIR/lib/config.sh"
+tts_config_init || { printf 'speak-voice: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
+
 die() { printf 'speak-voice: %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -186,8 +192,7 @@ case "${1:-}" in
   use)
     [[ -n "${2:-}" ]] || die "need a voice name"
     is_installed "$2" || die "not installed: $2"
-    tmp="$(mktemp)"
-    jq --arg v "$2" '.piper.voice = $v' "$CONFIG" > "$tmp" && mv "$tmp" "$CONFIG"
+    tts_config_set .piper.voice "$2" || die "could not update configuration"
     echo "Default voice is now $2"
     ;;
   refresh) rm -f "$CATALOGUE"; ensure_catalogue && echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
