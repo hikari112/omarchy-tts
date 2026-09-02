@@ -73,9 +73,9 @@ ocr_engine_path() {
   return 1
 }
 
-# capture <snip|window|screen> -> PNG on stdout
+# capture <snip|window|screen|clipboard-image> [mime] -> image on stdout
 capture() {
-  local mode="$1" geom="" mon=""
+  local mode="$1" requested_mime="${2:-}" geom="" mon=""
   case "$mode" in
     snip)
       command -v slurp >/dev/null 2>&1 || { echo "speak: slurp not installed" >&2; return 1; }
@@ -104,6 +104,13 @@ capture() {
     screen)
       mon="$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused) | .name' | head -1)"
       if [[ -n "$mon" ]]; then grim -o "$mon" - 2>/dev/null; else grim - 2>/dev/null; fi
+      ;;
+    clipboard-image)
+      local mime=""
+      mime="$requested_mime"
+      [[ "$mime" =~ ^image/(png|jpeg|webp|bmp|tiff)$ ]] || mime=""
+      [[ -n "$mime" ]] || { echo "speak: clipboard has no supported image" >&2; return 1; }
+      wl-paste --type "$mime" 2>/dev/null
       ;;
   esac
 }
@@ -400,7 +407,7 @@ Usage: speak [options] [text...]
 
 Input (default: stdin)
   -s, --selection      speak the highlighted text (primary selection)
-  -c, --clipboard      speak the clipboard
+  -c, --clipboard      speak clipboard text or OCR a copied image
       --raw            skip the sanitizer, speak text verbatim
 
 Read the screen (OCR)
@@ -422,8 +429,8 @@ Voice
   -m, --max-chars N    truncate near N characters (0 = unlimited)
   -l, --list           list available providers
       --verify [NAME]  prove a provider can actually speak (silent)
-      --refresh-voices [NAME]  safely re-fetch cloud voice lists
-      --cycle-provider switch to the next provider
+      --refresh-voices [NAME] safely re-fetch cloud voice lists
+      --cycle-provider       switch to the next provider
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
       --info           print all state as JSON (used by the settings panel)
@@ -542,7 +549,41 @@ if [[ ${#WORDS[@]} -gt 0 ]]; then
 else
   case "$SOURCE" in
     selection) TEXT="$(wl-paste --primary --no-newline 2>/dev/null)" ;;
-    clipboard) TEXT="$(wl-paste --no-newline 2>/dev/null)" ;;
+    clipboard)
+      clipboard_types="$(wl-paste --list-types 2>/dev/null || true)"
+      text_mime="$(awk '/^text\/plain(;.*)?$|^UTF8_STRING$|^text\/uri-list$/ { print; exit }' \
+        <<< "$clipboard_types")"
+      # Prefer actual text when the source supplies both representations. If
+      # it is image-only, route it through the same private OCR pipeline as a
+      # screen capture instead of feeding binary data to a speech provider.
+      if [[ -n "$text_mime" ]]; then
+        TEXT="$(wl-paste --type "$text_mime" --no-newline 2>/dev/null)"
+      elif [[ -z "$clipboard_types" ]]; then
+        TEXT="$(wl-paste --no-newline 2>/dev/null)"
+      else
+        image_mime="$(awk '/^image\/(png|jpeg|webp|bmp|tiff)$/ { print; exit }' \
+          <<< "$clipboard_types")"
+        if [[ -z "$image_mime" ]]; then
+          die "clipboard contains no supported text or image"
+        else
+          OCR_ENGINE="${OCR_ENGINE:-$(cfg .ocr.engine tesseract)}"
+          OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
+            die "no such OCR engine: $OCR_ENGINE"
+          PNG="$(mktemp -t speak-clipboard-XXXXXX.img)" ||
+            die "could not create temporary clipboard image"
+          trap 'rm -f "$PNG"' EXIT
+          capture clipboard-image "$image_mime" > "$PNG" || die "could not read clipboard image"
+          [[ -s "$PNG" ]] || die "clipboard image is empty"
+          TEXT="$("$OCR_BIN" < "$PNG")"
+          OCRMODE=1
+          if [[ -z "${TEXT//[[:space:]]/}" ]]; then
+            notify-send -a "Speak" "No text found" \
+              "OCR found nothing in the clipboard image." 2>/dev/null
+            exit 0
+          fi
+        fi
+      fi
+      ;;
     stdin)     [[ -t 0 ]] && { usage; exit 1; }; TEXT="$(cat)" ;;
     snip|window|screen)
       OCR_ENGINE="${OCR_ENGINE:-$(cfg .ocr.engine tesseract)}"

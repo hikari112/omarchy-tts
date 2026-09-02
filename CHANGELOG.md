@@ -7,6 +7,10 @@ Versioning.
 
 ## 1.2.1 - 2026-09-02
 
+- Add local OCR for image-only clipboard content while preferring text when
+  both clipboard representations are available.
+- Reframe the public documentation around truthful on-demand, local-first
+  desktop reading and explicitly distinguish it from a structural screen reader.
 - Make settings-state reads network-free and cloud voice refresh explicit.
 - Use ElevenLabs' current paginated v2 voice API, with bounded pagination and
   private, atomic account-voice caching.

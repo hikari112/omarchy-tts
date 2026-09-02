@@ -1,7 +1,7 @@
-# Architecture and review handoff
+# Architecture and review guide
 
-This branch implements the full settings-panel design while retaining the
-newer OCR work. The panel now has Provider, Voice, Text, Screen and Keys tabs.
+The plugin has a five-tab settings panel: Provider, Voice, Text, Screen, and
+Keys. Its command-line boundary remains independently useful and testable.
 
 ## Ownership boundaries
 

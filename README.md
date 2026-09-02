@@ -1,11 +1,40 @@
-# omarchy-tts — speak highlighted text
+# Omarchy TTS
 
 [![CI](https://github.com/hikari112/omarchy-tts/actions/workflows/ci.yml/badge.svg)](https://github.com/hikari112/omarchy-tts/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Omarchy](https://img.shields.io/badge/Omarchy-Quattro-f97316.svg)](https://omarchy.org/)
 
-On-demand text-to-speech for Omarchy. Highlight anything, press a key, hear it —
-or drag a box over text that cannot be selected at all and hear that instead.
-Works in any app, because it reads the Wayland selection and the screen itself
-rather than AT-SPI, which Hyprland does not implement.
+**Anything on your screen can speak.**
+
+Omarchy TTS turns speech into a desktop command: indicate something, hear it,
+then stop. Read a selection, the clipboard, a clipboard image, a window, the
+whole display, or a region you draw around otherwise unreachable text.
+
+> Not a screen reader. Not a reading platform. Just a hotkey that makes the
+> thing in front of you speak.
+
+It is on-demand, local-first, and app-independent. Piper is the on-device default;
+OpenAI and ElevenLabs are optional voices, never silent dependencies. There is
+no narration mode, required account, subscription, browser extension, or text
+import workflow.
+
+## Why this exists
+
+Sometimes you do not want the entire desktop narrated. You want *this paragraph*,
+*this dialog*, or *this tiny line of game text* read once, immediately. Omarchy
+TTS keeps that interaction consistent even when the source changes:
+
+| What you indicate | What the plugin does |
+|---|---|
+| Selected or copied text | Reads the text directly |
+| A copied image | Runs local OCR, then reads the result |
+| A dragged region | Captures those pixels, runs local OCR, then reads them |
+| The focused window or display | Captures it without requiring pointer precision |
+
+This is assistive desktop reading for dyslexia, ADHD, low vision, eye strain,
+reading fatigue, dense documentation, scanned PDFs, and unvoiced game text. It
+complements structural screen readers such as Orca; it does not provide desktop
+navigation, control semantics, or Braille support.
 
 ## Install
 
@@ -38,7 +67,7 @@ installation. No installer runs merely because the plugin is added or enabled.
 | Key | Action |
 |-----|--------|
 | `SUPER+ALT+E` | Speak the highlighted text (press again to stop) |
-| `SUPER+ALT+A` | Speak the clipboard |
+| `SUPER+ALT+A` | Speak clipboard text or a copied image |
 | `SUPER+ALT+X` | Stop immediately |
 | `SUPER+ALT+R` | **Drag a box, hear the text in it** (OCR) |
 | `SUPER+ALT+W` | Read the focused window — no pointer needed |
@@ -54,6 +83,7 @@ speak "hello world"           # speak an argument
 cat notes.md | speak          # speak stdin
 journalctl -n 20 | speak      # speak command output
 speak --selection             # speak the highlighted text
+speak --clipboard             # speak clipboard text, or OCR a clipboard image
 speak --snip                  # drag a region, OCR it, speak it
 speak --window                # read the focused window
 speak --stop                  # stop
@@ -114,6 +144,15 @@ speak --snip       # drag a region                  (pointer)
 speak --window     # the focused window             (no pointer)
 speak --screen     # the focused monitor            (no pointer)
 ```
+
+`--clipboard` detects image-only clipboard content and sends supported PNG,
+JPEG, WebP, BMP, or TIFF data through the same local OCR path. Text is preferred
+when an application places both text and image representations on the clipboard.
+
+Because capture happens at the Wayland compositor level, region and window
+reading can also work over fullscreen Steam/Proton games; it has been tested in
+Cloudpunk. Capture behavior can still vary by compositor, game, and protected
+surface, and the plugin makes no anti-cheat compatibility guarantee.
 
 Two of the three need no pointer at all, which matters if dragging a box is
 not an option for you.

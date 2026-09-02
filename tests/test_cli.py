@@ -92,6 +92,50 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(usage.stdout)["account"]["source"],
                          "request_headers")
 
+    def test_image_only_clipboard_is_ocrd_before_speech(self):
+        tools = Path(self.temp.name, "tools")
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        ocr = Path(self.temp.name, "omarchy-tts", "ocr")
+        tools.mkdir()
+        providers.mkdir(parents=True)
+        ocr.mkdir(parents=True)
+        captured = Path(self.temp.name, "spoken-text")
+
+        wl_paste = tools / "wl-paste"
+        wl_paste.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ ${1:-} == --list-types ]]; then\n"
+            "  [[ ${MIXED_CLIPBOARD:-0} == 1 ]] && printf 'text/plain;charset=utf-8\\n'\n"
+            "  printf 'image/png\\n'\n"
+            "elif [[ $* == *text/plain* ]]; then printf 'Preferred clipboard text.'\n"
+            "else printf 'fake-png-bytes'; fi\n"
+        )
+        wl_paste.chmod(0o755)
+        ocr_bin = ocr / "testocr"
+        ocr_bin.write_text(
+            "#!/usr/bin/env bash\n# desc: test OCR\ncat >/dev/null\n"
+            "printf 'Words recovered from the image.\\n'\n"
+        )
+        ocr_bin.chmod(0o755)
+        provider = providers / "capturetest"
+        provider.write_text(
+            "#!/usr/bin/env bash\n# desc: capture speech input\n# kind: local\n"
+            "cat > \"$CAPTURED_TEXT\"\n"
+        )
+        provider.chmod(0o755)
+        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
+        self.env["CAPTURED_TEXT"] = str(captured)
+        self.run_speak("--set", ".ocr.engine", "testocr")
+
+        self.run_speak("--clipboard", "--provider", "capturetest")
+        self.assertEqual(captured.read_text().strip(),
+                         "Words recovered from the image.")
+
+        self.env["MIXED_CLIPBOARD"] = "1"
+        self.run_speak("--clipboard", "--provider", "capturetest")
+        self.assertEqual(captured.read_text().strip(),
+                         "Preferred clipboard text.")
+
     def test_invalid_config_is_preserved_before_recovery(self):
         config = Path(self.temp.name, "omarchy-tts", "config.json")
         config.parent.mkdir(parents=True)

@@ -5,12 +5,12 @@
   "version": "1.2.1",
   "author": "hikari",
   "license": "MIT",
-  "description": "Speak highlighted text aloud through a pluggable TTS provider",
+  "description": "On-demand, local-first speech for selected text and anything visible on screen",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {
     "displayName": "Text to Speech",
-    "description": "Click for settings; right-click to speak or stop",
+    "description": "Read selected text or anything visible on screen",
     "category": "Info",
     "allowMultiple": false,
     "defaultSection": "right"
