@@ -31,8 +31,6 @@ Panel {
   property string apiProvider: ""
   property string apiVendor: ""
   property bool setupSkipped: false
-  property real speedPreview: Number(controller.info.rate || 1)
-  property int confidencePreview: Number(controller.info.ocr?.minConfidence ?? 60)
   readonly property bool needsSetup: !controller.setup.ready && !setupSkipped
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
@@ -70,6 +68,45 @@ Panel {
     { key: "size", label: "Size" },
     { key: "quality", label: "Quality" }
   ]
+
+  // Voices are stored as filenames like "en_US-amy-medium". That is an
+  // identifier, not a name, and it is what the dropdown and the status line
+  // were showing. Providers whose voice names are already words - kokoro's
+  // af_heart, OpenAI's alloy - are left exactly as they are.
+  function titleCase(word) {
+    var w = String(word)
+    return w.length ? w.charAt(0).toUpperCase() + w.slice(1) : w
+  }
+
+  function voiceName(key) {
+    var parts = String(key).split("-")
+    if (parts.length >= 3 && /^[a-z]{2,3}_[A-Za-z]{2,4}$/.test(parts[0]))
+      return root.titleCase(parts[1].replace(/_/g, " "))
+    return String(key)
+  }
+
+  function voiceLabel(key) {
+    var parts = String(key).split("-")
+    if (parts.length >= 3 && /^[a-z]{2,3}_[A-Za-z]{2,4}$/.test(parts[0]))
+      return root.voiceName(key) + " · " + parts[0] + " · " + parts.slice(2).join("-")
+    return String(key)
+  }
+
+  readonly property int adoptableCount: (controller.bindings.adoptable || []).length
+
+  readonly property int removeSizeMB: {
+    var all = controller.catalogue || []
+    for (var i = 0; i < all.length; ++i)
+      if (all[i].key === root.confirmVoiceRemove) return Number(all[i].sizeMB || 0)
+    return 0
+  }
+
+  readonly property var voiceOptions: {
+    var keys = controller.info.voices || [], out = []
+    for (var i = 0; i < keys.length; ++i)
+      out.push({ label: root.voiceLabel(keys[i]), value: String(keys[i]) })
+    return out
+  }
 
   function qualityRank(q) {
     return ({ "x_low": 0, "low": 1, "medium": 2, "high": 3 })[String(q)] ?? 1
@@ -125,8 +162,6 @@ Panel {
   Connections {
     target: controller
     function onInfoChanged() {
-      root.speedPreview = Number(controller.info.rate || 1)
-      root.confidencePreview = Number(controller.info.ocr?.minConfidence ?? 60)
       if (!sampleField.activeFocus) {
         root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
         Qt.callLater(function() { sampleField.cursorPosition = 0 })
@@ -313,15 +348,15 @@ Panel {
         Column {
           width: parent.width; spacing: Style.space(10); visible: !root.needsSetup && root.currentTab === 1 && !root.browsing
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
-          Dropdown { width: parent.width; showLabel: false; foreground: root.fg; options: controller.info.voices?.length ? controller.info.voices : ["No voice installed"]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
+          Dropdown { width: parent.width; showLabel: false; foreground: root.fg; options: root.voiceOptions.length ? root.voiceOptions : [{ label: "No voice installed", value: "" }]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
           Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
           Item {
             width: parent.width; height: speedHeader.implicitHeight
             PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: root.speedPreview.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: speedSlider.liveValue.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: 32; text: "−"; bordered: true; onClicked: { root.speedPreview = Math.max(.5, root.speedPreview - .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
+            Button { width: 32; text: "−"; bordered: true; onClicked: { var s = Math.max(.5, Math.round((speedSlider.liveValue - .1) * 20) / 20); speedSlider.liveValue = s; controller.setConfig(".rate", s.toFixed(2)) } }
             // The knob tracks the raw pointer while the label shows the snapped
             // value, so on release it drifts to the step and eases there once
             // the config round-trip returns. Snapping liveValue as we go keeps
@@ -332,15 +367,14 @@ Panel {
               minimum: .5; maximum: 2; step: .05
               value: Number(controller.info.rate || 1)
               function snap(v) { return Math.round(v * 20) / 20 }
-              onMoved: function(v) { var s = speedSlider.snap(v); root.speedPreview = s; speedSlider.liveValue = s }
+              onMoved: function(v) { speedSlider.liveValue = speedSlider.snap(v) }
               onReleased: function(v) {
                 var s = speedSlider.snap(v)
-                root.speedPreview = s
                 speedSlider.liveValue = s
                 controller.setConfig(".rate", s.toFixed(2))
               }
             }
-            Button { width: 32; text: "+"; bordered: true; onClicked: { root.speedPreview = Math.min(2, root.speedPreview + .1); controller.setConfig(".rate", root.speedPreview.toFixed(2)) } }
+            Button { width: 32; text: "+"; bordered: true; onClicked: { var s = Math.min(2, Math.round((speedSlider.liveValue + .1) * 20) / 20); speedSlider.liveValue = s; controller.setConfig(".rate", s.toFixed(2)) } }
           }
           Item {
             width: parent.width; height: limitHeader.implicitHeight
@@ -402,7 +436,7 @@ Panel {
               required property var modelData
               readonly property bool busy: controller.download.status === "downloading" && controller.download.voice === modelData.key
               width: ListView.view.width; height: 42; radius: 5; color: modelData.installed ? root.tint(.07) : "transparent"
-              Text { anchors.left: parent.left; anchors.right: parent.right; anchors.rightMargin: 112; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; text: parent.modelData.name + " · " + parent.modelData.quality + " · " + parent.modelData.lang; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text { anchors.left: parent.left; anchors.right: parent.right; anchors.rightMargin: 112; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; text: root.titleCase(String(parent.modelData.name).replace(/_/g, " ")) + " · " + parent.modelData.lang + " · " + parent.modelData.quality; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
               Text {
                 id: voiceAction; z: 2; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
                 text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? controller.download.percent + "% · Cancel" : "󰇚 " + parent.modelData.sizeMB + " MB")
@@ -417,7 +451,7 @@ Panel {
             visible: root.confirmVoiceRemove !== ""; color: root.tint(0.08); border.width: 1; border.color: Color.popups.border
             Row {
               id: voiceRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
-              Text { width: parent.width - cancelVoice.width - removeVoice.width - 24; elide: Text.ElideMiddle; text: "Remove " + root.confirmVoiceRemove + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text { width: parent.width - cancelVoice.width - removeVoice.width - 24; elide: Text.ElideMiddle; text: "Remove " + root.voiceLabel(root.confirmVoiceRemove) + "?" + (root.removeSizeMB > 0 ? "  Frees " + root.removeSizeMB + " MB." : ""); color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
               Button { id: cancelVoice; text: "Cancel"; bordered: true; onClicked: root.confirmVoiceRemove = "" }
               Button { id: removeVoice; text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeVoice(root.confirmVoiceRemove); root.confirmVoiceRemove = "" } }
             }
@@ -450,7 +484,7 @@ Panel {
           Item {
             width: parent.width; height: ocrHeader.implicitHeight
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: root.confidencePreview > 0 ? root.confidencePreview + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text { anchors.right: parent.right; text: confidenceSlider.liveValue > 0 ? Math.round(confidenceSlider.liveValue) + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           PanelSlider {
             id: confidenceSlider
@@ -458,10 +492,9 @@ Panel {
             minimum: 0; maximum: 95; step: 5; integer: true
             value: Number(controller.info.ocr?.minConfidence ?? 60)
             function snap(v) { return Math.round(v / 5) * 5 }
-            onMoved: function(v) { var s = confidenceSlider.snap(v); root.confidencePreview = s; confidenceSlider.liveValue = s }
+            onMoved: function(v) { confidenceSlider.liveValue = confidenceSlider.snap(v) }
             onReleased: function(v) {
               var s = confidenceSlider.snap(v)
-              root.confidencePreview = s
               confidenceSlider.liveValue = s
               controller.setConfig(".ocr.minConfidence", s)
             }
@@ -476,7 +509,18 @@ Panel {
           Item {
             width: parent.width; height: keysHeader.implicitHeight
             PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }
-            Text { anchors.right: parent.right; text: controller.bindings.installed ? "● Installed" : "Not installed"; color: controller.bindings.installed ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+            Text {
+              anchors.right: parent.right
+              // "Not installed" beside six shortcuts that plainly work is a
+              // contradiction. Unmanaged is a third state, not a broken one.
+              text: controller.bindings.installed ? "● Managed"
+                    : (root.adoptableCount > 0
+                       ? root.adoptableCount + " already set up"
+                       : "Not set up")
+              color: controller.bindings.installed ? Color.accent
+                     : (root.adoptableCount > 0 ? root.fg : root.dim)
+              font.family: root.ff; font.pixelSize: Style.font.caption
+            }
           }
           Repeater {
             model: ["selection", "clipboard", "stop", "snip", "window", "screen"]
@@ -488,8 +532,26 @@ Panel {
             }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: (parent.width - 8)/2; text: controller.bindings.installed ? "Apply changes" : "Install bindings"; bordered: true; foreground: Color.accent; enabled: controller.bindings.canInstall !== false; onClicked: controller.installBindings() }
-            Button { width: (parent.width - 8)/2; text: "Remove TTS bindings"; bordered: true; enabled: controller.bindings.installed; onClicked: controller.removeBindings() }
+            Button {
+              width: controller.bindings.installed ? (parent.width - 8)/2 : parent.width
+              text: controller.bindings.installed ? "Apply changes"
+                    : (root.adoptableCount > 0 ? "Take over these shortcuts" : "Set up shortcuts")
+              bordered: true; foreground: Color.accent
+              enabled: controller.bindings.canInstall !== false
+              onClicked: controller.installBindings()
+            }
+            Button {
+              width: (parent.width - 8)/2
+              visible: controller.bindings.installed
+              text: "Remove shortcuts"; bordered: true; foreground: Color.urgent
+              onClicked: controller.removeBindings()
+            }
+          }
+          Text {
+            width: parent.width; wrapMode: Text.WordWrap
+            visible: !controller.bindings.installed && root.adoptableCount > 0
+            text: "These shortcuts already work; they were written by hand rather than by this panel. Taking them over lets you change them here. Nothing is duplicated."
+            color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
           }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Only the marked omarchy-tts block in bindings.lua is managed. Every write is backed up and rolled back if Hyprland reports an error."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: (controller.bindings.conflicts || []).length > 0; wrapMode: Text.WordWrap; text: "Resolve these shortcuts first: " + controller.bindings.conflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
@@ -519,7 +581,7 @@ Panel {
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
             Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
-          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + controller.info.voice : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + root.voiceName(controller.info.voice) : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: controller.error !== ""; text: controller.error; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
       }

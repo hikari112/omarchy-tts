@@ -34,8 +34,17 @@ Item {
   property bool infoQueued: false
   property bool infoLoaded: false
 
+  // A read started before a write can finish after it, and would then report
+  // the value we just replaced - which is how a slider ends up showing the
+  // old number again a moment after being moved. Each read records the write
+  // count it started under; if that count has moved on, the answer describes
+  // a config that no longer exists and is thrown away.
+  property int writeEpoch: 0
+  property int readEpoch: 0
+
   function refresh() {
     if (infoProc.running) { infoQueued = true; return }
+    readEpoch = writeEpoch
     infoProc.running = true
   }
   function refreshBindings() { if (!bindingsProc.running) bindingsProc.running = true }
@@ -50,6 +59,7 @@ Item {
   // most of what made the race easy to hit.
   function setConfig(path, value) {
     error = ""
+    writeEpoch++
     configProc.running = false
     configProc.command = [speakBin, "--set", path, String(value)]
     configProc.running = true
@@ -91,6 +101,10 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.readEpoch !== root.writeEpoch) {
+          root.infoQueued = true      // answered a question we have since changed
+          return
+        }
         try {
           root.info = JSON.parse(text)
           root.infoLoaded = true
