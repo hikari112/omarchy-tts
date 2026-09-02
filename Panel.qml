@@ -63,21 +63,59 @@ Panel {
     return null
   }
   readonly property bool activeIsCloud: activeProvider && activeProvider.kind === "cloud"
+  property string voiceSort: "lang"
+  readonly property var voiceSorts: [
+    { key: "lang", label: "Language" },
+    { key: "name", label: "Name" },
+    { key: "size", label: "Size" },
+    { key: "quality", label: "Quality" }
+  ]
+
+  function qualityRank(q) {
+    return ({ "x_low": 0, "low": 1, "medium": 2, "high": 3 })[String(q)] ?? 1
+  }
+
+  readonly property int installedCount: {
+    var all = controller.catalogue || [], n = 0
+    for (var i = 0; i < all.length; ++i) if (all[i].installed) n++
+    return n
+  }
+
   readonly property var filteredVoices: {
     var q = voiceFilter.toLowerCase().trim(), all = controller.catalogue || [], out = []
-    if (!q) return all
     for (var i = 0; i < all.length; ++i) {
       var value = all[i]
-      if (String(value.key).toLowerCase().indexOf(q) >= 0
-          || String(value.lang).toLowerCase().indexOf(q) >= 0
-          || String(value.country).toLowerCase().indexOf(q) >= 0) out.push(value)
+      if (!q || String(value.key).toLowerCase().indexOf(q) >= 0
+             || String(value.lang).toLowerCase().indexOf(q) >= 0
+             || String(value.country).toLowerCase().indexOf(q) >= 0) out.push(value)
     }
-    return out
+    var mode = root.voiceSort
+    out.sort(function (a, b) {
+      // Installed always leads, so the list you can act on is never buried
+      // under a hundred you have not downloaded.
+      if (a.installed !== b.installed) return a.installed ? -1 : 1
+      if (mode === "name") return String(a.name).localeCompare(String(b.name))
+      if (mode === "size") return (b.sizeMB - a.sizeMB) || String(a.name).localeCompare(String(b.name))
+      if (mode === "quality") return (root.qualityRank(b.quality) - root.qualityRank(a.quality))
+                                     || String(a.name).localeCompare(String(b.name))
+      return String(a.lang).localeCompare(String(b.lang))
+             || String(a.name).localeCompare(String(b.name))
+    })
+    // ListView sections need the group on the item itself.
+    var grouped = []
+    for (var j = 0; j < out.length; ++j) {
+      var v = out[j]
+      grouped.push({ key: v.key, name: v.name, lang: v.lang, country: v.country,
+                     quality: v.quality, sizeMB: v.sizeMB, installed: v.installed,
+                     group: v.installed ? "Installed" : "Available" })
+    }
+    return grouped
   }
 
   TtsController { id: controller }
   onOpenedChanged: if (opened) {
     controller.refresh(); controller.refreshBindings(); controller.refreshSetup()
+    controller.loadCatalogue()   // cached: ~30 ms, and the Voice tab needs it
     Qt.callLater(function() {
       root.currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
       root.sampleText = String(controller.info.ui?.sampleText || root.sampleText)
@@ -319,12 +357,47 @@ Panel {
           width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 1 && root.browsing
           Item {
             width: parent.width; height: browseHeader.implicitHeight
-            PanelSectionHeader { id: browseHeader; text: "Browse voices · Piper"; foreground: root.fg }
+            PanelSectionHeader { id: browseHeader; text: root.installedCount + " installed · " + ((controller.catalogue || []).length - root.installedCount) + " available"; foreground: root.fg }
             Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } }
           }
           TextField { width: parent.width; text: root.voiceFilter; foreground: root.fg; onTextChanged: root.voiceFilter = text }
+
+          Row {
+            width: parent.width; spacing: Style.space(12)
+            Text { text: "Sort"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                   anchors.verticalCenter: parent.verticalCenter }
+            Repeater {
+              model: root.voiceSorts
+              delegate: Text {
+                required property var modelData
+                text: modelData.label
+                color: root.voiceSort === modelData.key ? Color.accent : root.dim
+                font.family: root.ff; font.pixelSize: Style.font.caption
+                anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.voiceSort = parent.modelData.key }
+              }
+            }
+          }
+
           ListView {
             width: parent.width; height: Style.space(240); clip: true; model: root.filteredVoices; spacing: 2
+            section.property: "group"
+            section.criteria: ViewSection.FullString
+            section.delegate: Item {
+              required property string section
+              width: ListView.view ? ListView.view.width : 0
+              height: sectionLabel.implicitHeight + Style.space(10)
+              Text {
+                id: sectionLabel
+                anchors.left: parent.left; anchors.leftMargin: Style.space(8)
+                anchors.bottom: parent.bottom
+                text: parent.section === "Installed"
+                      ? "Installed — click to use, Remove to delete"
+                      : "Available to download"
+                color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+              }
+            }
             delegate: Rectangle {
               required property var modelData
               readonly property bool busy: controller.download.status === "downloading" && controller.download.voice === modelData.key

@@ -26,12 +26,34 @@ Item {
   signal actionFinished
 
   function restart(process) { process.running = false; process.running = true }
-  function refresh() { restart(infoProc) }
-  function refreshBindings() { restart(bindingsProc) }
-  function refreshSetup() { restart(setupStatusProc); restart(setupJobProc) }
+
+  // `speak --info` takes about 200 ms. Restarting it while it is still
+  // writing truncates its output, and half a JSON document does not parse -
+  // which is how moving a slider twice in quick succession produced "Could
+  // not read TTS settings". Reads are queued instead of killed.
+  property bool infoQueued: false
+  property bool infoLoaded: false
+
+  function refresh() {
+    if (infoProc.running) { infoQueued = true; return }
+    infoProc.running = true
+  }
+  function refreshBindings() { if (!bindingsProc.running) bindingsProc.running = true }
+  function refreshSetup() {
+    if (!setupStatusProc.running) setupStatusProc.running = true
+    if (!setupJobProc.running) setupJobProc.running = true
+  }
   function loadCatalogue() { restart(catalogueProc) }
   function action(argv) { error = ""; actionProc.running = false; actionProc.command = argv; actionProc.running = true }
-  function setConfig(path, value) { action([speakBin, "--set", path, String(value)]) }
+  // Writing a setting cannot change keybindings or install state, so only the
+  // settings themselves are re-read. Three processes per slider release was
+  // most of what made the race easy to hit.
+  function setConfig(path, value) {
+    error = ""
+    configProc.running = false
+    configProc.command = [speakBin, "--set", path, String(value)]
+    configProc.running = true
+  }
   function speak(text) { speechProc.command = [speakBin, "--raw", "--", text]; restart(speechProc) }
   function stop() { speechProc.command = [speakBin, "--stop"]; restart(speechProc) }
   function selectProvider(name) { setConfig(".provider", name) }
@@ -60,8 +82,28 @@ Item {
   function removeKey(provider) { if (provider === "openai" || provider === "elevenlabs") action([setupBin, "key-remove", provider]) }
 
   Process {
+    id: configProc; command: []
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
+    onRunningChanged: if (!running) root.refresh()
+  }
+  Process {
     id: infoProc; command: [root.speakBin, "--info"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.info = JSON.parse(text); root.error = "" } catch (e) { root.error = "Could not read TTS settings" } } }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          root.info = JSON.parse(text)
+          root.infoLoaded = true
+          root.error = ""
+        } catch (e) {
+          // Only alarm the user if we have never managed to read settings at
+          // all; a transient truncation just gets retried.
+          if (!root.infoLoaded) root.error = "Could not read TTS settings"
+          root.infoQueued = true
+        }
+      }
+    }
+    onRunningChanged: if (!running && root.infoQueued) { root.infoQueued = false; Qt.callLater(root.refresh) }
   }
   Process { id: speechProc; command: []; stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() } }
   Process { id: speechWatch; running: true; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.speaking = data.trim() === "speaking" } } }

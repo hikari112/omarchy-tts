@@ -16,6 +16,30 @@ CACHE_MAX_AGE_DAYS=7
 
 mkdir -p "$VOICES_DIR" "$CACHE_DIR" "$STATE_DIR"
 
+# Voices used to live in ~/.local/share/piper-voices. The player still reads
+# that path, so those voices work - but this tool never scanned it, so they
+# showed as available to download and could not be removed at all. Move them
+# into the canonical directory once, so there is a single answer to "what is
+# installed".
+migrate_legacy_voices() {
+  local legacy="$HOME/.local/share/piper-voices"
+  [[ -d "$legacy" ]] || return 0
+  [[ "$(readlink -f "$legacy")" != "$(readlink -f "$VOICES_DIR")" ]] || return 0
+  local model name
+  for model in "$legacy"/*.onnx; do
+    [[ -e "$model" ]] || continue
+    name="$(basename "$model")"
+    if [[ -e "$VOICES_DIR/$name" ]]; then
+      rm -f "$model" "$model.json"          # already migrated; drop the copy
+      continue
+    fi
+    mv -n "$model" "$VOICES_DIR/$name" 2>/dev/null || continue
+    [[ -e "$legacy/$name.json" ]] && mv -n "$legacy/$name.json" "$VOICES_DIR/$name.json" 2>/dev/null
+  done
+  rmdir "$legacy" 2>/dev/null || true
+}
+migrate_legacy_voices
+
 PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # Resolved from the installed plugin directory.
 # shellcheck disable=SC1091
