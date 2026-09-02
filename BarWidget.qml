@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Ui
 
@@ -9,7 +10,7 @@ BarWidget {
   property bool speaking: false
   property string provider: "piper"
 
-  readonly property string speakBin: "$HOME/.local/bin/speak"
+  readonly property string speakBin: String(Qt.resolvedUrl("bin/speak")).replace("file://", "")
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -47,7 +48,7 @@ BarWidget {
 
   // Long-lived status stream: `speak --watch-status` prints only on change.
   Process {
-    command: ["bash", "-c", "exec " + root.speakBin + " --watch-status"]
+    command: [root.speakBin, "--watch-status"]
     running: true
     stdout: SplitParser {
       onRead: function (line) { root.speaking = (line.trim() === "speaking") }
@@ -56,7 +57,7 @@ BarWidget {
 
   Process {
     id: providerReader
-    command: ["bash", "-c", "exec " + root.speakBin + " --current-provider"]
+    command: [root.speakBin, "--watch-provider"]
     running: true
     stdout: SplitParser {
       onRead: function (line) { if (line.trim() !== "") root.provider = line.trim() }
@@ -67,7 +68,7 @@ BarWidget {
 
   function run(args) {
     runner.running = false
-    runner.command = ["bash", "-c", "exec " + root.speakBin + " " + args]
+    runner.command = [root.speakBin].concat(args)
     runner.running = true
   }
 
@@ -80,14 +81,14 @@ BarWidget {
     active: root.speaking
     tooltipText: root.speaking
       ? "Speaking — right-click to stop"
-      : "Text to speech (" + root.provider + ") — click for settings"
+      : "Text to speech (" + root.provider + ") — click for settings, right-click to speak selection"
 
     opacity: root.speaking ? pulse.value : 1.0
 
     onPressed: function (btn) {
       if (btn === Qt.RightButton) {
         // Quick action, so speaking never requires opening the panel first.
-        root.run("--toggle")
+        root.run(["--toggle"])
       } else {
         root.togglePanel()
       }

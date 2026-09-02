@@ -5,6 +5,7 @@ Reads text on stdin, writes speakable text on stdout. Exits 1 if nothing
 speakable survives, so callers can stay silent instead of playing dead air.
 """
 import argparse
+import json
 import re
 import sys
 import unicodedata
@@ -64,6 +65,7 @@ UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I
 )
 LONGNUM = re.compile(r"\b\d{7,}\b")
+UNIT = re.compile(r"\b(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|min|mins|h|hr|hrs|kb|mb|gb|%)\b", re.I)
 REPEAT_PUNCT = re.compile(r"([!?.,;:])\1{1,}")
 MULTISPACE = re.compile(r"[ \t ]+")
 BLANKLINES = re.compile(r"\n{2,}")
@@ -162,7 +164,20 @@ def _handle_table_row(line: str) -> str:
     return ", ".join(cells) + "." if cells else ""
 
 
-def sanitize(text: str, announce_code=True, max_chars=0, ocr=False) -> str:
+def _expand_unit(match: re.Match) -> str:
+    value, unit = match.group(1), match.group(2).lower()
+    names = {
+        "ms": "milliseconds", "s": "seconds", "sec": "seconds", "secs": "seconds",
+        "min": "minutes", "mins": "minutes", "h": "hours", "hr": "hours",
+        "hrs": "hours", "kb": "kilobytes", "mb": "megabytes", "gb": "gigabytes",
+        "%": "percent",
+    }
+    return f"{value} {names[unit]}"
+
+
+def sanitize(text: str, announce_code=True, max_chars=0, ocr=False,
+             urls="domain", inline_code=True, strip_markdown=True,
+             expand_units=True) -> str:
     text = _strip_control(text)
     if ocr:
         text = _reflow_ocr(text)
@@ -176,15 +191,16 @@ def sanitize(text: str, announce_code=True, max_chars=0, ocr=False) -> str:
     for line in lines:
         if HRULE.match(line) or TABLE_SEP.match(line):
             continue
-        line = MD_HEADER.sub("", line)
-        line = MD_QUOTE.sub("", line)
-        line = MD_CHECK.sub(
-            lambda m: f"{m.group(1)}{'done, ' if m.group(2).lower() == 'x' else 'not done, '}",
-            line,
-        )
-        line = MD_BULLET.sub(r"\1", line)
-        if line.strip().startswith("|"):
-            line = _handle_table_row(line)
+        if strip_markdown:
+            line = MD_HEADER.sub("", line)
+            line = MD_QUOTE.sub("", line)
+            line = MD_CHECK.sub(
+                lambda m: f"{m.group(1)}{'done, ' if m.group(2).lower() == 'x' else 'not done, '}",
+                line,
+            )
+            line = MD_BULLET.sub(r"\1", line)
+            if line.strip().startswith("|"):
+                line = _handle_table_row(line)
         cleaned.append(line)
 
     text = "\n".join(cleaned)
@@ -192,17 +208,20 @@ def sanitize(text: str, announce_code=True, max_chars=0, ocr=False) -> str:
     text = MD_IMAGE.sub(r"\1", text)
     text = MD_LINK.sub(r"\1", text)
     text = HTML_TAG.sub(" ", text)
-    text = MD_BOLD.sub(r"\2", text)
-    text = MD_STRIKE.sub(r"\1", text)
-    text = MD_ITALIC.sub(r"\2", text)
-    text = INLINE_CODE.sub(r"\1", text)
+    if strip_markdown:
+        text = MD_BOLD.sub(r"\2", text)
+        text = MD_STRIKE.sub(r"\1", text)
+        text = MD_ITALIC.sub(r"\2", text)
+    text = INLINE_CODE.sub(r"\1" if inline_code else " inline code ", text)
 
     text = UUID.sub(" identifier ", text)
-    text = URL.sub(_shorten_url, text)
+    text = URL.sub((lambda _m: "link") if urls == "link" else _shorten_url, text)
     text = PATH.sub(_shorten_path, text)
     text = HEXBLOB.sub(" hash ", text)
     text = B64BLOB.sub(" encoded blob ", text)
     text = LONGNUM.sub(lambda m: " ".join(m.group(0)), text)
+    if expand_units:
+        text = UNIT.sub(_expand_unit, text)
 
     # Line breaks become sentence boundaries so the voice actually pauses.
     text = BLANKLINES.sub(". ", text)
@@ -230,11 +249,26 @@ def main() -> int:
                     help="input came from OCR: rejoin wrapped lines, drop stray characters")
     ap.add_argument("--no-announce-code", action="store_true",
                     help="drop code blocks silently instead of naming them")
+    ap.add_argument("--config", help="read sanitizer options from this JSON config")
     args = ap.parse_args()
 
-    raw = sys.stdin.read()
-    out = sanitize(raw, announce_code=not args.no_announce_code,
-                   max_chars=args.max_chars, ocr=args.ocr)
+    opts = {}
+    if args.config:
+        try:
+            with open(args.config, encoding="utf-8") as handle:
+                opts = json.load(handle).get("sanitizer", {})
+        except (OSError, ValueError, TypeError):
+            opts = {}
+    out = sanitize(
+        sys.stdin.read(),
+        announce_code=(not args.no_announce_code and opts.get("announceCodeBlocks", True)),
+        max_chars=args.max_chars,
+        ocr=args.ocr,
+        urls=opts.get("urls", "domain"),
+        inline_code=opts.get("inlineCode", True),
+        strip_markdown=opts.get("stripMarkdown", True),
+        expand_units=opts.get("expandUnits", True),
+    )
     if not out or not re.search(r"[A-Za-z0-9]", out):
         return 1
     sys.stdout.write(out)

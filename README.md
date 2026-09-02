@@ -10,27 +10,12 @@ rather than AT-SPI, which Hyprland does not implement.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/hikari112/omarchy-tts
-omarchy plugin enable io.github.hikari112.tts right
+omarchy plugin add https://github.com/hikari112/omarchy-tts.git --enable
 ```
 
-Then install the speech engine and a voice (no root needed):
-
-```bash
-uv tool install piper-tts
-speak-voice add en_US-amy-medium
-```
-
-Add the keybindings to `~/.config/hypr/bindings.lua`:
-
-```lua
-o.bind("SUPER + ALT + E", "Speak selection", "speak --toggle")
-o.bind("SUPER + ALT + A", "Speak clipboard", "speak --clipboard")
-o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
-o.bind("SUPER + ALT + R", "Speak screen region", "speak --snip")
-o.bind("SUPER + ALT + W", "Speak focused window", "speak --window")
-o.bind("SUPER + ALT + SHIFT + R", "Speak whole screen", "speak --screen")
-```
+Click the speaker in the bar. The welcome screen installs the recommended
+local engine and voice; the **Keys** tab installs the shortcuts. Both are
+guided, cancellable operations—no terminal setup or manual config editing.
 
 ## Requirements
 
@@ -83,7 +68,7 @@ speak-voice browse                # listen to samples in a browser
 Click the speaker in the bar. Right-click it to speak the selection without
 opening anything.
 
-Three tabs, and a Test dock that stays visible on all of them so you can hear
+Five tabs, and a Test dock that stays visible on all of them so you can hear
 a change straight after making it:
 
 - **Provider** — all six at once, each showing whether it actually works on
@@ -93,9 +78,13 @@ a change straight after making it:
   every one of the 175 downloadable voices across 51 languages, showing which
   are installed, with size and a one-click download that reports progress and
   verifies the md5 before installing.
-- **Screen** — OCR confidence floor.
+- **Text** — live before/after sanitizer preview and readability rules.
+- **Screen** — OCR confidence floor and language selection.
+- **Keys** — capture, install, update, or remove the plugin-owned shortcuts.
 
-Settings write on change; there is no Save button. Everything the panel shows
+Settings write on change; there is no Save button. Configuration is created
+on first use, migrated additively, written atomically, and kept mode 0600.
+Everything the panel shows
 comes from `speak --info`, and everything it changes goes through
 `speak --set`, so the panel is a front-end to the CLI rather than a second
 implementation of it.
@@ -160,12 +149,17 @@ Environment given to providers: `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
 
 ### Cloud API keys
 
-Never stored in plaintext by default. Resolution order is env var, then
-system keyring, then config file:
+Add or remove keys from the **Provider** tab. They are entered in a masked
+field and stored in the system keyring, never in the plugin settings or logs.
+The panel clearly marks providers that send text off the machine.
 
-```bash
-secret-tool store --label='openai' service omarchy-tts key openai
-```
+## Remove
+
+Remove the plugin from Omarchy's plugin manager. Before removing it, use
+**Keys → Remove TTS bindings** so no shortcuts are left behind. API keys can
+be removed individually from the Provider tab. Voice models and engines live
+under `~/.local/share/omarchy-tts` so any remaining downloaded data is easy to
+identify and remove.
 
 ## Config
 
@@ -189,8 +183,10 @@ cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib
 ## Development
 
 ```bash
-python3 tests/test_sanitize.py      # 23 sanitizer tests
-shellcheck -x bin/* providers/*     # lint
+python3 tests/test_sanitize.py
+python3 tests/test_cli.py
+python3 -m py_compile bin/speak-bindings bin/speak-setup
+shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 ```
 
 Because the repo is symlinked into `~/.config/omarchy/plugins/`, saving any

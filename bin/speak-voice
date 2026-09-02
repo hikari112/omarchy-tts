@@ -2,18 +2,25 @@
 # speak-voice - browse, download and switch local voice models.
 set -uo pipefail
 
-VOICES_DIR="${PIPER_VOICES_DIR:-$HOME/.local/share/piper-voices}"
+VOICES_DIR="${PIPER_VOICES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts/voices/piper}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
 CATALOGUE="$CACHE_DIR/voices.json"
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts"
 DL_STATE="$STATE_DIR/download.json"
+OWNER_PID=""
 
 CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
 FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
 CACHE_MAX_AGE_DAYS=7
 
 mkdir -p "$VOICES_DIR" "$CACHE_DIR" "$STATE_DIR"
+
+PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Resolved from the installed plugin directory.
+# shellcheck disable=SC1091
+source "$PLUGIN_DIR/lib/config.sh"
+tts_config_init || { printf 'speak-voice: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
 
 die() { printf 'speak-voice: %s\n' "$*" >&2; exit 1; }
 
@@ -27,6 +34,7 @@ Usage: speak-voice <command>
   remove <voice>          delete a downloaded voice
   use <voice>             make a voice the default
   status [--json]         progress of a download in flight
+  cancel                  cancel the active download
   refresh                 re-fetch the voice catalogue
   browse                  open the sample page in a browser
 
@@ -56,11 +64,16 @@ ensure_catalogue() {
 }
 
 write_state() { # write_state <status> <voice> <got> <total> [message]
+  local pid="${OWNER_PID:-0}" identity="" tmp
+  [[ "$pid" -gt 1 ]] && identity="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  tmp="${DL_STATE}.tmp.$$"
   jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
         --arg m "${5:-}" \
+        --argjson pid "$pid" --arg identity "$identity" \
         '{status:$s, voice:$v, bytes:$g, total:$t, message:$m,
+          pid:$pid, processIdentity:$identity,
           percent: (if $t > 0 then (($g / $t) * 100 | floor) else 0 end)}' \
-    > "$DL_STATE" 2>/dev/null
+    > "$tmp" 2>/dev/null && mv "$tmp" "$DL_STATE"
 }
 
 emit_available() {
@@ -165,8 +178,9 @@ case "${1:-}" in
     ;;
   add)
     [[ -n "${2:-}" ]] || die "need a voice name"
+    [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
     if [[ "${3:-}" == "--async" ]]; then
-      setsid bash -c "'$0' _download '$2'" >/dev/null 2>&1 &
+      setsid "$0" _download "$2" >/dev/null 2>&1 &
       echo "started"
     else
       echo "Downloading $2 ..."
@@ -174,20 +188,35 @@ case "${1:-}" in
       echo "Installed. Use it with: speak-voice use $2"
     fi
     ;;
-  _download) do_add "${2:-}" yes ;;      # internal: async worker
+  _download)
+    OWNER_PID=$BASHPID
+    export OWNER_PID
+    trap 'rm -f "$VOICES_DIR"/*.part; write_state cancelled "${2:-}" 0 0 "Cancelled"; exit 143' TERM INT
+    do_add "${2:-}" yes ;;
   status)
     if [[ -s "$DL_STATE" ]]; then cat "$DL_STATE"
     else echo '{"status":"idle","voice":"","bytes":0,"total":0,"percent":0,"message":""}'; fi
     ;;
+  cancel)
+    pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
+    identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
+    current="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" && "$identity" == "$current" ]]; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
+    fi
+    rm -f "$VOICES_DIR"/*.part
+    write_state cancelled "$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)" 0 0 "Cancelled"
+    ;;
   remove)
     [[ -n "${2:-}" ]] || die "need a voice name"
+    [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
+    [[ "$2" != "$(active_voice)" || "${3:-}" == "--force" ]] || die "choose another active voice before removing $2"
     rm -f "$VOICES_DIR/$2.onnx" "$VOICES_DIR/$2.onnx.json" && echo "Removed $2"
     ;;
   use)
     [[ -n "${2:-}" ]] || die "need a voice name"
     is_installed "$2" || die "not installed: $2"
-    tmp="$(mktemp)"
-    jq --arg v "$2" '.piper.voice = $v' "$CONFIG" > "$tmp" && mv "$tmp" "$CONFIG"
+    tts_config_set .piper.voice "$2" || die "could not update configuration"
     echo "Default voice is now $2"
     ;;
   refresh) rm -f "$CATALOGUE"; ensure_catalogue && echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;

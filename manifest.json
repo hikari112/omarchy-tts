@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.hikari112.tts",
   "name": "Text to Speech",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "hikari",
   "description": "Speak highlighted text aloud through a pluggable TTS provider",
   "kinds": ["bar-widget"],

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # desc: opt-in local, best quality, slow cold start
 # kind: local
-# probe: [[ -x "${KOKORO_PYTHON:-$HOME/.local/share/omarchy-tts/kokoro-venv/bin/python}" ]]
+# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
+# install: uv venv ~/.local/share/omarchy-tts/kokoro-venv && uv pip install --python ~/.local/share/omarchy-tts/kokoro-venv/bin/python kokoro soundfile
+# voices: bundled
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 
 # Bring your own interpreter: any python with `kokoro` importable.
-KPY="${KOKORO_PYTHON:-$HOME/.local/share/omarchy-tts/kokoro-venv/bin/python}"
+KPY="${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}"
 if [[ ! -x "$KPY" ]]; then
   echo "speak: kokoro not installed." >&2
   echo "  uv venv ~/.local/share/omarchy-tts/kokoro-venv" >&2

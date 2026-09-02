@@ -20,14 +20,20 @@ jobs:
       - name: Sanitizer tests
         run: python3 tests/test_sanitize.py
 
+      - name: CLI configuration tests
+        run: python3 tests/test_cli.py
+
+      - name: Python syntax
+        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+
       - name: Shell syntax
         run: |
-          for f in bin/speak bin/speak-voice providers/* ocr/*; do
+          for f in bin/speak bin/speak-voice providers/* ocr/* lib/*.sh; do
             bash -n "$f" || exit 1
           done
 
       - name: ShellCheck
-        run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/*
+        run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 
       - name: Manifest is valid
         run: |

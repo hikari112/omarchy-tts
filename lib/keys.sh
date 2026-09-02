@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # API key resolution for cloud providers, most-secure source first.
 #   1. environment variable
 #   2. secret-tool / system keyring   (recommended)
