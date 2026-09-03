@@ -131,6 +131,37 @@ Panel {
     confidenceOverride >= 0 ? confidenceOverride
                             : Number(controller.info.ocr?.minConfidence ?? 60)
 
+  // Recognition languages, split the way voices are: what you have, then what
+  // you could add. The free-text field invited a code and then silently read
+  // nothing when its data was missing.
+  property string languageFilter: ""
+  readonly property var ocrLanguages: controller.info.ocr?.languages || []
+  readonly property var installedLanguages: {
+    var all = root.ocrLanguages, out = []
+    for (var i = 0; i < all.length; ++i) if (all[i].installed) out.push(all[i])
+    return out
+  }
+  readonly property var availableLanguages: {
+    var q = String(root.languageFilter).toLowerCase().trim()
+    var all = root.ocrLanguages, out = []
+    for (var i = 0; i < all.length; ++i) {
+      var l = all[i]
+      if (l.installed) continue
+      if (!q || String(l.value).toLowerCase().indexOf(q) >= 0) out.push(l)
+    }
+    return out
+  }
+  function languageIsActive(code) {
+    return String(controller.info.ocr?.langs || "eng").split("+").indexOf(String(code)) >= 0
+  }
+  function toggleLanguage(code) {
+    var active = String(controller.info.ocr?.langs || "eng").split("+").filter(function (c) { return c.length })
+    var at = active.indexOf(String(code))
+    if (at >= 0) { if (active.length === 1) return; active.splice(at, 1) }
+    else active.push(String(code))
+    controller.setConfig(".ocr.langs", active.join("+"))
+  }
+
   readonly property int adoptableCount: (controller.bindings.adoptable || []).length
 
   readonly property int removeSizeMB: {
@@ -614,8 +645,74 @@ Panel {
               controller.setConfig(".ocr.minConfidence", s)
             }
           }
-          TextField { width: parent.width; text: controller.info.ocr?.langs || "eng"; foreground: root.fg; onEditingFinished: controller.setConfig(".ocr.langs", text) }
-          Text { width: parent.width; wrapMode: Text.WordWrap; text: "Tesseract language codes joined with + (for example eng+fra). Install the corresponding language data first."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Item {
+            width: parent.width; height: langHeader.implicitHeight
+            PanelSectionHeader { id: langHeader; text: "Recognised languages"; foreground: root.fg }
+            Text {
+              anchors.right: parent.right
+              text: controller.refreshingLanguages !== "" ? "Checking…"
+                    : root.installedLanguages.length + " installed · " + root.availableLanguages.length + " available"
+              color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+              MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                          enabled: controller.refreshingLanguages === ""
+                          onClicked: controller.refreshLanguages(controller.info.ocr?.engine || "tesseract") }
+            }
+          }
+          Text {
+            width: parent.width; wrapMode: Text.WordWrap
+            visible: root.ocrLanguages.length === 0
+            text: "No language list yet. Click the count above to read what is installed and what can be added."
+            color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+          }
+          Flow {
+            width: parent.width; spacing: 6
+            visible: root.installedLanguages.length > 0
+            Repeater {
+              model: root.installedLanguages
+              delegate: Rectangle {
+                required property var modelData
+                readonly property bool active: root.languageIsActive(modelData.value)
+                width: langChip.implicitWidth + 18; height: 24; radius: 4
+                color: active ? root.tint(0.16) : "transparent"
+                border.width: 1; border.color: active ? root.tint(0.5) : Color.popups.border
+                Text { id: langChip; anchors.centerIn: parent; text: parent.modelData.value
+                       color: parent.active ? Color.accent : root.dim
+                       font.family: root.ff; font.pixelSize: Style.font.caption }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: root.toggleLanguage(parent.modelData.value) }
+              }
+            }
+          }
+          Text {
+            width: parent.width; wrapMode: Text.WordWrap
+            visible: root.installedLanguages.length > 0
+            text: "Click a language to include or exclude it. Recognition uses every selected language at once, so leave out ones you do not need."
+            color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+          }
+          TextField {
+            width: parent.width; visible: root.ocrLanguages.length > 0
+            text: root.languageFilter; foreground: root.fg
+            onTextChanged: root.languageFilter = text
+          }
+          ListView {
+            width: parent.width; height: Style.space(150); clip: true; spacing: 2
+            visible: root.availableLanguages.length > 0
+            model: root.availableLanguages
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool busy: controller.setupJob.target === "lang:" + modelData.value
+                                           && (controller.setupJob.status === "running" || controller.setupJob.status === "starting")
+              width: ListView.view.width; height: 28; radius: 4; color: "transparent"
+              Text { anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                     text: parent.modelData.value; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                     text: parent.busy ? "Installing…" : "󰇚 Install"
+                     color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
+                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                 enabled: !parent.parent.busy
+                                 onClicked: controller.installLanguage(parent.parent.modelData.value) } }
+            }
+          }
         }
 
         // Keys -------------------------------------------------------------
