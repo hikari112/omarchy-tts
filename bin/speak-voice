@@ -311,7 +311,7 @@ case "${1:-}" in
     download_was_installed=0
     is_installed "$download_voice" && download_was_installed=1
     # Invoked indirectly by the TERM/INT trap below.
-    # shellcheck disable=SC2329
+    # shellcheck disable=SC2317,SC2329
     cancel_download_worker() {
       rm -f "$VOICES_DIR/$download_voice.onnx.part" \
         "$VOICES_DIR/$download_voice.onnx.json.part"
