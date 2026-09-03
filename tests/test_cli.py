@@ -1056,5 +1056,38 @@ class LanguageInstallTargetTests(unittest.TestCase):
                 self.assertNotIn("started", answer)
 
 
+class LanguageNameTableTests(unittest.TestCase):
+    """Language data files are identifiers; the panel must show names.
+
+    The engine joins its codes against lib/tesseract-languages.tsv. The fake
+    engines above never touch that table, so its shape is checked directly.
+    """
+
+    TABLE = Path(__file__).resolve().parents[1] / "lib" / "tesseract-languages.tsv"
+
+    def rows(self):
+        return [line.split("\t") for line in self.TABLE.read_text().splitlines() if line]
+
+    def test_every_row_is_code_and_distinct_name(self):
+        for row in self.rows():
+            with self.subTest(row=row):
+                self.assertEqual(len(row), 2)
+                code, name = row
+                self.assertRegex(code, r"^[a-z]{3,4}(_[a-z]+)*$")
+                self.assertTrue(name.strip())
+                self.assertNotEqual(code, name, "a code standing in for its own name")
+
+    def test_script_variants_say_which_script(self):
+        names = dict(self.rows())
+        self.assertEqual(names["jpn"], "Japanese")
+        self.assertIn("Cyrillic", names["aze_cyrl"])
+        self.assertIn("Simplified", names["chi_sim"])
+        self.assertIn("vertical", names["jpn_vert"])
+
+    def test_no_duplicate_codes(self):
+        codes = [r[0] for r in self.rows()]
+        self.assertEqual(len(codes), len(set(codes)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -16,10 +16,15 @@ if [[ "${1:-}" == "--languages" ]]; then
   available="$( { pacman -Ssq '^tesseract-data-' 2>/dev/null || true; } |
     sed 's/^tesseract-data-//' | grep -Ev '^(osd|equ)$' | sort -u |
     jq -Rsc 'split("\n") | map(select(length>0))')"
-  jq -nc --argjson installed "${installed:-[]}" --argjson available "${available:-[]}" '
+  # Data-file names like "aze_cyrl" are identifiers, not titles. The table
+  # maps each to a language name; a code missing from it falls back to itself,
+  # so a new pack appears as a code rather than disappearing.
+  names="$(jq -Rsc 'split("\n") | map(select(length>0) | split("\t") | select(length==2) | {key:.[0], value:.[1]}) | from_entries' \
+    "$TTS_PLUGIN_DIR/lib/tesseract-languages.tsv" 2>/dev/null || printf '{}')"
+  jq -nc --argjson installed "${installed:-[]}" --argjson available "${available:-[]}" --argjson names "$names" '
     ($installed + $available | unique) as $all
-    | $all | map({value: ., label: ., installed: (. as $c | $installed | index($c) != null)})
-    | sort_by((.installed | not), .value)'
+    | $all | map({value: ., label: ($names[.] // .), installed: (. as $c | $installed | index($c) != null)})
+    | sort_by((.installed | not), (.label | ascii_downcase))'
   exit 0
 fi
 
