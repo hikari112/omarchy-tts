@@ -100,6 +100,8 @@ Item {
   // Proving a backend takes seconds and makes no sound; `verifying` lets the
   // panel say so rather than appearing to have ignored the click.
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
+  function verifyOcrEngine(name) { verifying = "ocr:" + name; verifyProc.command = [speakBin, "--verify-ocr", name]; restart(verifyProc) }
+  function selectOcrEngine(name) { setConfig(".ocr.engine", name) }
   function refreshUsage(name) { refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
   property string refreshingLanguages: ""
   function refreshLanguages(engine) { refreshingLanguages = engine; languageRefreshProc.command = [speakBin, "--refresh-languages", engine]; restart(languageRefreshProc) }
@@ -115,7 +117,7 @@ Item {
   function setBinding(actionName, chord) { action([bindingsBin, "set", actionName, chord]) }
   function startSetup(target) { error = ""; setupStartProc.command = [setupBin, "start", target]; restart(setupStartProc); setupJob = { status: "starting", step: "prepare", progress: 1, message: "Preparing setup" }; setupJobPoll.running = true }
   function installProvider(provider) {
-    var targets = ({ "piper": "piper", "kokoro": "kokoro", "espeak-ng": "espeak-ng", "spd": "spd" })
+    var targets = ({ "piper": "piper", "kokoro": "kokoro", "espeak-ng": "espeak-ng", "spd": "spd", "easyocr": "easyocr" })
     if (targets[provider]) startSetup(targets[provider])
   }
   function cancelSetup() { action([setupBin, "cancel"]) }

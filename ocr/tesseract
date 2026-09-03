@@ -29,7 +29,7 @@ if [[ "${1:-}" == "--languages" ]]; then
 fi
 
 LANGS="${TTS_OCR_LANGS:-}"
-[[ -z "$LANGS" ]] && LANGS="$(jq -r '.ocr.langs // "eng"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$LANGS" ]] && LANGS="$(jq -r '.ocr.tesseract.langs // .ocr.langs // "eng"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$LANGS" || "$LANGS" == "null" ]] && LANGS="eng"
 
 # A language that is configured but not installed produced an empty result and
@@ -51,7 +51,7 @@ if [[ -n "$missing" ]]; then
   exit 78
 fi
 
-MINCONF="$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)"
+MINCONF="${TTS_OCR_MINCONF:-$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)}"
 [[ "$MINCONF" =~ ^[0-9]+$ ]] || MINCONF=60
 
 # --psm 6 treats the crop as one uniform block, which is what a dragged region

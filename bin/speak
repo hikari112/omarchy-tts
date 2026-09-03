@@ -358,6 +358,59 @@ refresh_ocr_languages() { # refresh_ocr_languages <engine>
   rm -f "$tmp"; return 1
 }
 
+# OCR engines are listed, proven and selected exactly the way speech providers
+# are. Health is keyed "ocr:<name>" so an engine and a voice provider that
+# happen to share a name never overwrite each other's record.
+ocr_engine_names() {
+  { ls -1 "$USER_DIR/ocr" 2>/dev/null; ls -1 "$PLUGIN_DIR/ocr" 2>/dev/null; } |
+    sort -u | while read -r n; do ocr_engine_path "$n" >/dev/null && printf '%s\n' "$n"; done
+}
+
+ocr_engine_status() { # engine executable, pre-read health -> display status
+  local bin="$1" health="$2" kind
+  kind="$(meta_of "$bin" kind)"
+  if ! provider_installed "$bin"; then
+    [[ "$kind" == "cloud" ]] && { printf 'nokey'; return; }
+    printf 'missing'; return
+  fi
+  case "$health" in
+    ok)     printf 'ready' ;;
+    failed) printf 'failing' ;;
+    *)      printf 'untested' ;;
+  esac
+}
+
+# Prove an engine by making it read a known image. The fixture ships with the
+# plugin so proof never depends on a screenshot or on ImageMagick.
+# 0 = proved, 1 = installed but cannot read, 2 = not installed to test
+verify_ocr_engine() { # verify_ocr_engine <name>
+  local name="$1" bin out rc=0
+  bin="$(ocr_engine_path "$name")" || return 2
+  provider_installed "$bin" || return 2
+  out="$(timeout --kill-after=5s 120s env TTS_OCR_LANGS=eng TTS_OCR_MINCONF=0 \
+      TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+      TTS_METRICS_FILE="$CLOUD_DIR/ocr-$name.json" \
+      "$bin" < "$PLUGIN_DIR/lib/ocr-probe.png" 2>/dev/null)" || rc=$?
+  if [[ $rc -eq 0 ]] && grep -qiE 'probe|123' <<< "$out"; then
+    health_set "ocr:$name" ok ""
+    return 0
+  fi
+  [[ $rc -eq 69 || $rc -eq 74 || $rc -eq 75 ]] && return 1   # transient cloud trouble
+  health_set "ocr:$name" failed "${rc:+exit $rc}"
+  return 1
+}
+
+# Real use is evidence for engines too. 78 is "language data missing" - a
+# configuration gap, not a broken engine - and cancellation never reaches here.
+record_ocr_outcome() { # record_ocr_outcome <engine> <rc> <text>
+  local engine="$1" rc="$2" text="$3"
+  if [[ $rc -eq 0 && -n "${text//[[:space:]]/}" ]]; then
+    health_set "ocr:$engine" ok ""
+  elif [[ $rc -ne 0 && $rc -ne 78 && $rc -ne 127 && $rc -ne 69 && $rc -ne 74 && $rc -ne 75 ]]; then
+    health_set "ocr:$engine" failed "exit $rc"
+  fi
+}
+
 emit_info() {
   local voices_dir="${PIPER_VOICES_DIR:-$DATA_DIR/voices/piper}"
   local legacy_voices_dir="$HOME/.local/share/piper-voices"
@@ -388,6 +441,24 @@ emit_info() {
                       else null end), usage:$usage,
                maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
+    done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
+  )"
+  local engines="[]"
+  engines="$(
+    ocr_engine_names | while read -r n; do
+      local b health status; b="$(ocr_engine_path "$n")" || continue
+      health="$(health_of "ocr:$n")"
+      status="$(ocr_engine_status "$b" "$health")"
+      jq -nc --arg name "$n" \
+             --arg kind "$(meta_of "$b" kind)" \
+             --arg desc "$(meta_of "$b" desc)" \
+             --arg status "$status" \
+             --arg health "$health" \
+             --arg install "$(meta_of "$b" install)" \
+             --arg vendor "$(meta_of "$b" vendor)" \
+             --arg keySource "$(key_source "$(meta_of "$b" keyname)")" \
+             '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
+               desc:$desc, status:$status, install:$install, vendor:$vendor, keySource:$keySource}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
   active="$(jq -r '.provider // "piper"' <<< "$config")"
@@ -434,12 +505,15 @@ emit_info() {
     --arg voice "$voice" \
     --arg voicePath "$voice_path" \
     --argjson ocrLanguages "$(ocr_languages "$(jq -r '.ocr.engine // "tesseract"' <<< "$config")")" \
+    --argjson ocrEngines "$engines" \
     --argjson speaking "$speaking" \
     '{provider:($config.provider // "piper"), voice:$voice, voicePath:$voicePath,
       rate:($config.rate // 1.0), maxChars:($config.maxChars // 0),
       speaking:$speaking, providers:$providers, voices:$voices,
-      ocr:{engine:($config.ocr.engine // "tesseract"), langs:($config.ocr.langs // "eng"),
-        minConfidence:($config.ocr.minConfidence // 60), languages:$ocrLanguages},
+      ocr:{engine:($config.ocr.engine // "tesseract"),
+        langs:(($config.ocr.engine // "tesseract") as $e
+               | $config.ocr[$e].langs // (if $e == "tesseract" then $config.ocr.langs else null end) // "eng"),
+        minConfidence:($config.ocr.minConfidence // 60), languages:$ocrLanguages, engines:$ocrEngines},
       sanitizer:{urls:($config.sanitizer.urls // "domain"),
         inlineCode:($config.sanitizer.inlineCode // true),
         announceCodeBlocks:($config.sanitizer.announceCodeBlocks // true),
@@ -513,6 +587,7 @@ Voice
   -m, --max-chars N    truncate near N characters (0 = unlimited)
   -l, --list           list available providers
       --verify [NAME]  prove a provider can actually speak (silent)
+      --verify-ocr [NAME] prove an OCR engine can read a known image
       --refresh-voices [NAME] safely re-fetch cloud voice lists
       --refresh-languages [ENGINE] re-read OCR language availability
       --cycle-provider       switch to the next provider
@@ -645,6 +720,19 @@ while [[ $# -gt 0 ]]; do
         esac
       done
       exit $vrc ;;
+    --verify-ocr)
+      otargets="${2:-}"
+      [[ -n "$otargets" ]] && shift || otargets="$(ocr_engine_names)"
+      orc=0
+      for on in $otargets; do
+        printf '%-14s ' "$on"
+        verify_ocr_engine "$on"; case $? in
+          0) echo "ok" ;;
+          2) echo "not installed" ;;
+          *) echo "FAILING"; orc=1 ;;
+        esac
+      done
+      exit $orc ;;
     --refresh-languages)
       lang_engine="${2:-$(cfg .ocr.engine tesseract)}"
       [[ "$lang_engine" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid OCR engine name"
@@ -706,6 +794,7 @@ else
           capture clipboard-image "$image_mime" > "$PNG" || die "could not read clipboard image"
           [[ -s "$PNG" ]] || die "clipboard image is empty"
           ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
+          record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT"
           # The engine has already said why it refused; do not relabel its
           # reason as "no text found".
           [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
@@ -729,6 +818,7 @@ else
       [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
       [[ $rc -ne 0 || ! -s "$PNG" ]] && die "screen capture failed"
       ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
+      record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT"
       [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
       OCRMODE=1
       if [[ -z "${TEXT//[[:space:]]/}" ]]; then

@@ -29,6 +29,14 @@ Panel {
   property string confirmKeyRemove: ""
   property string confirmVoiceRemove: ""
   property string apiProvider: ""
+  property string ocrApiProvider: ""
+  property string ocrConfirmInstall: ""
+  property string ocrConfirmEngine: ""
+  readonly property var activeOcrEngine: {
+    var all = controller.info.ocr?.engines || []
+    for (var i = 0; i < all.length; ++i) if (all[i].name === (controller.info.ocr?.engine || "tesseract")) return all[i]
+    return null
+  }
   property string apiVendor: ""
   property bool setupSkipped: false
   readonly property bool hasReadyProvider: {
@@ -160,7 +168,7 @@ Panel {
     var at = active.indexOf(String(code))
     if (at >= 0) { if (active.length === 1) return; active.splice(at, 1) }
     else active.push(String(code))
-    controller.setConfig(".ocr.langs", active.join("+"))
+    controller.setConfig(".ocr." + (controller.info.ocr?.engine || "tesseract") + ".langs", active.join("+"))
   }
 
   readonly property int adoptableCount: (controller.bindings.adoptable || []).length
@@ -627,7 +635,99 @@ Panel {
         Column {
           width: parent.width; spacing: 10; visible: !root.needsSetup && root.currentTab === 3
           PanelSectionHeader { text: "Reading the screen"; foreground: root.fg }
-          Text { width: parent.width; wrapMode: Text.WordWrap; text: "Region, focused-window and focused-monitor OCR stay local. Recognised text only leaves your computer when a cloud speech provider is active."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          // The privacy line is computed, not written once: it has to say what
+          // the current engine actually does with a capture.
+          Text { width: parent.width; wrapMode: Text.WordWrap
+                 text: root.activeOcrEngine && root.activeOcrEngine.kind === "cloud"
+                       ? "󰅟  Every capture, including whole-window and whole-screen reads, is sent as an image to " + (root.activeOcrEngine.vendor || root.activeOcrEngine.name) + "."
+                       : "Captures are read on this computer. Recognised text only leaves it when a cloud speech provider is active."
+                 color: root.activeOcrEngine && root.activeOcrEngine.kind === "cloud" ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Item {
+            width: parent.width; height: engineHeader.implicitHeight
+            PanelSectionHeader { id: engineHeader; text: "Recognition engine"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: "󰅟  Cloud engine"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          }
+          Repeater {
+            model: controller.info.ocr?.engines || []
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool selected: modelData.name === (controller.info.ocr?.engine || "tesseract")
+              readonly property bool ready: modelData.status === "ready"
+              readonly property bool failing: modelData.status === "failing"
+              readonly property bool untested: modelData.status === "untested"
+              readonly property bool usable: ready || untested
+              readonly property bool cloud: modelData.kind === "cloud"
+              width: parent.width; height: engineCopy.implicitHeight + Style.space(12); radius: Style.space(6)
+              color: selected ? root.tint(0.10) : "transparent"; border.width: selected ? 1 : 0; border.color: root.tint(0.45)
+              Column {
+                id: engineCopy; z: 1; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; anchors.leftMargin: Style.space(8); anchors.rightMargin: Style.space(8); spacing: 2
+                Item {
+                  width: parent.width; height: engineName.implicitHeight
+                  Text { id: engineRadio; text: parent.parent.parent.selected ? "󰝥" : "󰝦"; color: parent.parent.parent.ready ? (parent.parent.parent.selected ? Color.accent : root.fg) : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
+                  Text { id: engineName; anchors.left: engineRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
+                  Text { anchors.left: engineName.right; anchors.leftMargin: 6; anchors.baseline: engineName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                  Text { anchors.right: engineAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                    text: { var d = parent.parent.parent
+                            if (d.failing) return "Not working"
+                            if (d.untested) return "Untested"
+                            if (d.ready) return d.cloud ? "● Key available" : "● Ready"
+                            return d.modelData.status === "nokey" ? "No API key" : "Not installed" }
+                    color: { var d = parent.parent.parent; return d.failing ? Color.urgent : d.ready ? Color.accent : root.dim }
+                    font.family: root.ff; font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    id: engineAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: !parent.parent.parent.ready
+                    text: { var d = parent.parent.parent
+                            if (controller.verifying === "ocr:" + d.modelData.name) return "Testing…"
+                            if (d.modelData.status === "nokey") return "Add key"
+                            if (d.failing || d.untested) return "Test"
+                            return "Install" }
+                    color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
+                        var row = parent.parent.parent.parent
+                        if (row.modelData.status === "nokey") {
+                          root.ocrApiProvider = row.modelData.name
+                          controller.keyResult = ({ ok: false, message: "" })
+                        } else if (row.failing || row.untested) {
+                          controller.verifyOcrEngine(row.modelData.name)
+                        } else {
+                          root.ocrConfirmEngine = row.modelData.name
+                          root.ocrConfirmInstall = row.modelData.install
+                        }
+                      } }
+                  }
+                }
+                Text { width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.modelData.desc || ""; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud; text: "󰅟  Sends screenshots to " + (parent.parent.modelData.vendor || parent.parent.modelData.name); color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it could not read the test image. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+              }
+              MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectOcrEngine(parent.modelData.name) }
+            }
+          }
+          Rectangle {
+            width: parent.width; height: ocrInstallCol.implicitHeight + 16; radius: 6; visible: root.ocrConfirmInstall !== ""; color: root.tint(0.08); border.width: 1; border.color: Color.popups.border
+            Column {
+              id: ocrInstallCol; anchors.fill: parent; anchors.margins: 8; spacing: 6
+              Text { text: "Install " + root.ocrConfirmEngine + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
+              Text { width: parent.width; text: root.ocrConfirmEngine === "easyocr" ? "About 6 GB of disk in a private Python environment, and several seconds of model loading on every capture. Worth it for stylised or low-contrast text the default cannot read." : "The required packages will be installed for you."; wrapMode: Text.WordWrap; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Row { spacing: 8
+                Button { text: "Cancel"; bordered: true; onClicked: { root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
+                Button { text: "Install"; bordered: true; foreground: Color.accent; onClicked: { controller.installProvider(root.ocrConfirmEngine); root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
+              }
+            }
+          }
+          ApiKeyDialog {
+            width: parent.width; visible: root.ocrApiProvider !== ""
+            controller: controller; provider: root.ocrApiProvider; vendor: root.activeOcrEngine && root.activeOcrEngine.vendor ? root.activeOcrEngine.vendor : root.ocrApiProvider; foreground: root.fg
+            onClosed: root.ocrApiProvider = ""
+          }
+          Text {
+            width: parent.width
+            visible: controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
+            text: controller.setupJob.message; wrapMode: Text.WordWrap
+            color: controller.setupJob.status === "error" ? Color.urgent : root.dim
+            font.family: root.ff; font.pixelSize: Style.font.caption
+          }
           Item {
             width: parent.width; height: ocrHeader.implicitHeight
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
@@ -708,11 +808,15 @@ Panel {
                      text: (parent.modelData.label || parent.modelData.value)
                            + (parent.modelData.label && parent.modelData.label !== parent.modelData.value ? "  " + parent.modelData.value : "")
                      color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              // Language packs are installed as tesseract-data packages, so
+              // the action exists only for tesseract. Other engines list what
+              // they have; adding to them is a follow-up, not a broken button.
+              readonly property bool installable: (controller.info.ocr?.engine || "tesseract") === "tesseract"
               Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
-                     text: parent.busy ? "Installing…" : "󰇚 Install"
-                     color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
-                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                 enabled: !parent.parent.busy
+                     text: !parent.installable ? "not downloaded" : parent.busy ? "Installing…" : "󰇚 Install"
+                     color: parent.installable ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                     MouseArea { anchors.fill: parent; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                 enabled: parent.parent.installable && !parent.parent.busy
                                  onClicked: controller.installLanguage(parent.parent.modelData.value) } }
             }
           }

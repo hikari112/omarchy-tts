@@ -127,7 +127,7 @@ a change straight after making it:
   are installed, with size and a one-click download that reports progress and
   verifies the md5 before installing.
 - **Text** — live before/after sanitizer preview and readability rules.
-- **Screen** — OCR confidence floor and language selection.
+- **Screen** — OCR engine, confidence floor, and per-engine language selection.
 - **Keys** — capture, install, update, or remove the plugin-owned shortcuts.
 
 Settings write on change; there is no Save button. Configuration is created
@@ -178,12 +178,35 @@ surface, and the plugin makes no anti-cheat compatibility guarantee.
 Two of the three need no pointer at all, which matters if dragging a box is
 not an option for you.
 
-OCR engines live in `ocr/` and follow the same contract as voice providers: an
-executable reading a PNG on stdin and writing text on stdout. `~/.config/omarchy-tts/ocr/`
-shadows the bundled ones.
+### Recognition engines
 
-**Low-confidence words are discarded.** Tesseract reports a per-word confidence
-score, and anything below `ocr.minConfidence` (default 60) is dropped rather
+Engines are chosen on the Screen tab the same way voices are: listed, proven,
+then selected. One is bundled; the other two are opt-in.
+
+| Engine | Kind | When to use it |
+|---|---|---|
+| `tesseract` | local, default | Fast and deterministic on ordinary screen text. |
+| `easyocr` | local, opt-in | Stylised, italic, or low-contrast text the default gives up on — game dialogue, posters, video frames. Costs about 6 GB of disk in a private Python environment and several seconds of model loading per capture. |
+| `openai` | cloud, opt-in | The most accurate of the three. **Every capture is sent as an image to OpenAI**, including `--window` and `--screen`, which ship your whole display. Uses the same key as the OpenAI speech provider. |
+
+The Screen tab says plainly which of these is true for the engine you have
+selected; a cloud engine turns the "captures are read on this computer" line
+into a statement of where they go instead.
+
+Languages are kept per engine. Tesseract combines any of its 120+ language
+packs; EasyOCR pairs most languages only with English and reads a
+`tesseract`-style code list through a mapping, so a selection tesseract accepts
+is not silently reused for it. An engine asked for a language it does not have
+stops and says so rather than reading garbage.
+
+Engines live in `ocr/` and follow the same contract as voice providers: an
+executable reading a PNG on stdin and writing text on stdout, with the same
+`# desc:` / `# kind:` / `# probe:` header. `~/.config/omarchy-tts/ocr/`
+shadows the bundled ones. An engine is only reported ready after it has read
+`lib/ocr-probe.png` correctly.
+
+**Low-confidence words are discarded.** Local engines report a per-word (or
+per-line) confidence score, and anything below `ocr.minConfidence` (default 60) is dropped rather
 than spoken. Someone using this to read a screen they cannot check has no way
 to notice an invented word, so silence is preferred to noise. Set it to `0` to
 keep everything.

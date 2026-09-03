@@ -764,6 +764,35 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
             self.assertIn(secret, self.headers.read_text())
 
+    def test_cloud_ocr_sends_the_image_in_the_body_and_nothing_in_argv(self):
+        secret = "secret-key-that-must-not-leak"
+        image = (ROOT / "lib" / "ocr-probe.png").read_bytes()
+        self.body.write_text("")
+        self.args.write_text("")
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "OPENAI_API_KEY": secret,
+               "FAKE_EMPTY_AUDIO": "1",
+               "TTS_METRICS_FILE": str(self.root / "ocr-metrics.json")}
+        result = subprocess.run([ROOT / "ocr" / "openai"], input=image,
+                                capture_output=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = self.args.read_text()
+        self.assertNotIn(secret, arguments)
+        self.assertNotIn("base64,", arguments, "the screenshot must not travel through argv")
+        payload = json.loads(self.body.read_text())
+        parts = payload["messages"][0]["content"]
+        image_url = next(p["image_url"]["url"] for p in parts if p["type"] == "image_url")
+        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+        self.assertIn(secret, self.headers.read_text())
+        metrics = json.loads((self.root / "ocr-metrics.json").read_text())
+        self.assertEqual(metrics["provider"], "openai-ocr")
+        self.assertNotIn("base64", (self.root / "ocr-metrics.json").read_text())
+
     def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
         metrics = self.root / "metrics.json"
         metrics.write_text("not json")
@@ -957,6 +986,83 @@ class CancelledSpeechTests(unittest.TestCase):
                        text=True, env=self.env, capture_output=True)
         self.assertEqual(self.status_of("brokenlike"), "failing",
                          "an uncancelled failure must still mark the provider")
+
+
+class OcrEngineTests(unittest.TestCase):
+    """Engines are chosen the way voices are: listed, proven, then selected.
+
+    Health for an engine lives under its own key so a reading engine and a
+    speaking provider that share a name (openai) never overwrite each other.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        (self.home / "run").mkdir(parents=True)
+        self.engines = self.home / "config" / "omarchy-tts" / "ocr"
+        self.engines.mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_engine(self, name, body, kind="local", probe="true"):
+        path = self.engines / name
+        path.write_text("#!/usr/bin/env bash\n"
+                        f"# desc: test engine {name}\n"
+                        f"# kind: {kind}\n"
+                        f"# probe: {probe}\n"
+                        "cat > /dev/null\n" + body)
+        path.chmod(0o755)
+
+    def speak(self, *args):
+        return subprocess.run([SPEAK, *args], text=True, capture_output=True, env=self.env)
+
+    def engine(self, name):
+        info = json.loads(self.speak("--info").stdout)
+        return next(e for e in info["ocr"]["engines"] if e["name"] == name)
+
+    def test_engine_is_untested_until_it_reads_the_probe(self):
+        self.write_engine("reads", "printf 'Probe 123\\n'\n")
+        self.write_engine("blind", "exit 1\n")
+        self.write_engine("absent", "exit 0\n", probe="false")
+        self.assertEqual(self.engine("reads")["status"], "untested")
+        self.assertEqual(self.engine("absent")["status"], "missing")
+        self.assertEqual(self.speak("--verify-ocr", "reads").returncode, 0)
+        self.assertEqual(self.engine("reads")["status"], "ready")
+        self.assertNotEqual(self.speak("--verify-ocr", "blind").returncode, 0)
+        self.assertEqual(self.engine("blind")["status"], "failing")
+        health = json.loads((self.home / "cache" / "omarchy-tts" / "health.json").read_text())
+        self.assertIn("ocr:reads", health)
+        self.assertNotIn("reads", health, "engine health must not be filed as a voice provider")
+
+    def test_cloud_engine_without_a_key_is_nokey(self):
+        self.write_engine("vision", "exit 0\n", kind="cloud", probe="false")
+        self.assertEqual(self.engine("vision")["status"], "nokey")
+
+    def test_languages_are_kept_per_engine(self):
+        self.write_engine("one", "exit 0\n")
+        self.speak("--set", ".ocr.tesseract.langs", "eng+jpn")
+        self.speak("--set", ".ocr.easyocr.langs", "eng+deu")
+        self.speak("--set", ".ocr.engine", "tesseract")
+        self.assertEqual(json.loads(self.speak("--info").stdout)["ocr"]["langs"], "eng+jpn")
+        self.speak("--set", ".ocr.engine", "easyocr")
+        self.assertEqual(json.loads(self.speak("--info").stdout)["ocr"]["langs"], "eng+deu")
+        self.assertNotEqual(self.speak("--set", ".ocr.easyocr.langs", "eng;rm").returncode, 0)
+        self.assertEqual(json.loads(self.speak("--info").stdout)["ocr"]["langs"], "eng+deu")
+
+    def test_legacy_shared_languages_migrate_to_tesseract_only(self):
+        config = self.home / "config" / "omarchy-tts" / "config.json"
+        config.write_text('{"schemaVersion": 2, "ocr": {"engine": "tesseract", "langs": "eng+jpn+deu"}}')
+        self.speak("--info")
+        data = json.loads(config.read_text())
+        self.assertEqual(data["ocr"]["tesseract"]["langs"], "eng+jpn+deu")
+        self.assertEqual(data["ocr"]["easyocr"]["langs"], "eng",
+                         "a language set tesseract accepts is not one EasyOCR can combine")
 
 
 class OcrLanguageTests(unittest.TestCase):
