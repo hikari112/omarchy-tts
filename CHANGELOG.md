@@ -32,9 +32,9 @@ Versioning.
 - Pin EasyOCR and the Kokoro spaCy model artifact, bound installer-log memory,
   make cleanup failures truthful, and invalidate both speech and OCR health for
   shared Google/OpenAI credential changes.
-- Run the complete regression suite on staging pushes as well as main, and add
-  static UI contracts for worker identity, key purpose, scrolling, focus, and
-  metadata-driven actions.
+- Run the complete regression suite on staging pushes as well as main, pin CI
+  actions to current Node 24 releases, and add static UI contracts for worker
+  identity, key purpose, scrolling, focus, and metadata-driven actions.
 
 ## 1.2.3 - 2026-09-02
 
