@@ -5,15 +5,17 @@
 # install: omarchy pkg add speech-dispatcher
 # voices: system
 # deprecated: true
+# ratemin: 0.5
+# ratemax: 2.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need spd-say "install with: omarchy pkg add speech-dispatcher"
 
 RATE="$(awk -v r="${TTS_RATE:-1.0}" 'BEGIN{ v=(r-1)*100; if(v>100)v=100; if(v<-100)v=-100; printf "%d", v }')"
-TEXT="$(cat)"
 ARGS=(-w -r "$RATE")
 [[ -n "${TTS_VOICE:-}" ]] && ARGS+=(-y "$TTS_VOICE")
 if [[ "${TTS_SILENT:-0}" == "1" ]]; then
   exec spd-say --list-output-modules >/dev/null
 fi
-exec spd-say "${ARGS[@]}" -- "$TEXT"
+exec spd-say "${ARGS[@]}" --pipe-mode >/dev/null

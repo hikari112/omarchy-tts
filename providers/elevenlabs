@@ -10,12 +10,19 @@
 # refreshvoices: true
 # refreshusage: true
 # maxchars: 40000
+# ratemin: 0.7
+# ratemax: 1.2
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
 source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
 KEY="$(get_key ELEVENLABS_API_KEY elevenlabs)" || exit 1
+VOICE_PAGE_MAX_BYTES=33554432
+VOICE_AGGREGATE_MAX_BYTES=67108864
+USAGE_MAX_BYTES=1048576
+AUDIO_MAX_BYTES=104857600
 
 MODEL="$(jq -r '.elevenlabs.model // "eleven_flash_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_flash_v2_5"
@@ -35,12 +42,14 @@ if [[ "${1:-}" == "--voices" ]]; then
   while :; do
     curl_rc=0
     if [[ -z "$token" ]]; then
-      status="$(curl -sS --connect-timeout 15 --max-time 30 \
+      status="$(curl -sS --proto '=https' --connect-timeout 15 --max-time 30 \
+        --max-filesize "$VOICE_PAGE_MAX_BYTES" \
         'https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=false' \
         -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
         3<<< "xi-api-key: $KEY")" || curl_rc=$?
     else
-      status="$(curl -sS --connect-timeout 15 --max-time 30 --get \
+      status="$(curl -sS --proto '=https' --connect-timeout 15 --max-time 30 --get \
+        --max-filesize "$VOICE_PAGE_MAX_BYTES" \
         'https://api.elevenlabs.io/v2/voices' --data-urlencode page_size=100 \
         --data-urlencode include_total_count=false --data-urlencode "next_page_token=$token" \
         -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
@@ -54,12 +63,16 @@ if [[ "${1:-}" == "--voices" ]]; then
     # of voices; putting the accumulated metadata on jq's command line both
     # exposes it in the process table and eventually exceeds ARG_MAX.
     jq -s '.[0] + .[1].voices' "$aggregate" "$body" > "$next" || exit 1
-    mv "$next" "$aggregate" || exit 1
+    [[ "$(stat -c%s "$next" 2>/dev/null || printf 67108865)" -le "$VOICE_AGGREGATE_MAX_BYTES" ]] || {
+      printf 'ElevenLabs: voice-list metadata exceeds the 64 MiB safety limit\n' >&2; exit 74;
+    }
+    mv -T -- "$next" "$aggregate" || exit 1
     next="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-next-voices.XXXXXX")" || exit 1
     pages=$((pages + 1))
     jq -e '.has_more == true' "$body" >/dev/null 2>&1 || break
     token="$(jq -r '.next_page_token // empty' "$body")"
-    [[ -n "$token" && "$token" != "$previous_token" && $pages -lt 100 ]] || {
+    [[ -n "$token" && ${#token} -le 4096 && "$token" != *[![:graph:]]* &&
+       "$token" != "$previous_token" && $pages -lt 100 ]] || {
       printf 'ElevenLabs: invalid voice-list pagination\n' >&2; exit 74; }
     previous_token="$token"
   done
@@ -74,10 +87,12 @@ fi
 
 if [[ "${1:-}" == "--usage" ]]; then
   body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-usage.XXXXXX")" || exit 1
+  trap 'rm -f "$body"' EXIT
   headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1
   trap 'rm -f "$body" "$headers"' EXIT
   curl_rc=0
-  status="$(curl -sS --connect-timeout 15 --max-time 30 \
+  status="$(curl -sS --proto '=https' --connect-timeout 15 --max-time 30 \
+    --max-filesize "$USAGE_MAX_BYTES" \
     https://api.elevenlabs.io/v1/user/subscription -H @/dev/fd/3 \
     --dump-header "$headers" --output "$body" --write-out '%{http_code}' \
     3<<< "xi-api-key: $KEY")" || curl_rc=$?
@@ -86,9 +101,15 @@ if [[ "${1:-}" == "--usage" ]]; then
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || { cloud_fail ElevenLabs "$status" "$body" "$headers"; exit $?; }
   account="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-account.XXXXXX")" || exit 1
   trap 'rm -f "$body" "$headers" "$account"' EXIT
-  jq '{source:"provider",tier,status,used:(.character_count // 0),limit:(.character_limit // 0),
-    canExtend:(.can_extend_character_limit // false),overage:(.current_overage // 0),
-    resetAt:(.next_character_count_reset_unix // null)}' "$body" > "$account" || exit 1
+  jq '{source:"provider",
+    tier:(if (.tier|type)=="string" then .tier[0:128] else "" end),
+    status:(if (.status|type)=="string" then .status[0:128] else "" end),
+    used:(if (.character_count|type)=="number" and .character_count>=0 then .character_count else 0 end),
+    limit:(if (.character_limit|type)=="number" and .character_limit>=0 then .character_limit else 0 end),
+    canExtend:(if (.can_extend_character_limit|type)=="boolean" then .can_extend_character_limit else false end),
+    overage:(if (.current_overage|type)=="number" and .current_overage>=0 then .current_overage else 0 end),
+    resetAt:(if (.next_character_count_reset_unix|type)=="number" then .next_character_count_reset_unix else null end)}' \
+    "$body" > "$account" || exit 1
   cloud_store_account "$account" || exit 1
   cat "$account"
   exit 0
@@ -106,11 +127,14 @@ VOICE="${TTS_VOICE:-}"
 }
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs.XXXXXX.mp3")" || exit 1
+trap 'rm -f "$audio"' EXIT
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-elevenlabs-headers.XXXXXX")" || exit 1
 trap 'rm -f "$audio" "$headers"' EXIT
 curl_rc=0
-status="$(jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' |
-  curl -sS --connect-timeout 15 --max-time 180 \
+SPEED="$(awk -v value="${TTS_RATE:-1.0}" 'BEGIN { if (value < .7) value=.7; if (value > 1.2) value=1.2; printf "%.2f", value }')"
+status="$(jq -Rs --arg m "$MODEL" --argjson s "$SPEED" '{text:., model_id:$m, voice_settings:{speed:$s}}' |
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 180 \
+    --max-filesize "$AUDIO_MAX_BYTES" \
     "https://api.elevenlabs.io/v1/text-to-speech/$VOICE?output_format=mp3_44100_128" \
     -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
     --write-out '%{http_code}' \
@@ -118,7 +142,13 @@ status="$(jq -Rs --arg m "$MODEL" '{text:., model_id:$m}' |
 if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail ElevenLabs "$curl_rc"; exit $?; fi
 [[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'ElevenLabs: invalid HTTP response\n' >&2; exit 74; }
 cost="$(cloud_header "$headers" character-cost)"; [[ "$cost" =~ ^[0-9]+$ ]] || cost=0
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+  cloud_record elevenlabs "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" "$cost"
+  cloud_fail ElevenLabs "$status" "$audio" "$headers"; exit $?
+fi
+if ! audio_is_mp3 "$audio"; then
+  cloud_record elevenlabs "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" "$cost" invalid_response
+  printf 'ElevenLabs: service returned invalid audio\n' >&2; exit 74
+fi
 cloud_record elevenlabs "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" "$cost"
-if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail ElevenLabs "$status" "$audio" "$headers"; exit $?; fi
-[[ -s "$audio" ]] || { printf 'ElevenLabs: service returned no audio\n' >&2; exit 74; }
 play_file "$audio"

@@ -5,8 +5,10 @@ These encode the reasons the sanitizer exists: a selection full of terminal
 escapes, hashes and markdown must come out as something a voice can read.
 """
 import pathlib
+import json
 import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "lib"))
@@ -117,6 +119,11 @@ class TestMarkdown(unittest.TestCase):
         self.assertIn("done", out)
         self.assertIn("not done", out)
 
+    def test_bulleted_checkboxes_are_spoken(self):
+        out = sanitize("- [x] shipped\n- [ ] pending")
+        self.assertIn("done, shipped", out)
+        self.assertIn("not done, pending", out)
+
 
 class TestReadability(unittest.TestCase):
     def test_no_doubled_punctuation(self):
@@ -155,6 +162,11 @@ class TestOcrReflow(unittest.TestCase):
         self.assertIn("frictionless", out)
         self.assertNotIn("friction-", out)
 
+    def test_hyphen_before_an_uppercase_line_is_not_rejoined(self):
+        out = sanitize("first item-\nNext heading", ocr=True)
+        self.assertIn("item- Next", out)
+        self.assertNotIn("itemNext", out)
+
     def test_blank_line_is_a_real_break(self):
         out = sanitize("First paragraph here\n\nSecond paragraph here", ocr=True)
         self.assertIn("here. Second", out)
@@ -171,6 +183,10 @@ class TestOcrReflow(unittest.TestCase):
         out = sanitize("I\na\nb\nreal line", ocr=True)
         self.assertIn("I", out)
         self.assertIn("a", out)
+
+    def test_standalone_single_character_capture_survives(self):
+        self.assertEqual(sanitize("7", ocr=True), "7")
+        self.assertEqual(sanitize("B", ocr=True), "B")
 
     def test_column_bleed_is_stripped(self):
         out = sanitize("2      differences, a frictionless tool", ocr=True)
@@ -224,6 +240,41 @@ class TestEmptyResults(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(result.stdout)
+
+    def test_cli_rejects_input_over_one_mebibyte_by_encoded_size(self):
+        script = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sanitize.py"
+        result = subprocess.run(
+            [sys.executable, script], input="é" * 600_000, text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("1 MiB", result.stderr)
+
+    def test_cli_rejects_impossible_length_limits(self):
+        script = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sanitize.py"
+        for limit in ("-1", "1048577"):
+            with self.subTest(limit=limit):
+                result = subprocess.run(
+                    [sys.executable, script, "--max-chars", limit], input="text",
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_malformed_standalone_config_options_fall_back_safely(self):
+        script = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sanitize.py"
+        with tempfile.TemporaryDirectory() as directory:
+            config = pathlib.Path(directory) / "config.json"
+            config.write_text(json.dumps({"sanitizer": {
+                "urls": [], "inlineCode": "false", "stripMarkdown": 0,
+                "expandUnits": None, "announceCodeBlocks": "false",
+            }}))
+            result = subprocess.run(
+                [sys.executable, script, "--config", config],
+                input="## Heading with `code` in 2s", text=True,
+                capture_output=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "Heading with code in 2 seconds")
 
 
 if __name__ == "__main__":

@@ -3,8 +3,10 @@
 # title: Tesseract
 # kind: local
 # probe: command -v tesseract >/dev/null 2>&1
+# confidence: true
 # Reads a PNG on stdin, writes recognised text on stdout.
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need tesseract "install with: omarchy pkg add tesseract tesseract-data-eng"
 
@@ -53,7 +55,7 @@ if [[ -n "$missing" ]]; then
 fi
 
 MINCONF="${TTS_OCR_MINCONF:-$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)}"
-[[ "$MINCONF" =~ ^[0-9]+$ ]] || MINCONF=60
+[[ "$MINCONF" =~ ^[0-9]+$ && "$MINCONF" -le 100 ]] || MINCONF=60
 
 # --psm 6 treats the crop as one uniform block, which is what a dragged region
 # almost always is.

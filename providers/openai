@@ -8,10 +8,14 @@
 # keyenv: OPENAI_API_KEY
 # voices: remote
 # maxchars: 4096
+# ratemin: 0.25
+# ratemax: 4.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
 source "$TTS_PLUGIN_DIR/lib/cloud.sh"
+AUDIO_MAX_BYTES=104857600
 
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.openai.voice // "alloy"' "$TTS_CONFIG" 2>/dev/null)"
@@ -28,9 +32,12 @@ if [[ "${1:-}" == "--voices" ]]; then
 fi
 
 if [[ "${1:-}" == "--usage" ]]; then
-  jq -c '. + {account:{source:"request_headers",note:"OpenAI account-wide usage requires an organization admin key; request limits update after each speech request."}}' \
-    "${TTS_METRICS_FILE:-/dev/null}" 2>/dev/null ||
+  if cloud_metrics_valid; then
+    jq -c '. + {account:{source:"request_headers",note:"OpenAI account-wide usage requires an organization admin key; request limits update after each speech request."}}' \
+      "$TTS_METRICS_FILE"
+  else
     jq -nc --arg model "$MODEL" '{provider:"openai",model:$model,account:{source:"request_headers",note:"Rate limits appear after the first speech request."}}'
+  fi
   exit 0
 fi
 
@@ -38,19 +45,27 @@ KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
 need curl "install with: omarchy pkg add curl"
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai.XXXXXX.mp3")" || exit 1
+trap 'rm -f "$audio"' EXIT
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-openai-headers.XXXXXX")" || exit 1
 trap 'rm -f "$audio" "$headers"' EXIT
 curl_rc=0
 status="$(jq -Rs --arg m "$MODEL" --arg v "$VOICE" --argjson s "${TTS_RATE:-1.0}" \
   '{model:$m, voice:$v, input:., speed:$s, response_format:"mp3"}' |
-  curl -sS --connect-timeout 15 --max-time 180 \
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 180 \
+    --max-filesize "$AUDIO_MAX_BYTES" \
     https://api.openai.com/v1/audio/speech \
     -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
     --write-out '%{http_code}' \
     3<<< "Authorization: Bearer $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
 if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail OpenAI "$curl_rc"; exit $?; fi
 [[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'OpenAI: invalid HTTP response\n' >&2; exit 74; }
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+  cloud_record openai "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
+  cloud_fail OpenAI "$status" "$audio" "$headers"; exit $?
+fi
+if ! audio_is_mp3 "$audio"; then
+  cloud_record openai "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" 0 invalid_response
+  printf 'OpenAI: service returned invalid audio\n' >&2; exit 74
+fi
 cloud_record openai "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
-if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail OpenAI "$status" "$audio" "$headers"; exit $?; fi
-[[ -s "$audio" ]] || { printf 'OpenAI: service returned no audio\n' >&2; exit 74; }
 play_file "$audio"

@@ -7,17 +7,31 @@ cloud_header() { # cloud_header <headers-file> <name>
   awk -v wanted="${2,,}" '
     BEGIN { IGNORECASE=1 }
     { sub(/\r$/, "") }
-    index($0, ":") { name=tolower(substr($0,1,index($0,":")-1)); if (name==wanted) { value=substr($0,index($0,":")+1); sub(/^[[:space:]]+/,"",value); found=value } }
-    END { printf "%s", found }
+    index($0, ":") { name=tolower(substr($0,1,index($0,":")-1)); if (name==wanted) { value=substr($0,index($0,":")+1); sub(/^[[:space:]]+/,"",value); gsub(/[[:cntrl:]]/,"",value); found=value } }
+    # Response headers are remote input. Keep only a small diagnostic value so
+    # a hostile request id can never inflate the private metrics file.
+    END { printf "%s", substr(found, 1, 512) }
   ' "$1" 2>/dev/null
 }
 
+cloud_metrics_valid() {
+  local metrics="${TTS_METRICS_FILE:-}"
+  [[ -n "$metrics" && ! -L "$metrics" && -s "$metrics" &&
+     "$(stat -c%s "$metrics" 2>/dev/null || printf 2097153)" -le 2097152 ]] &&
+    jq -e 'type == "object"' "$metrics" >/dev/null 2>&1
+}
+
 cloud_ensure_metrics() { # caller holds the metrics lock
-  if jq -e 'type == "object"' "$TTS_METRICS_FILE" >/dev/null 2>&1; then return 0; fi
+  if cloud_metrics_valid; then
+    # Files created by older releases may predate the private-mode guarantee.
+    # Correct their permissions even when their JSON needs no repair.
+    chmod 600 "$TTS_METRICS_FILE" 2>/dev/null || return 1
+    return 0
+  fi
   local repair
   repair="$(mktemp "${TTS_METRICS_FILE}.repair.XXXXXX")" || return 1
   if ! printf '{}\n' > "$repair" || ! chmod 600 "$repair" ||
-      ! mv "$repair" "$TTS_METRICS_FILE"; then
+      ! mv -T -- "$repair" "$TTS_METRICS_FILE"; then
     rm -f "$repair"
     return 1
   fi
@@ -36,7 +50,8 @@ cloud_error_code() { # cloud_error_code <http-status> <response-file>
     *concurrent*) printf concurrency_limit; return ;;
     *rate_limit*) printf rate_limit; return ;;
     *quota*|*credit*|*payment*|*resource_exhausted*) printf quota; return ;;
-    *auth*|*api_key*|*permission*) printf auth; return ;;
+    *permission_denied*|*forbidden*) printf forbidden; return ;;
+    *auth*|*api_key*) printf auth; return ;;
     *unavailable*|*internal*|*server*) printf service; return ;;
   esac
   case "$1" in 401) printf auth ;; 402) printf quota ;; 403) printf forbidden ;;
@@ -47,6 +62,8 @@ cloud_record() { # provider model chars http-status headers response [units] [fo
   [[ -n "${TTS_METRICS_FILE:-}" ]] || return 0
   local provider="$1" model="$2" chars="$3" status="$4" headers="$5" body="$6" units="${7:-0}" forced_error="${8:-}"
   local request_id retry_after error_code="" outcome=ok now tmp lock_fd
+  [[ "$chars" =~ ^[0-9]{1,10}$ ]] || chars=0
+  [[ "$units" =~ ^[0-9]{1,12}$ ]] || units=0
   request_id="$(cloud_header "$headers" x-request-id)"
   [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" request-id)"
   [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" x-trace-id)"
@@ -58,7 +75,7 @@ cloud_record() { # provider model chars http-status headers response [units] [fo
   fi
   now="$(date -Is)"
   mkdir -p "$(dirname "$TTS_METRICS_FILE")" || return 0
-  exec {lock_fd}>"${TTS_METRICS_FILE}.lock" || return 0
+  exec {lock_fd}>>"${TTS_METRICS_FILE}.lock" || return 0
   flock "$lock_fd" || { exec {lock_fd}>&-; return 0; }
   cloud_ensure_metrics || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 0; }
   tmp="$(mktemp "${TTS_METRICS_FILE}.XXXXXX")" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 0; }
@@ -77,15 +94,18 @@ cloud_record() { # provider model chars http-status headers response [units] [fo
         errorCode:(if $error=="" then null else $error end),
         requestId:(if $requestId=="" then null else $requestId end),
         retryAfter:(if $retryAfter=="" then null else $retryAfter end)} |
-      .localObserved.requests=((.localObserved.requests // 0)+1) |
-      .localObserved.characters=((.localObserved.characters // 0)+$chars) |
-      .localObserved.billedUnits=((.localObserved.billedUnits // 0)+$units) |
+      .localObserved.requests=((.localObserved.requests
+        | if type == "number" and . >= 0 then . else 0 end)+1) |
+      .localObserved.characters=((.localObserved.characters
+        | if type == "number" and . >= 0 then . else 0 end)+$chars) |
+      .localObserved.billedUnits=((.localObserved.billedUnits
+        | if type == "number" and . >= 0 then . else 0 end)+$units) |
       .rateLimits={requests:{limit:$limitRequests,remaining:$remainingRequests,reset:$resetRequests},
         tokens:{limit:$limitTokens,remaining:$remainingTokens,reset:$resetTokens}} |
       .rateLimits |= with_entries(.value |= with_entries(select(.value != ""))) |
       .rateLimits |= with_entries(select(.value | length > 0))
     ' "$TTS_METRICS_FILE" > "$tmp" 2>/dev/null; then
-    if ! chmod 600 "$tmp" || ! mv "$tmp" "$TTS_METRICS_FILE"; then rm -f "$tmp"; fi
+    if ! chmod 600 "$tmp" || ! mv -T -- "$tmp" "$TTS_METRICS_FILE"; then rm -f "$tmp"; fi
   else
     rm -f "$tmp"
   fi
@@ -96,13 +116,13 @@ cloud_store_account() { # normalized-account-json-file
   [[ -n "${TTS_METRICS_FILE:-}" ]] || return 0
   local account="$1" tmp lock_fd
   mkdir -p "$(dirname "$TTS_METRICS_FILE")" || return 1
-  exec {lock_fd}>"${TTS_METRICS_FILE}.lock" || return 1
+  exec {lock_fd}>>"${TTS_METRICS_FILE}.lock" || return 1
   flock "$lock_fd" || { exec {lock_fd}>&-; return 1; }
   cloud_ensure_metrics || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
   tmp="$(mktemp "${TTS_METRICS_FILE}.XXXXXX")" || { flock -u "$lock_fd"; exec {lock_fd}>&-; return 1; }
   if jq --slurpfile account "$account" '.account=$account[0] | .updatedAt=(now|todateiso8601)' \
       "$TTS_METRICS_FILE" > "$tmp" 2>/dev/null; then
-    if ! chmod 600 "$tmp" || ! mv "$tmp" "$TTS_METRICS_FILE"; then
+    if ! chmod 600 "$tmp" || ! mv -T -- "$tmp" "$TTS_METRICS_FILE"; then
       rm -f "$tmp"; flock -u "$lock_fd"; exec {lock_fd}>&-; return 1
     fi
   else
@@ -119,8 +139,10 @@ cloud_transport_fail() { # provider curl-exit
 cloud_fail() { # provider http-status response headers
   local provider="$1" status="$2" body="$3" headers="$4" code retry
   code="$(cloud_error_code "$status" "$body")"; retry="$(cloud_header "$headers" retry-after)"
+  [[ "$retry" =~ ^[0-9]{1,10}$ ]] || retry=""
   case "$code:$status" in
-    auth:*|forbidden:*|*:401|*:403) printf '%s: API key was rejected (%s)\n' "$provider" "$code" >&2; return 77 ;;
+    auth:*|*:401) printf '%s: API key was rejected\n' "$provider" >&2; return 77 ;;
+    forbidden:*|*:403) printf '%s: access was forbidden; check API enablement, permissions, and billing\n' "$provider" >&2; return 77 ;;
     quota:*|*:402) printf '%s: quota, credits, or billing limit exhausted\n' "$provider" >&2; return 69 ;;
     rate_limit:*|concurrency_limit:*|*:429) printf '%s: rate or concurrency limit reached%s\n' "$provider" "${retry:+; retry after $retry}" >&2; return 75 ;;
     service:*|*:408|*:425|*:5??) printf '%s: service temporarily unavailable (HTTP %s)\n' "$provider" "$status" >&2; return 74 ;;

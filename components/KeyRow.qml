@@ -11,6 +11,9 @@ Rectangle {
   width: parent ? parent.width : implicitWidth
   height: 34; radius: Style.space(5); color: "transparent"
   activeFocusOnTab: true
+  Accessible.role: Accessible.Button
+  Accessible.name: root.label + ", " + root.chord
+  Accessible.onPressAction: root.changeRequested(root.actionName, root.chord)
   border.width: activeFocus ? 1 : 0
   border.color: Color.accent
   Keys.onSpacePressed: root.changeRequested(root.actionName, root.chord)
@@ -18,6 +21,7 @@ Rectangle {
   Keys.onEnterPressed: root.changeRequested(root.actionName, root.chord)
   Text {
     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
+    textFormat: Text.PlainText
     text: root.label; color: root.foreground; font.family: Style.font.family
     font.pixelSize: Style.font.body
   }
@@ -27,6 +31,7 @@ Rectangle {
     color: Color.background; border.width: 1; border.color: Color.popups.border
     Text {
       id: keyText; anchors.centerIn: parent; text: root.chord.replace(/ \+ /g, "  ")
+      textFormat: Text.PlainText
       color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
   }

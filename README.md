@@ -8,15 +8,15 @@
 
 Omarchy TTS turns speech into a desktop command: indicate something, hear it,
 then stop. Read a selection, the clipboard, a clipboard image, a window, the
-whole display, or a region you draw around otherwise unreachable text.
+focused monitor, or a region you draw around otherwise unreachable text.
 
 > Not a screen reader. Not a reading platform. Just a hotkey that makes the
 > thing in front of you speak.
 
-It is on-demand, local-first, and app-independent. Piper is the on-device default;
-OpenAI and ElevenLabs are optional voices, never silent dependencies. There is
-no narration mode, required account, subscription, browser extension, or text
-import workflow.
+It is on-demand, local-first, and app-independent. Piper is the on-device
+default; cloud providers are optional voices, never silent dependencies. There
+is no narration mode, required account, subscription, browser extension, or
+text import workflow.
 
 <p align="center">
   <img src="docs/screenshots/provider.png" alt="Omarchy TTS Provider tab showing local and optional cloud speech providers" width="620">
@@ -33,7 +33,7 @@ TTS keeps that interaction consistent even when the source changes:
 | Selected or copied text | Reads the text directly |
 | A copied image | Runs local OCR, then reads the result |
 | A dragged region | Captures those pixels, runs local OCR, then reads them |
-| The focused window or display | Captures it without requiring pointer precision |
+| The focused window or monitor | Captures it without requiring pointer precision |
 
 This is assistive desktop reading for dyslexia, ADHD, low vision, eye strain,
 reading fatigue, dense documentation, scanned PDFs, and unvoiced game text. It
@@ -60,11 +60,11 @@ The base plugin uses `bash`, `wl-clipboard`, `jq`, `python3`, `flock`
 from its configured Arch repositories.
 
 The guided local-engine setup is always explicit. It may request administrator
-approval through `pkexec` to install `uv`, then uses `uv` to create an isolated environment under
-`~/.local/share/omarchy-tts/`. The release pins its direct engine packages to
-known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses `kokoro==0.9.4` and
-`soundfile==0.14.0` in a supported Python 3.12 environment, plus its pinned
-language-model artifact; EasyOCR uses `easyocr==1.7.2`. Voice models are
+approval through `pkexec` to install `uv`, then uses `uv` to create an isolated
+environment under `~/.local/share/omarchy-tts/`. The release pins its direct
+engine packages to known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses
+`kokoro==0.9.4` and `soundfile==0.14.0` in a supported Python 3.12 environment,
+plus its pinned language-model artifact; EasyOCR uses `easyocr==1.7.2`. Voice models are
 downloaded only after confirmation and verified before installation. No
 installer runs merely because the plugin is added or enabled.
 
@@ -124,7 +124,7 @@ a change straight after making it:
 - **Voice** — installed voice, speed, length limit, and **Browse all voices**:
   over 170 downloadable voices across 50+ languages, showing which
   are installed, with size and a one-click download that reports progress and
-  verifies the md5 before installing.
+  verifies the MD5 digest before installing.
 - **Text** — live before/after sanitizer preview and readability rules.
 - **Screen** — OCR engine and confidence floor.
 - **Languages** — which languages the selected engine recognises, and installing more.
@@ -134,8 +134,10 @@ Settings write on change; there is no Save button. Configuration is created
 on first use, migrated additively, written atomically, and kept mode 0600.
 Everything the panel shows
 comes from `speak --info`, and everything it changes goes through
-`speak --set`, so the panel is a front-end to the CLI rather than a second
-implementation of it.
+the same CLI boundary: persisted settings use `speak --set`, while engine,
+voice, key, and shortcut lifecycle actions use their dedicated commands. The
+panel is therefore a front-end to the tested command-line implementation, not
+a second implementation of it.
 
 <details>
 <summary>See the settings panel</summary>
@@ -169,9 +171,11 @@ speak --window     # the focused window             (no pointer)
 speak --screen     # the focused monitor            (no pointer)
 ```
 
-`--clipboard` detects image-only clipboard content and sends supported PNG,
-JPEG, WebP, BMP, or TIFF data through the same local OCR path. Text is preferred
-when an application places both text and image representations on the clipboard.
+`--clipboard` detects PNG, JPEG, WebP, BMP, or TIFF image-only clipboard
+content and sends it through the selected OCR engine. Text is preferred when
+an application places both text and image representations on the clipboard.
+OpenAI Vision accepts PNG, JPEG, and WebP; choosing it for BMP or TIFF fails
+locally with a format explanation instead of uploading mislabeled bytes.
 
 Because capture happens at the Wayland compositor level, region and window
 reading can also work over fullscreen Steam/Proton games; it has been tested in
@@ -191,7 +195,7 @@ are explicit opt-ins.
 |---|---|---|
 | `tesseract` | local, default | Fast and deterministic on ordinary screen text. |
 | `easyocr` | local, opt-in | Stylised, italic, or low-contrast text the default gives up on — game dialogue, posters, video frames. Costs about 6 GB of disk in a private Python environment and several seconds of model loading per capture. |
-| `google` | cloud, opt-in | Google Cloud Vision, a purpose-built OCR API with per-word confidence, so the confidence floor applies exactly as it does locally. **Every capture is sent as an image to Google**, including `--window` and `--screen`. Needs a Google Cloud project with the Vision API enabled and an API key (1,000 images a month free). |
+| `google` | cloud, opt-in | Google Cloud Vision, a purpose-built OCR API with per-word confidence, so the confidence floor applies exactly as it does locally. **Every capture is sent as an image to Google**, including `--window` and `--screen`. Needs a Google Cloud project with the Vision API enabled and an API key. |
 | `openai` | cloud, opt-in | A vision model transcribing the image; accurate, but reports no confidence, so the floor cannot apply. **Every capture is sent as an image to OpenAI**, including `--window` and `--screen`. Uses the same key as the OpenAI speech provider. |
 
 The Screen tab says plainly which of these is true for the engine you have
@@ -231,7 +235,7 @@ Bundled, all optional except piper:
 | `kokoro` | local | best quality, slow cold start, opt-in |
 | `openai` | cloud | opt-in; **text leaves your machine** |
 | `elevenlabs` | cloud | opt-in; **text leaves your machine** |
-| `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; takes a Vertex AI key by default (`speak --set .gemini.api developer` for an AI Studio key); **text leaves your machine** |
+| `gemini` | cloud | opt-in; Gemini TTS through the Google AI Developer API, using a Gemini API key from Google AI Studio; 30 named voices, with speed fixed by the service; **text leaves your machine** |
 | `google` | cloud | opt-in; Cloud Text-to-Speech, voices fetched from the account, speed slider honoured; shares the `google` key with the Vision OCR engine; **text leaves your machine** |
 
 Google lists well over a thousand voices. The Voice tab browses them with
@@ -290,6 +294,11 @@ Cloud telemetry and voice metadata are stored mode 0600 under
 limits, and normalized error codes. Neither cache contains API keys, selected
 text, or provider response bodies.
 
+Inputs and remote responses are bounded before expensive processing: public
+speech input is limited to 1 MiB, captured images to 50 MiB, and every bundled
+cloud adapter applies a provider-specific response or audio ceiling. Service
+character and byte limits are enforced locally before a request is sent.
+
 Environment variables take precedence over keyring entries. If an environment
 key is rejected, the panel names the authoritative variable and asks you to
 update or unset it; saving another key cannot silently pretend to override it.
@@ -310,8 +319,11 @@ under `~/.local/share/omarchy-tts`, `~/.config/omarchy-tts`, and
 
 ## Config
 
-`~/.config/omarchy-tts/config.json` — `provider`, `rate`, `maxChars`
-(0 = unlimited), plus per-provider voice settings.
+`~/.config/omarchy-tts/config.json` — provider, voice, OCR, sanitizer, and UI
+preferences. `rate` accepts 0.25–4.0; the panel narrows that range to what the
+selected provider supports. `maxChars` accepts 0–1,048,576, where `0` means no
+sanitizer truncation (the independent 1 MiB input safety limit still applies).
+The current additive schema is version 4.
 
 ## The sanitizer
 

@@ -5,15 +5,21 @@ Item {
   id: root
   visible: false
 
-  readonly property string speakBin: String(Qt.resolvedUrl("../bin/speak")).replace("file://", "")
-  readonly property string voiceBin: String(Qt.resolvedUrl("../bin/speak-voice")).replace("file://", "")
-  readonly property string bindingsBin: String(Qt.resolvedUrl("../bin/speak-bindings")).replace("file://", "")
-  readonly property string setupBin: String(Qt.resolvedUrl("../bin/speak-setup")).replace("file://", "")
+  function localPath(url) {
+    var value = String(url)
+    return value.indexOf("file://") === 0 ? decodeURIComponent(value.slice(7)) : value
+  }
+  readonly property string speakBin: localPath(Qt.resolvedUrl("../bin/speak"))
+  readonly property string voiceBin: localPath(Qt.resolvedUrl("../bin/speak-voice"))
+  readonly property string bindingsBin: localPath(Qt.resolvedUrl("../bin/speak-bindings"))
+  readonly property string setupBin: localPath(Qt.resolvedUrl("../bin/speak-setup"))
   property var info: ({ providers: [], voices: [], ocr: {}, sanitizer: {}, ui: {} })
   property var catalogue: []
+  property bool catalogueLoading: false
   property var download: ({ status: "idle", voice: "", percent: 0 })
   property var bindings: ({ installed: false, bindings: {}, conflicts: [], canInstall: true })
   property var setup: ({ ready: false, engineReady: false, voiceReady: false })
+  property bool setupLoaded: false
   property var setupJob: ({ status: "idle", step: "", progress: 0, message: "" })
   property var keyResult: ({ ok: false, message: "" })
   property string preview: ""
@@ -28,6 +34,9 @@ Item {
   property string pendingKeyProvider: ""
   property string pendingKeyPurpose: "speech"
   property bool keySaving: false
+  property string pendingSpeech: ""
+  property string pendingPreview: ""
+  property string pendingConfigValue: ""
   property var statusSource: null
   property bool watchedSpeaking: false
   readonly property bool speaking: statusSource
@@ -35,6 +44,7 @@ Item {
                                    : watchedSpeaking
   readonly property bool setupCancellable:
     (setupJob.status === "starting" || setupJob.status === "running")
+    && setupJob.cancellable !== false
     && Number(setupJob.pid || 0) > 1 && String(setupJob.processIdentity || "") !== ""
   readonly property bool downloadCancellable:
     (download.status === "starting" || download.status === "downloading")
@@ -49,6 +59,8 @@ Item {
   // not read TTS settings". Reads are queued instead of killed.
   property bool infoQueued: false
   property bool infoLoaded: false
+  property bool catalogueQueued: false
+  property bool previewQueued: false
 
   // A read started before a write can finish after it, and would then report
   // the value we just replaced - which is how a slider ends up showing the
@@ -59,7 +71,13 @@ Item {
   property int readEpoch: 0
 
   function refresh() {
-    if (infoProc.running) { infoQueued = true; return }
+    // A read that starts while a queued write is still running can carry the
+    // new epoch but the old bytes, so the epoch check alone cannot reject it.
+    if (infoProc.running || configProc.running || configQueue.length > 0) {
+      infoQueued = true
+      return
+    }
+    infoQueued = false
     readEpoch = writeEpoch
     infoProc.running = true
   }
@@ -68,7 +86,16 @@ Item {
     if (!setupStatusProc.running) setupStatusProc.running = true
     if (!setupJobProc.running) setupJobProc.running = true
   }
-  function loadCatalogue() { restart(catalogueProc) }
+  function refreshDownload() { if (!downloadStatusProc.running) downloadStatusProc.running = true }
+  function loadCatalogue() {
+    error = ""
+    catalogueLoading = true
+    if (catalogueProc.running) {
+      catalogueQueued = true
+      return
+    }
+    catalogueProc.running = true
+  }
   function action(argv) {
     if (actionProc.running) {
       error = "Another TTS action is still finishing. Please try again."
@@ -88,7 +115,8 @@ Item {
     var queue = configQueue.slice()
     var next = queue.shift()
     configQueue = queue
-    configProc.command = [speakBin, "--set", next.path, next.value]
+    pendingConfigValue = JSON.stringify(next.value)
+    configProc.command = [speakBin, "--set-stdin-json", next.path]
     configProc.running = true
   }
   function setConfig(path, value) {
@@ -104,26 +132,58 @@ Item {
     configQueue = queue
     runNextConfig()
   }
-  function speak(text) { error = ""; speechProc.command = [speakBin, "--", text]; restart(speechProc) }
+  function speak(text) { error = ""; pendingSpeech = String(text).slice(0, 4096); speechProc.command = [speakBin, "--stdin-json"]; restart(speechProc) }
   function stop() { error = ""; speechProc.command = [speakBin, "--stop"]; restart(speechProc) }
   function selectProvider(name) { setConfig(".provider", name) }
   // Proving a backend takes seconds and makes no sound; `verifying` lets the
   // panel say so rather than appearing to have ignored the click.
-  function verifyProvider(name) { error = ""; verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
-  function verifyOcrEngine(name) { error = ""; verifying = "ocr:" + name; verifyProc.command = [speakBin, "--verify-ocr", name]; restart(verifyProc) }
+  function verifyProvider(name) {
+    error = ""
+    if (verifyProc.running) { error = "Another backend test is still running."; return }
+    verifying = name; verifyProc.command = [speakBin, "--verify", name]; verifyProc.running = true
+  }
+  function verifyOcrEngine(name) {
+    error = ""
+    if (verifyProc.running) { error = "Another backend test is still running."; return }
+    verifying = "ocr:" + name; verifyProc.command = [speakBin, "--verify-ocr", name]; verifyProc.running = true
+  }
   function selectOcrEngine(name) { setConfig(".ocr.engine", name) }
-  function refreshUsage(name) { error = ""; refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
+  function refreshUsage(name) {
+    error = ""
+    if (usageProc.running) { error = "Usage is already being refreshed."; return }
+    refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; usageProc.running = true
+  }
   property string refreshingLanguages: ""
-  function refreshLanguages(engine) { error = ""; refreshingLanguages = engine; languageRefreshProc.command = [speakBin, "--refresh-languages", engine]; restart(languageRefreshProc) }
+  function refreshLanguages(engine) {
+    error = ""
+    if (languageRefreshProc.running) { error = "Languages are already being refreshed."; return }
+    refreshingLanguages = engine
+    languageRefreshProc.command = [speakBin, "--refresh-languages", engine]
+    languageRefreshProc.running = true
+  }
   function installLanguage(code) { startSetup("lang:" + code) }
-  function refreshVoices(name) { error = ""; refreshingVoices = name; voiceRefreshProc.command = [speakBin, "--refresh-voices", name]; restart(voiceRefreshProc) }
+  function refreshVoices(name) {
+    error = ""
+    if (voiceRefreshProc.running) { error = "Voices are already being refreshed."; return }
+    refreshingVoices = name
+    voiceRefreshProc.command = [speakBin, "--refresh-voices", name]
+    voiceRefreshProc.running = true
+  }
   function providerSupportsVoiceRefresh(name) {
     var providers = info.providers || []
     for (var i = 0; i < providers.length; ++i)
       if (providers[i].name === name) return providers[i].refreshVoices === true
     return false
   }
-  function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
+  function previewText(text) {
+    pendingPreview = String(text).slice(0, 32768)
+    if (previewProc.running) {
+      previewQueued = true
+      return
+    }
+    previewProc.command = [speakBin, "--preview-stdin-json"]
+    previewProc.running = true
+  }
   function downloadVoice(key) {
     if (downloadStartProc.running || actionProc.running) {
       error = "Another TTS action is still finishing. Please try again."
@@ -157,6 +217,7 @@ Item {
   function cancelSetup() { if (setupCancellable) action([setupBin, "cancel"]) }
   function storeKey(provider, key, purpose) {
     if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) < 0 || key.length < 8) return
+    if (keyProc.running || keySaving) { error = "A key is already being saved."; return }
     error = ""
     pendingKey = key; pendingKeyProvider = provider; pendingKeyPurpose = purpose || "speech"
     keySaving = true; keyResult = { ok: false, message: "" }
@@ -165,7 +226,8 @@ Item {
   function removeKey(provider) { if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
 
   Process {
-    id: configProc; command: []
+    id: configProc; command: []; stdinEnabled: true
+    onStarted: { write(root.pendingConfigValue + "\n"); root.pendingConfigValue = "" }
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
     onRunningChanged: if (!running) {
       if (root.configQueue.length > 0) Qt.callLater(root.runNextConfig)
@@ -174,30 +236,45 @@ Item {
   }
   Process {
     id: infoProc; command: [root.speakBin, "--info"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (root.readEpoch !== root.writeEpoch) {
-          root.infoQueued = true      // answered a question we have since changed
-          return
-        }
+    stdout: StdioCollector { id: infoStdout; waitForEnd: true }
+    stderr: StdioCollector { id: infoStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var queued = root.infoQueued
+      root.infoQueued = false
+      if (root.readEpoch !== root.writeEpoch) {
+        queued = true       // answered a question we have since changed
+      } else if (exitCode !== 0) {
+        root.error = String(infoStderr.text || "Could not read TTS settings.").trim()
+      } else {
         try {
-          root.info = JSON.parse(text)
+          var result = JSON.parse(String(infoStdout.text || ""))
+          if (!result || typeof result !== "object" || !Array.isArray(result.providers))
+            throw new Error("invalid settings response")
+          root.info = result
           root.infoLoaded = true
         } catch (e) {
-          // Only alarm the user if we have never managed to read settings at
-          // all; a transient truncation just gets retried.
-          if (!root.infoLoaded) root.error = "Could not read TTS settings"
-          root.infoQueued = true
+          root.error = "Could not read TTS settings."
         }
       }
+      if (queued) Qt.callLater(root.refresh)
     }
-    onRunningChanged: if (!running && root.infoQueued) { root.infoQueued = false; Qt.callLater(root.refresh) }
   }
-  Process { id: speechProc; command: []; stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() } }
+  Process {
+    id: speechProc
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      write(JSON.stringify(root.pendingSpeech) + "\n")
+      root.pendingSpeech = ""
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim()) root.error = text.trim()
+    }
+  }
   // The bar already owns a status stream. Reuse it when hosted there, while
   // retaining a fallback for standalone panel development.
-  Process { id: speechWatch; running: root.statusSource === null; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.watchedSpeaking = data.trim() === "speaking" } } }
+  Process { id: speechWatch; running: root.statusSource === null; command: [root.speakBin, "--watch-status"]; stdout: SplitParser { splitMarker: "\n"; onRead: function(data) { root.watchedSpeaking = data.trim() !== "idle" } } }
   Process {
     id: verifyProc; command: []
     stdout: StdioCollector { id: verifyStdout; waitForEnd: true }
@@ -239,11 +316,75 @@ Item {
       root.refresh(); root.refreshBindings(); root.refreshSetup(); root.actionFinished()
     }
   }
-  Process { id: previewProc; command: []; stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.preview = text.trim() } }
-  Process { id: catalogueProc; command: [root.voiceBin, "available", "--json"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.catalogue = JSON.parse(text) } catch (e) { root.catalogue = [] } } } }
+  Process {
+    id: previewProc
+    command: []
+    stdinEnabled: true
+    onStarted: {
+      write(JSON.stringify(root.pendingPreview) + "\n")
+      root.pendingPreview = ""
+    }
+    stdout: StdioCollector { id: previewStdout; waitForEnd: true }
+    stderr: StdioCollector { id: previewStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (!root.previewQueued) {
+        if (exitCode === 0) root.preview = String(previewStdout.text || "").trim()
+        else if (exitCode === 1) root.preview = ""
+        else root.error = String(previewStderr.text || "Could not prepare the spoken preview.").trim()
+      }
+      if (root.previewQueued) {
+        root.previewQueued = false
+        Qt.callLater(function() { root.previewText(root.pendingPreview) })
+      }
+    }
+  }
+  Process {
+    id: catalogueProc; command: [root.voiceBin, "available", "--json"]
+    stdout: StdioCollector { id: catalogueStdout; waitForEnd: true }
+    stderr: StdioCollector { id: catalogueStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (root.catalogueQueued) {
+        root.catalogueQueued = false
+        Qt.callLater(root.loadCatalogue)
+        return
+      }
+      root.catalogueLoading = false
+      if (exitCode !== 0) {
+        root.error = String(catalogueStderr.text || "Could not load the voice catalogue. Check your connection and try again.").trim()
+        return
+      }
+      try { root.catalogue = JSON.parse(String(catalogueStdout.text || "[]")) }
+      catch (e) { root.error = "The voice catalogue response was unreadable." }
+    }
+  }
   Process {
     id: downloadStatusProc; command: [root.voiceBin, "status"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.download = JSON.parse(text); root.pendingDownloadVoice = ""; if (["done", "error", "cancelled"].indexOf(root.download.status) >= 0) { downloadPoll.running = false; root.loadCatalogue(); root.refresh() } } catch (e) {} } }
+    stdout: StdioCollector { id: downloadStatusStdout; waitForEnd: true }
+    stderr: StdioCollector { id: downloadStatusStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = null
+      try { result = JSON.parse(String(downloadStatusStdout.text || "")) } catch (e) {}
+      if (exitCode !== 0 || !result || typeof result.status !== "string") {
+        downloadPoll.running = false
+        root.downloadStarting = false
+        root.pendingDownloadVoice = ""
+        root.error = String(downloadStatusStderr.text || "Could not read voice-download status.").trim()
+        return
+      }
+      var wasActive = root.downloadStarting || root.pendingDownloadVoice !== ""
+                      || ["starting", "downloading"].indexOf(root.download.status) >= 0
+      root.download = result
+      root.pendingDownloadVoice = ""
+      if (["starting", "downloading"].indexOf(result.status) >= 0) {
+        downloadPoll.running = true
+      } else {
+        downloadPoll.running = false
+        if (wasActive && ["done", "error", "cancelled"].indexOf(result.status) >= 0) {
+          root.loadCatalogue()
+          root.refresh()
+        }
+      }
+    }
   }
   Process {
     id: downloadStartProc; command: []
@@ -270,8 +411,36 @@ Item {
       downloadPoll.running = true
     }
   }
-  Process { id: bindingsProc; command: [root.bindingsBin, "status"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.bindings = JSON.parse(text) } catch (e) { root.bindings = { installed: false, bindings: {}, conflicts: [], canInstall: false } } } } }
-  Process { id: setupStatusProc; command: [root.setupBin, "status"]; stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.setup = JSON.parse(text) } catch (e) {} } } }
+  Process {
+    id: bindingsProc; command: [root.bindingsBin, "status"]
+    stdout: StdioCollector { id: bindingsStdout; waitForEnd: true }
+    stderr: StdioCollector { id: bindingsStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      try {
+        if (exitCode !== 0) throw new Error("shortcut status failed")
+        root.bindings = JSON.parse(String(bindingsStdout.text || ""))
+      } catch (e) {
+        root.bindings = { installed: false, bindings: {}, conflicts: [], canInstall: false }
+        root.error = String(bindingsStderr.text || "Could not inspect current shortcuts.").trim()
+      }
+    }
+  }
+  Process {
+    id: setupStatusProc; command: [root.setupBin, "status"]
+    stdout: StdioCollector { id: setupStatusStdout; waitForEnd: true }
+    stderr: StdioCollector { id: setupStatusStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = null
+      try { result = JSON.parse(String(setupStatusStdout.text || "")) } catch (e) {}
+      if (exitCode === 0 && result && result.ok === true) {
+        root.setup = result
+        root.setupLoaded = true
+      } else {
+        root.error = (result && result.message)
+                     || String(setupStatusStderr.text || "Could not read TTS setup status.").trim()
+      }
+    }
+  }
   Process {
     id: setupStartProc; command: []
     stdout: StdioCollector { id: setupStartStdout; waitForEnd: true }
@@ -299,7 +468,27 @@ Item {
   }
   Process {
     id: setupJobProc; command: [root.setupBin, "job"]
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.setupJob = JSON.parse(text); if (["done", "error", "cancelled"].indexOf(root.setupJob.status) >= 0) { setupJobPoll.running = false; root.restart(setupStatusProc); root.refresh(); root.loadCatalogue() } } catch (e) {} } }
+    stdout: StdioCollector { id: setupJobStdout; waitForEnd: true }
+    stderr: StdioCollector { id: setupJobStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var result = null
+      try { result = JSON.parse(String(setupJobStdout.text || "")) } catch (e) {}
+      if (exitCode !== 0 || !result || typeof result.status !== "string") {
+        setupJobPoll.running = false
+        root.error = String(setupJobStderr.text || "Could not read setup progress.").trim()
+        return
+      }
+      root.setupJob = result
+      if (["starting", "running"].indexOf(result.status) >= 0) {
+        setupJobPoll.running = true
+      } else {
+        setupJobPoll.running = false
+        if (["done", "error", "cancelled"].indexOf(result.status) >= 0) {
+          root.restart(setupStatusProc)
+          root.refresh()
+        }
+      }
+    }
   }
   Process {
     id: keyProc; command: []; stdinEnabled: true
@@ -325,6 +514,6 @@ Item {
       root.refresh()
     }
   }
-  Timer { id: downloadPoll; interval: 500; repeat: true; running: false; onTriggered: root.restart(downloadStatusProc) }
-  Timer { id: setupJobPoll; interval: 650; repeat: true; running: false; onTriggered: root.restart(setupJobProc) }
+  Timer { id: downloadPoll; interval: 1000; repeat: true; running: false; onTriggered: if (!downloadStatusProc.running) downloadStatusProc.running = true }
+  Timer { id: setupJobPoll; interval: 1200; repeat: true; running: false; onTriggered: if (!setupJobProc.running) setupJobProc.running = true }
 }

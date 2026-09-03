@@ -5,7 +5,10 @@
 # install: omarchy pkg add espeak-ng
 # voices: system
 # deprecated: true
+# ratemin: 0.5
+# ratemax: 2.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need espeak-ng "install with: omarchy pkg add espeak-ng"
 

@@ -4,13 +4,16 @@
 # kind: local
 # probe: [[ -x "${EASYOCR_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/bin/python}" ]]
 # install: easyocr
+# confidence: true
 # Reads a PNG on stdin, writes recognised text on stdout.
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 
 ENGINE_DIR="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr"
 EPY="${EASYOCR_PYTHON:-$ENGINE_DIR/bin/python}"
 MODELS="${EASYOCR_MODELS:-$ENGINE_DIR/models}"
+IMAGE_MAX_BYTES=52428800
 if [[ ! -x "$EPY" ]]; then
   echo "speak: EasyOCR is not installed; add it from the Screen tab." >&2
   notify-send -a "Speak" "EasyOCR not installed" "Add it from the Screen tab." 2>/dev/null
@@ -64,7 +67,7 @@ LANGS="${TTS_OCR_LANGS:-}"
 [[ -z "$LANGS" ]] && LANGS="$(jq -r '.ocr.easyocr.langs // "eng"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$LANGS" || "$LANGS" == "null" ]] && LANGS="eng"
 MINCONF="${TTS_OCR_MINCONF:-$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)}"
-[[ "$MINCONF" =~ ^[0-9]+$ ]] || MINCONF=60
+[[ "$MINCONF" =~ ^[0-9]+$ && "$MINCONF" -le 100 ]] || MINCONF=60
 
 codes=(); unmapped=""
 IFS='+' read -ra requested <<< "$LANGS"
@@ -81,9 +84,14 @@ fi
 [[ ${#codes[@]} -gt 0 ]] || codes=(en)
 
 img="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-easyocr.XXXXXX.png")" || exit 1
+trap 'rm -f "$img"' EXIT
 errlog="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-easyocr.XXXXXX.log")" || exit 1
 trap 'rm -f "$img" "$errlog"' EXIT
-cat > "$img"
+head -c "$((IMAGE_MAX_BYTES + 1))" > "$img"
+[[ "$(stat -c%s "$img" 2>/dev/null || printf 0)" -le "$IMAGE_MAX_BYTES" ]] || {
+  printf 'speak: EasyOCR image exceeds the 50 MiB safety limit\n' >&2; exit 65;
+}
+[[ -s "$img" ]] || { printf 'speak: EasyOCR image is empty\n' >&2; exit 65; }
 
 # Per-box confidence honours the same floor as tesseract, and paragraph mode
 # hands the sanitizer reflowed lines rather than one box per word.
@@ -117,6 +125,11 @@ rc=$?
 # torch is chatty on stderr; surface only the failure line so a broken
 # install or a rejected language combination is loud instead of silent.
 if [[ $rc -ne 0 ]]; then
-  grep -E '^[A-Za-z]+Error|^ValueError|^RuntimeError' "$errlog" | tail -n 1 | sed 's/^/speak: EasyOCR: /' >&2
+  detail="$(grep -E '^[A-Za-z]+Error|^ValueError|^RuntimeError' "$errlog" | tail -n 1)"
+  if [[ -n "$detail" ]]; then
+    printf 'speak: EasyOCR: %s\n' "$detail" >&2
+  else
+    printf 'speak: EasyOCR recognition failed (exit %s)\n' "$rc" >&2
+  fi
   exit $rc
 fi

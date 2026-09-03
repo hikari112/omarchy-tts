@@ -9,28 +9,35 @@
 # voices: remote
 # refreshvoices: true
 # maxbytes: 5000
+# ratemin: 0.25
+# ratemax: 2.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"
 source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
 KEY="$(get_key GOOGLE_API_KEY google)" || exit 1
 API=https://texttospeech.googleapis.com/v1
+VOICE_LIST_MAX_BYTES=33554432
+RESPONSE_MAX_BYTES=134217728
 
 # Every voice the account can use, with what a browser filters on. Names
 # encode their family (en-US-Chirp3-HD-Aoede); the family is lifted out so
-# it can be a chip rather than a substring search. Bare names (Kore, Puck)
-# are the Gemini voices Cloud TTS also serves, listed without a prefix.
+# it can be a chip rather than a substring search. Bare Gemini-TTS voices use
+# a different model-aware request contract and are served by our Gemini
+# provider, so this conventional Cloud TTS adapter does not advertise them.
 if [[ "${1:-}" == "--voices" ]]; then
   body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google-voices.XXXXXX")" || exit 1
   trap 'rm -f "$body"' EXIT
-  status="$(curl -sS --connect-timeout 15 --max-time 60 "$API/voices" \
+  status="$(curl -sS --proto '=https' --connect-timeout 15 --max-time 60 \
+    --max-filesize "$VOICE_LIST_MAX_BYTES" "$API/voices" \
     -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
     3<<< "x-goog-api-key: $KEY" < /dev/null)" || status=""
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || {
     printf 'Google: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
   jq -c '
-    [ .voices[]?
+    [ .voices[]? | select(.name | contains("-"))
       | (.languageCodes[0] // "") as $lang
       | (.name | if (ascii_downcase | startswith(($lang|ascii_downcase) + "-")) then .[($lang|length)+1:] else . end) as $rest
       | ($rest | split("-")) as $parts
@@ -44,9 +51,12 @@ if [[ "${1:-}" == "--voices" ]]; then
 fi
 
 if [[ "${1:-}" == "--usage" ]]; then
-  jq -c '. + {account:{source:"request_headers",note:"Request limits update after each speech request."}}' \
-    "${TTS_METRICS_FILE:-/dev/null}" 2>/dev/null ||
+  if cloud_metrics_valid; then
+    jq -c '. + {account:{source:"request_headers",note:"Request limits update after each speech request."}}' \
+      "$TTS_METRICS_FILE"
+  else
     jq -nc '{provider:"google",model:"text:synthesize",account:{source:"request_headers",note:"Rate limits appear after the first speech request."}}'
+  fi
   exit 0
 fi
 
@@ -62,7 +72,9 @@ LANG_CODE="$(sed -E 's/^([a-z]{2,3}-[A-Za-z0-9]{2,4})-.*/\1/' <<< "$VOICE")"
 [[ "$LANG_CODE" != "$VOICE" ]] || LANG_CODE="en-US"
 
 audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google.XXXXXX.json")" || exit 1
+trap 'rm -f "$audio"' EXIT
 wav="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google.XXXXXX.wav")" || exit 1
+trap 'rm -f "$audio" "$wav"' EXIT
 headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google-headers.XXXXXX")" || exit 1
 trap 'rm -f "$audio" "$wav" "$headers"' EXIT
 # The key travels in a header through fd 3, never the ?key= query string.
@@ -70,14 +82,21 @@ curl_rc=0
 status="$(jq -Rs --arg v "$VOICE" --arg l "$LANG_CODE" --argjson s "${TTS_RATE:-1.0}" \
   '{input:{text:.}, voice:{name:$v, languageCode:$l},
     audioConfig:{audioEncoding:"LINEAR16", sampleRateHertz:24000, speakingRate:$s}}' |
-  curl -sS --connect-timeout 15 --max-time 180 "$API/text:synthesize" \
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 180 \
+    --max-filesize "$RESPONSE_MAX_BYTES" "$API/text:synthesize" \
     -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
     --write-out '%{http_code}' \
     3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
 if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail Google "$curl_rc"; exit $?; fi
 [[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'Google: invalid HTTP response\n' >&2; exit 74; }
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+  cloud_record google text:synthesize "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
+  cloud_fail Google "$status" "$audio" "$headers"; exit $?
+fi
+if ! jq -er '.audioContent // empty' "$audio" 2>/dev/null | base64 -d > "$wav" 2>/dev/null ||
+    ! audio_is_wav "$wav"; then
+  cloud_record google text:synthesize "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio" 0 invalid_response
+  printf 'Google: service returned invalid audio\n' >&2; exit 74
+fi
 cloud_record google text:synthesize "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
-if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail Google "$status" "$audio" "$headers"; exit $?; fi
-jq -er '.audioContent // empty' "$audio" 2>/dev/null | base64 -d > "$wav" 2>/dev/null
-[[ -s "$wav" ]] || { printf 'Google: service returned no audio\n' >&2; exit 74; }
 play_file "$wav"

@@ -56,6 +56,7 @@ Rectangle {
     Text {
       width: parent.width
       visible: root.busy || root.controller.setupJob.status === "error"
+      textFormat: Text.PlainText
       text: root.controller.setupStarting
             ? "Starting setup safely…"
             : (root.controller.setupJob.message || "Preparing setup")

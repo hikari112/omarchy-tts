@@ -6,10 +6,11 @@
 tts_health_invalidate() { # health-file key [key...]
   local health="$1" keys tmp lock_fd
   shift
-  [[ $# -gt 0 && -s "$health" ]] || return 0
+  [[ $# -gt 0 && ! -L "$health" && -s "$health" &&
+     "$(stat -c%s "$health" 2>/dev/null || printf 1048577)" -le 1048576 ]] || return 0
   keys="$(printf '%s\n' "$@")"
   mkdir -p "$(dirname "$health")" || return 1
-  exec {lock_fd}>"${health}.lock" || return 1
+  exec {lock_fd}>>"${health}.lock" || return 1
   flock "$lock_fd" || { exec {lock_fd}>&-; return 1; }
   if ! jq -e 'type == "object"' "$health" >/dev/null 2>&1; then
     flock -u "$lock_fd"
@@ -23,7 +24,7 @@ tts_health_invalidate() { # health-file key [key...]
   }
   if jq --arg keys "$keys" \
       '($keys | split("\n")) as $stale | with_entries(select(.key as $key | $stale | index($key) | not))' \
-      "$health" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$health"; then
+      "$health" >"$tmp" && chmod 600 "$tmp" && mv -T -- "$tmp" "$health"; then
     flock -u "$lock_fd"
     exec {lock_fd}>&-
     return 0

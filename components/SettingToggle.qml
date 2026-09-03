@@ -11,6 +11,11 @@ Item {
   width: parent ? parent.width : implicitWidth
   height: Math.max(copy.implicitHeight, 24)
   activeFocusOnTab: true
+  Accessible.role: Accessible.CheckBox
+  Accessible.name: root.label
+  Accessible.description: root.description
+  Accessible.checked: root.checked
+  Accessible.onPressAction: root.toggled(!root.checked)
   Keys.onSpacePressed: root.toggled(!root.checked)
   Keys.onReturnPressed: root.toggled(!root.checked)
   Keys.onEnterPressed: root.toggled(!root.checked)
@@ -27,9 +32,10 @@ Item {
     id: copy
     width: parent.width - 42
     spacing: 1
-    Text { text: root.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
+    Text { textFormat: Text.PlainText; text: root.label; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
     Text {
       width: parent.width; visible: root.description !== ""; text: root.description
+      textFormat: Text.PlainText
       wrapMode: Text.WordWrap; color: Color.muted; font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }

@@ -9,7 +9,11 @@ BarWidget {
   property bool speaking: false
   property string provider: "piper"
 
-  readonly property string speakBin: String(Qt.resolvedUrl("bin/speak")).replace("file://", "")
+  function localPath(url) {
+    var value = String(url)
+    return value.indexOf("file://") === 0 ? decodeURIComponent(value.slice(7)) : value
+  }
+  readonly property string speakBin: localPath(Qt.resolvedUrl("bin/speak"))
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -61,7 +65,7 @@ BarWidget {
       onRead: function (line) {
         try {
           var state = JSON.parse(line)
-          root.speaking = state.status === "speaking"
+          root.speaking = state.status !== "idle"
           if (state.provider) root.provider = state.provider
         } catch (e) {}
       }

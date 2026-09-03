@@ -5,7 +5,10 @@
 # probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
 # install: managed Python 3.12 venv · kokoro==0.9.4
 # voices: bundled
+# ratemin: 0.5
+# ratemax: 2.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 
 # Bring your own interpreter: any python with `kokoro` importable.

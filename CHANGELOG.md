@@ -35,6 +35,27 @@ Versioning.
 - Run the complete regression suite on staging pushes as well as main, pin CI
   actions to current Node 24 releases, and add static UI contracts for worker
   identity, key purpose, scrolling, focus, and metadata-driven actions.
+- Make configuration migration type-safe at every nested boundary, preserve
+  malformed inputs for recovery, serialize no-op-aware atomic writes, retain
+  valid symlink targets, and reject dangling or non-regular destinations.
+- Give selection, capture, OCR, playback, setup, and download jobs verified
+  process ownership so Stop/Cancel cannot signal a reused PID or lose a handoff;
+  require detached workers to inherit their held job locks, and recover engine
+  and voice publication after abrupt termination.
+- Bound speech input, captures, catalogues, model artifacts, remote metadata,
+  JSON responses, and audio responses; require HTTPS across redirects and
+  reject ambiguous or invalid download metadata before network access; keep
+  runtime and cache publication from traversing reserved special-file nodes.
+- Publish Piper models and sidecars as one verified generation under a shared
+  reader/writer lock, repair incomplete installations non-destructively, and
+  keep the active voice protected from removal.
+- Harden API-key validation and error separation, keep request bodies and keys
+  out of argv and logs, normalize remote failure output, and retain only
+  privacy-safe, owner-readable telemetry.
+- Make speed controls provider-capability-aware, reject unsupported explicit
+  overrides, clamp cross-provider persisted preferences safely, improve
+  keyboard and assistive labels, render user/service strings as plain text, and
+  keep all panel process input JSON-safe.
 
 ## 1.2.3 - 2026-09-02
 
