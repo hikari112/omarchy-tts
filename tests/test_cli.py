@@ -477,14 +477,16 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("at most 08 characters", result.stderr)
         self.assertFalse(marker.exists())
 
-    def test_deprecated_compatibility_providers_only_appear_when_configured(self):
-        names = {item["name"] for item in json.loads(self.run_speak("--info").stdout)["providers"]}
-        self.assertNotIn("espeak-ng", names)
-        self.assertNotIn("spd", names)
-        self.run_speak("--set", ".provider", "espeak-ng")
-        providers = json.loads(self.run_speak("--info").stdout)["providers"]
-        compatibility = next(item for item in providers if item["name"] == "espeak-ng")
-        self.assertTrue(compatibility["deprecated"])
+    def test_removed_system_providers_migrate_to_piper(self):
+        """espeak-ng and Speech Dispatcher were dropped in 1.3.0. A config that
+        still names one lands on the default instead of an absent provider."""
+        for old in ("espeak-ng", "spd"):
+            config = Path(self.temp.name, "omarchy-tts", "config.json")
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(json.dumps({"schemaVersion": 2, "provider": old}))
+            info = json.loads(self.run_speak("--info").stdout)
+            self.assertEqual(info["provider"], "piper", old)
+            self.assertNotIn(old, {item["name"] for item in info["providers"]})
 
     def test_invalid_optional_provider_metadata_cannot_break_info(self):
         providers = Path(self.temp.name, "omarchy-tts", "providers")
@@ -2135,7 +2137,8 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             payload = json.loads(self.body.read_text())
             if provider == "gemini":
                 self.assertEqual(payload["contents"][0]["parts"][0]["text"], spoken)
-                self.assertIn("generativelanguage.googleapis.com", arguments)
+                self.assertIn("aiplatform.googleapis.com", arguments,
+                              "the default host takes a Vertex AI key")
             elif provider == "google":
                 self.assertEqual(payload["input"]["text"], spoken)
                 self.assertEqual(payload["voice"]["languageCode"], "en-US")
@@ -2351,6 +2354,7 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 65)
         self.assertIn("unsupported API selection", result.stderr)
+        self.assertIn("vertex or developer", result.stderr)
         self.assertFalse(self.args.exists(), "invalid config reached curl")
 
     def test_google_voice_list_carries_what_a_browser_filters_on(self):

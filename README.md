@@ -235,7 +235,7 @@ Bundled, all optional except piper:
 | `kokoro` | local | best quality, slow cold start, opt-in |
 | `openai` | cloud | opt-in; **text leaves your machine** |
 | `elevenlabs` | cloud | opt-in; **text leaves your machine** |
-| `gemini` | cloud | opt-in; Gemini TTS through the Google AI Developer API, using a Gemini API key from Google AI Studio; 30 named voices, with speed fixed by the service; **text leaves your machine** |
+| `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; takes a Vertex AI key by default (`speak --set .gemini.api developer` for an AI Studio key); **text leaves your machine** |
 | `google` | cloud | opt-in; Cloud Text-to-Speech, voices fetched from the account, speed slider honoured; shares the `google` key with the Vision OCR engine; **text leaves your machine** |
 
 Google lists well over a thousand voices. The Voice tab browses them with
@@ -243,10 +243,8 @@ search, language, gender and family filters rather than a dropdown.
 Google requests are rejected locally above the service's 5,000-byte UTF-8
 limit, which matters for text whose characters occupy multiple bytes.
 
-Existing `espeak-ng` and Speech Dispatcher selections remain functional after
-an upgrade. They appear only while configured, are marked as compatibility
-providers, and can be replaced with Piper from the panel; new users are not
-offered these legacy choices.
+`espeak-ng` and Speech Dispatcher were removed in 1.3.0; a configuration
+that still names one is moved to Piper on first run.
 
 ### Bring your own
 

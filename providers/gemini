@@ -24,13 +24,17 @@ MODEL="$(jq -r '.gemini.model // "gemini-2.5-flash-preview-tts"' "$TTS_CONFIG" 2
 # plain identifier before either happens.
 [[ "$VOICE" =~ ^[A-Za-z]+$ ]] || { printf 'Gemini: invalid voice name\n' >&2; exit 65; }
 [[ "$MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || { printf 'Gemini: invalid model name\n' >&2; exit 65; }
-# Vertex Gemini-TTS uses a different stable model, project/location endpoint,
-# and Google Cloud authorization contract. This adapter deliberately implements
-# only the documented Developer API instead of pretending one key/URL shape is
-# portable across both products.
-API="$(jq -r '.gemini.api // "developer"' "$TTS_CONFIG" 2>/dev/null)"
-[[ "$API" == developer ]] || { printf 'Gemini: unsupported API selection; use developer\n' >&2; exit 65; }
-URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
+# The same model is served by two hosts that accept different keys: Vertex AI
+# express mode (an API key, no project or location in the URL - verified on
+# the wire with a Vertex key) and the Gemini Developer / AI Studio API. A key
+# for one is refused by the other with a 403, so this is configured, never
+# guessed by trying both - each try would send the text again.
+API="$(jq -r '.gemini.api // "vertex"' "$TTS_CONFIG" 2>/dev/null)"
+case "$API" in
+  vertex)    URL="https://aiplatform.googleapis.com/v1/publishers/google/models/$MODEL:generateContent" ;;
+  developer) URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent" ;;
+  *) printf 'Gemini: unsupported API selection; use vertex or developer\n' >&2; exit 65 ;;
+esac
 
 # Gemini's prebuilt voices are fixed and named; the character notes are
 # Google's own one-word descriptions.
