@@ -550,20 +550,22 @@ do_add() { # do_add <voice> <report> <force-repair>
   local m p s d mj pj sj dj model_stage sidecar_stage model_backup sidecar_backup
   m="$(file_meta "$voice" ".onnx")"
   IFS=$'\t' read -r p s d <<< "$m"
-  valid_repo_file "$p" .onnx &&
-    valid_size "$s" "$MODEL_MAX_BYTES" &&
-    [[
-     ( -z "$d" || "$d" == null || "$d" =~ ^[0-9a-fA-F]{32}$ ) ]] ||
-    { add_failure "$report" "$voice" "invalid model metadata"; return 1; }
+  if ! valid_repo_file "$p" .onnx ||
+      ! valid_size "$s" "$MODEL_MAX_BYTES" ||
+      ! [[ -z "$d" || "$d" == null || "$d" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    add_failure "$report" "$voice" "invalid model metadata"
+    return 1
+  fi
   d="${d,,}"
 
   mj="$(file_meta "$voice" ".onnx.json")"
   IFS=$'\t' read -r pj sj dj <<< "$mj"
-  valid_repo_file "$pj" .onnx.json &&
-    valid_size "$sj" "$SIDECAR_MAX_BYTES" &&
-    [[
-     ( -z "$dj" || "$dj" == null || "$dj" =~ ^[0-9a-fA-F]{32}$ ) ]] ||
-    { add_failure "$report" "$voice" "invalid voice config metadata"; return 1; }
+  if ! valid_repo_file "$pj" .onnx.json ||
+      ! valid_size "$sj" "$SIDECAR_MAX_BYTES" ||
+      ! [[ -z "$dj" || "$dj" == null || "$dj" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    add_failure "$report" "$voice" "invalid voice config metadata"
+    return 1
+  fi
   dj="${dj,,}"
   model_stage="$VOICES_DIR/.$voice.onnx.stage.$BASHPID"
   sidecar_stage="$VOICES_DIR/.$voice.onnx.json.stage.$BASHPID"

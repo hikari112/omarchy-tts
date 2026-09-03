@@ -867,7 +867,8 @@ PREP_OWNER=""
 PLAYBACK_OWNER=""
 declare -a JOB_TEMP_FILES=()
 # Invoked through the EXIT trap installed by register_preparation.
-# shellcheck disable=SC2329
+# ShellCheck 0.10 uses SC2317 for trap-only functions; 0.11 uses SC2329.
+# shellcheck disable=SC2317,SC2329
 cleanup_preparation() {
   [[ -n "$PREP_OWNER" ]] || return 0
   local lock_fd current=""
@@ -883,7 +884,8 @@ cleanup_preparation() {
 }
 
 # Invoked through the EXIT trap installed by register_preparation.
-# shellcheck disable=SC2329
+# ShellCheck 0.10 uses SC2317 for trap-only functions; 0.11 uses SC2329.
+# shellcheck disable=SC2317,SC2329
 cleanup_job() {
   # Stop holds the speech lock while it signals us. Delete private captures
   # before trying to reacquire that lock so its short escalation deadline can
