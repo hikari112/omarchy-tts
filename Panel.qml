@@ -366,9 +366,10 @@ Panel {
                     text: { var d = parent.parent.parent
                             if (controller.verifying === d.modelData.name) return "Testing…"
                             if (d.modelData.status === "nokey") return "Add key"
-                            // A cloud provider that cannot speak is almost always
-                            // a bad key, and testing it again proves nothing.
-                            if (d.cloud && d.failing) return "Replace key"
+                            // Only an actual auth rejection means the key is the
+                            // problem. Any other cloud failure is retestable, and
+                            // demanding a new key for one would be a dead end.
+                            if (d.cloud && d.failing && d.cloudError === "auth") return "Replace key"
                             if (d.failing || d.untested) return "Test"
                             if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
                             return "Install" }
@@ -377,7 +378,8 @@ Panel {
                     font.pixelSize: Style.font.caption
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
                         var row = parent.parent.parent.parent
-                        if (row.modelData.status === "nokey" || (row.cloud && row.failing)) {
+                        if (row.modelData.status === "nokey"
+                            || (row.cloud && row.failing && row.cloudError === "auth")) {
                           root.apiProvider = row.modelData.name
                           root.apiVendor = row.modelData.vendor || row.modelData.name
                           controller.keyResult = ({ ok: false, message: "" })
@@ -411,7 +413,7 @@ Panel {
                     MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.name === "elevenlabs" && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
                   }
                 }
-                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? "The API key was rejected. Remove it and add a valid key, then test again." : "Installed, but it produced no audio when tested. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? "The API key was rejected. Remove it and add a valid key, then test again." : (parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it produced no audio when tested. Press Test to try again."); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Text { visible: parent.parent.modelData.name === "kokoro" && !parent.parent.failing; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               }
               MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectProvider(parent.modelData.name) }
