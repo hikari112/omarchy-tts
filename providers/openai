@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, needs OPENAI_API_KEY, text leaves your machine
+# desc: OpenAI speech models. Text leaves your machine.
+# title: OpenAI
 # kind: cloud
 # probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
 # vendor: OpenAI

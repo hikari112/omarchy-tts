@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, Gemini TTS through Vertex AI, text leaves your machine
+# desc: Gemini speech through Vertex AI. Text leaves your machine.
+# title: Gemini
 # kind: cloud
 # probe: [[ -n "${GEMINI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key gemini >/dev/null 2>&1
 # vendor: Google

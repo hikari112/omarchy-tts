@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, Google Cloud Vision OCR with per-word confidence
+# desc: Cloud Vision, purpose-built OCR with per-word confidence. Screenshots leave your machine.
+# title: Google Cloud
 # kind: cloud
 # probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
 # vendor: Google

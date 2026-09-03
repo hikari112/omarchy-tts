@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in local, best quality, slow cold start
+# desc: Best local quality. Heavy, slow to start.
+# title: Kokoro
 # kind: local
 # probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
 # install: managed Python 3.12 venv · kokoro==0.9.4
