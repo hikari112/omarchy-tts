@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# desc: opt-in cloud, Cloud Text-to-Speech, shares the Vision key, text leaves your machine
+# kind: cloud
+# probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
+# vendor: Google
+# voices: remote
+# maxchars: 5000
+set -uo pipefail
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+source "$TTS_PLUGIN_DIR/lib/cloud.sh"
+need curl "install with: omarchy pkg add curl"
+KEY="$(get_key GOOGLE_API_KEY google)" || exit 1
+API=https://texttospeech.googleapis.com/v1
+
+# Google lists well over a thousand voices across every language it speaks.
+# Only the languages asked for are listed, so the picker stays usable.
+if [[ "${1:-}" == "--voices" ]]; then
+  langs="$(jq -r '.google.voiceLanguages // "en"' "$TTS_CONFIG" 2>/dev/null)"
+  [[ "$langs" =~ ^[A-Za-z,-]+$ ]] || langs=en
+  body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google-voices.XXXXXX")" || exit 1
+  trap 'rm -f "$body"' EXIT
+  status="$(curl -sS --connect-timeout 15 --max-time 60 "$API/voices" \
+    -H @/dev/fd/3 --output "$body" --write-out '%{http_code}' \
+    3<<< "x-goog-api-key: $KEY" < /dev/null)" || status=""
+  [[ "$status" =~ ^2[0-9][0-9]$ ]] || {
+    printf 'Google: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
+  jq -c --arg langs "$langs" '
+    ($langs | split(",") | map(ascii_downcase)) as $want
+    | [ .voices[]?
+        | select(any(.languageCodes[]; . as $c | any($want[]; . as $w | ($c|ascii_downcase) | startswith($w))))
+        | {value: .name,
+           label: (.name + " · " + ((.ssmlGender // "") | ascii_downcase))} ]' "$body" ||
+    { printf 'Google: unreadable voice list\n' >&2; exit 74; }
+  exit 0
+fi
+
+if [[ "${1:-}" == "--usage" ]]; then
+  jq -c '. + {account:{source:"request_headers",note:"Request limits update after each speech request."}}' \
+    "${TTS_METRICS_FILE:-/dev/null}" 2>/dev/null ||
+    jq -nc '{provider:"google",model:"text:synthesize",account:{source:"request_headers",note:"Rate limits appear after the first speech request."}}'
+  exit 0
+fi
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.google.voice // empty' "$TTS_CONFIG" 2>/dev/null)"
+[[ -n "$VOICE" ]] || {
+  printf 'Google: no voice selected; refresh cloud voices and choose one\n' >&2
+  exit 64
+}
+[[ "$VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] || { printf 'Google: invalid voice name in configuration\n' >&2; exit 64; }
+# Voice names carry their language: en-US-Chirp3-HD-Aoede speaks en-US.
+LANG_CODE="$(sed -E 's/^([a-z]{2,3}-[A-Za-z0-9]{2,4})-.*/\1/' <<< "$VOICE")"
+[[ "$LANG_CODE" != "$VOICE" ]] || LANG_CODE="en-US"
+
+audio="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google.XXXXXX.json")" || exit 1
+wav="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google.XXXXXX.wav")" || exit 1
+headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google-headers.XXXXXX")" || exit 1
+trap 'rm -f "$audio" "$wav" "$headers"' EXIT
+# The key travels in a header through fd 3, never the ?key= query string.
+curl_rc=0
+status="$(jq -Rs --arg v "$VOICE" --arg l "$LANG_CODE" --argjson s "${TTS_RATE:-1.0}" \
+  '{input:{text:.}, voice:{name:$v, languageCode:$l},
+    audioConfig:{audioEncoding:"LINEAR16", sampleRateHertz:24000, speakingRate:$s}}' |
+  curl -sS --connect-timeout 15 --max-time 180 "$API/text:synthesize" \
+    -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$audio" \
+    --write-out '%{http_code}' \
+    3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
+if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail Google "$curl_rc"; exit $?; fi
+[[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'Google: invalid HTTP response\n' >&2; exit 74; }
+cloud_record google text:synthesize "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$audio"
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail Google "$status" "$audio" "$headers"; exit $?; fi
+jq -er '.audioContent // empty' "$audio" 2>/dev/null | base64 -d > "$wav" 2>/dev/null
+[[ -s "$wav" ]] || { printf 'Google: service returned no audio\n' >&2; exit 74; }
+play_file "$wav"

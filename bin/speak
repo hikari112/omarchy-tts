@@ -230,9 +230,9 @@ verify_provider() { # verify_provider <name>
   # trigger the initial account voice refresh. Testing is already an explicit
   # remote action, so make that path self-healing instead of failing a valid
   # account for want of an arbitrary global voice id.
-  if [[ "$name" == elevenlabs && -z "$verify_voice" ]]; then
-    refresh_remote_voices elevenlabs >/dev/null || return 1
-    verify_voice="$(voice_for_provider elevenlabs)"
+  if [[ ( "$name" == elevenlabs || "$name" == google ) && -z "$verify_voice" ]]; then
+    refresh_remote_voices "$name" >/dev/null || return 1
+    verify_voice="$(voice_for_provider "$name")"
   fi
   local rc=0
   # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
@@ -284,8 +284,20 @@ voice_for_provider() { # voice_for_provider <name>
       ;;
     kokoro) voice="$(cfg .kokoro.voice af_heart)" ;;
     gemini) voice="$(cfg .gemini.voice Kore)" ;;
+    google)
+      voice="$(cfg .google.voice "")"
+      [[ -n "$voice" ]] || voice="$(cached_remote_voices google | preferred_google_voice)"
+      ;;
   esac
   printf '%s' "$voice"
+}
+
+# Google's list has no first-is-best order. Prefer the newest English voice
+# family the account lists, then the previous one, then whatever is first.
+preferred_google_voice() { # cached voices json on stdin -> value
+  jq -r '(map(select(.value | startswith("en-US-Chirp3-HD-")))
+          + map(select(.value | startswith("en-US-Neural2-")))
+          + .) | .[0].value // empty'
 }
 
 provider_voice_options() { # provider_voice_options <name>
@@ -322,6 +334,11 @@ refresh_remote_voices() { # refresh_remote_voices <name>
     if [[ -n "$first_voice" ]]; then
       tts_config_set .elevenlabs.voiceId "$first_voice" || true
     fi
+  fi
+  if [[ "$name" == google && -z "$(cfg .google.voice "")" ]]; then
+    local pick
+    pick="$(preferred_google_voice < "$cache")"
+    [[ -n "$pick" ]] && { tts_config_set .google.voice "$pick" || true; }
   fi
   # Return a confirmation, not the account-specific names. The cache is read
   # privately by --info and the panel reload that follows this command.
@@ -438,6 +455,7 @@ emit_info() {
                model:(if $name=="openai" then ($config.openai.model // "gpt-4o-mini-tts")
                       elif $name=="elevenlabs" then ($config.elevenlabs.model // "eleven_turbo_v2_5")
                       elif $name=="gemini" then ($config.gemini.model // "gemini-2.5-flash-preview-tts")
+                      elif $name=="google" then "Cloud Text-to-Speech"
                       else null end), usage:$usage,
                maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
@@ -492,6 +510,13 @@ emit_info() {
     gemini)
       voice="$(voice_for_provider gemini)"; voice_path=.gemini.voice
       vs="$(provider_voice_options gemini)" ;;
+    google)
+      voice_path=.google.voice
+      vs="$(cached_remote_voices google)"
+      voice="$(voice_for_provider google)"
+      if [[ -n "$voice" ]] && ! jq -e --arg v "$voice" 'any(.[]; .value == $v)' <<< "$vs" >/dev/null 2>&1; then
+        vs="$(jq -c --arg v "$voice" '[{value:$v, label:($v + " · not in the current list")}] + .' <<< "$vs")"
+      fi ;;
     *) voice=""; voice_path=.voice; vs='[]' ;;
   esac
   local speaking=false
@@ -867,8 +892,8 @@ if [[ -z "$TTS_VOICE" ]]; then
   TTS_VOICE="$(voice_for_provider "$PROVIDER")"
   export TTS_VOICE
 fi
-if [[ "$PROVIDER" == elevenlabs && -z "$TTS_VOICE" ]]; then
-  die "ElevenLabs has no selected voice; run --refresh-voices elevenlabs first"
+if [[ ( "$PROVIDER" == elevenlabs || "$PROVIDER" == google ) && -z "$TTS_VOICE" ]]; then
+  die "$PROVIDER has no selected voice; run --refresh-voices $PROVIDER first"
 fi
 [[ -z "$TTS_VOICE" || "$TTS_VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] ||
   die "invalid configured voice name"

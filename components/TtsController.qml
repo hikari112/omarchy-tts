@@ -206,7 +206,7 @@ Item {
     id: keyProc; command: []; stdinEnabled: true
     onStarted: { write(root.pendingKey + "\n"); root.pendingKey = "" }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { var result = JSON.parse(text); root.keyResult = { ok: result.ok === true, message: result.ok ? "Key saved securely." : (result.message || "Could not save the key.") } } catch (e) { root.keyResult = { ok: false, message: "Could not save the key." } } } }
-    onRunningChanged: if (!running) { root.keySaving = false; if (root.keyResult.ok && root.pendingKeyProvider === "elevenlabs") root.refreshVoices(root.pendingKeyProvider); root.pendingKeyProvider = ""; root.refresh() }
+    onRunningChanged: if (!running) { root.keySaving = false; if (root.keyResult.ok && (root.pendingKeyProvider === "elevenlabs" || root.pendingKeyProvider === "google")) root.refreshVoices(root.pendingKeyProvider); root.pendingKeyProvider = ""; root.refresh() }
   }
   Timer { id: downloadPoll; interval: 500; repeat: true; running: false; onTriggered: root.restart(downloadStatusProc) }
   Timer { id: setupJobPoll; interval: 650; repeat: true; running: false; onTriggered: root.restart(setupJobProc) }

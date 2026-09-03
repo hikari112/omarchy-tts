@@ -227,7 +227,13 @@ Bundled, all optional except piper:
 | `kokoro` | local | best quality, slow cold start, opt-in |
 | `openai` | cloud | opt-in; **text leaves your machine** |
 | `elevenlabs` | cloud | opt-in; **text leaves your machine** |
-| `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; **text leaves your machine** |
+| `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; takes a Vertex AI key by default (`speak --set .gemini.api developer` for an AI Studio key); **text leaves your machine** |
+| `google` | cloud | opt-in; Cloud Text-to-Speech, voices fetched from the account, speed slider honoured; shares the `google` key with the Vision OCR engine; **text leaves your machine** |
+
+Google lists well over a thousand voices, so `google` only fetches the
+languages you ask for: `.google.voiceLanguages` (default `en`) is a
+comma-separated list of language-code prefixes, e.g.
+`speak --set .google.voiceLanguages en,de-DE`, then refresh cloud voices.
 
 ### Bring your own
 
