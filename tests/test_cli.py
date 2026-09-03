@@ -75,10 +75,10 @@ class CliConfigTests(unittest.TestCase):
             initial = json.loads(watcher.stdout.readline())
             self.assertEqual(initial, {"status": "idle", "provider": "piper"})
 
-            self.run_speak("--set", ".provider", "espeak-ng")
+            self.run_speak("--set", ".provider", "kokoro")
             self.assertTrue(select.select([watcher.stdout], [], [], 3)[0])
             changed = json.loads(watcher.stdout.readline())
-            self.assertEqual(changed["provider"], "espeak-ng")
+            self.assertEqual(changed["provider"], "kokoro")
         finally:
             watcher.terminate()
             watcher.wait(timeout=3)
@@ -470,30 +470,6 @@ class CliConfigTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, command)
             self.assertIn("symlink", result.stderr.lower(), command)
 
-    def test_direct_providers_honour_silent_verification(self):
-        tools = Path(self.temp.name, "silent-tools")
-        tools.mkdir()
-        marker = Path(self.temp.name, "provider-args")
-        for command in ("espeak-ng", "spd-say"):
-            tool = tools / command
-            tool.write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$*\" > \"$SILENT_MARKER\"\n"
-                "cat >/dev/null\n"
-            )
-            tool.chmod(0o755)
-        env = {**self.env, "PATH": f"{tools}:{self.env['PATH']}",
-               "TTS_PLUGIN_DIR": str(ROOT), "TTS_SILENT": "1",
-               "TTS_RATE": "1.0", "TTS_VOICE": "",
-               "SILENT_MARKER": str(marker)}
-
-        subprocess.run([ROOT / "providers" / "espeak-ng"], input="Test.",
-                       env=env, text=True, check=True, capture_output=True)
-        self.assertIn("--stdout --stdin", marker.read_text())
-        subprocess.run([ROOT / "providers" / "spd"], input="Test.",
-                       env=env, text=True, check=True, capture_output=True)
-        self.assertEqual(marker.read_text().strip(), "--list-output-modules")
-
     def test_every_bundled_provider_has_a_silent_verification_path(self):
         for provider in (ROOT / "providers").iterdir():
             if not provider.is_file():
@@ -536,14 +512,13 @@ class CliConfigTests(unittest.TestCase):
         for name, body in {
             "pkexec": "exit 0",
             "pacman": "exit 0",
-            "espeak-ng": "cat >/dev/null",
         }.items():
             tool = tools / name
             tool.write_text(f"#!/usr/bin/env bash\n{body}\n")
             tool.chmod(0o755)
         self.env["PATH"] = f"{tools}:{self.env['PATH']}"
 
-        started = subprocess.run([SETUP, "start", "espeak-ng"], env=self.env,
+        started = subprocess.run([SETUP, "start", "lang:eng"], env=self.env,
                                  check=True, capture_output=True, text=True)
         payload = json.loads(started.stdout)
         self.assertTrue(payload["ok"])
@@ -728,7 +703,8 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             "cat > \"$FAKE_CURL_BODY\"\n"
             "cat <&3 > \"$FAKE_CURL_HEADERS\"\n"
             "[[ -z $dump ]] || cp \"$FAKE_RESPONSE_HEADERS\" \"$dump\"\n"
-            "[[ ${FAKE_EMPTY_AUDIO:-0} == 1 ]] || printf fake-audio > \"$output\"\n"
+            "if [[ -n ${FAKE_OUTPUT_FILE:-} ]]; then cp \"$FAKE_OUTPUT_FILE\" \"$output\"\n"
+            "elif [[ ${FAKE_EMPTY_AUDIO:-0} != 1 ]]; then printf fake-audio > \"$output\"; fi\n"
             "[[ -z $writeout ]] || printf '%s' \"${FAKE_HTTP_STATUS:-200}\"\n"
         )
         fake_curl.chmod(0o755)
@@ -741,8 +717,13 @@ class CloudProviderPrivacyTests(unittest.TestCase):
     def test_cloud_secrets_and_text_stay_out_of_curl_arguments(self):
         secret = "secret-key-that-must-not-leak"
         spoken = "private highlighted text that must not leak"
+        canned = self.root / "gemini-response.json"
+        canned.write_text(json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {
+            "mimeType": "audio/L16;codec=pcm;rate=24000",
+            "data": base64.b64encode(b"\x00\x01" * 480).decode()}}]}}]}))
         for provider, variable in (("openai", "OPENAI_API_KEY"),
-                                   ("elevenlabs", "ELEVENLABS_API_KEY")):
+                                   ("elevenlabs", "ELEVENLABS_API_KEY"),
+                                   ("gemini", "GEMINI_API_KEY")):
             env = {**os.environ,
                    "PATH": f"{self.bin}:{os.environ['PATH']}",
                    "FAKE_CURL_ARGS": str(self.args),
@@ -753,16 +734,22 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                    "TTS_PLUGIN_DIR": str(ROOT),
                    "TTS_CONFIG": str(self.config),
                    "TTS_SILENT": "1",
-                   "TTS_VOICE": "test-voice",
+                   "TTS_VOICE": "Kore" if provider == "gemini" else "test-voice",
                    variable: secret}
+            if provider == "gemini":
+                env["FAKE_OUTPUT_FILE"] = str(canned)
             result = subprocess.run([ROOT / "providers" / provider], input=spoken,
                                     text=True, capture_output=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             arguments = self.args.read_text()
             self.assertNotIn(secret, arguments)
             self.assertNotIn(spoken, arguments)
+            self.assertNotIn("key=", arguments)
             payload = json.loads(self.body.read_text())
-            self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
+            if provider == "gemini":
+                self.assertEqual(payload["contents"][0]["parts"][0]["text"], spoken)
+            else:
+                self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
             self.assertIn(secret, self.headers.read_text())
 
     def test_cloud_ocr_sends_the_image_in_the_body_and_nothing_in_argv(self):

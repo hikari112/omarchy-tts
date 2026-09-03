@@ -38,6 +38,7 @@ tts_config_init_unlocked() {
   "openai": { "voice": "alloy", "model": "gpt-4o-mini-tts" },
   "elevenlabs": { "model": "eleven_turbo_v2_5" },
   "kokoro": { "voice": "af_heart" },
+  "gemini": { "voice": "Kore", "model": "gemini-2.5-flash-preview-tts" },
   "ocr": { "engine": "tesseract", "langs": "eng", "minConfidence": 60 },
   "sanitizer": {
     "urls": "domain",
@@ -73,6 +74,9 @@ JSON
     | .elevenlabs.model //= "eleven_turbo_v2_5"
     | .kokoro //= {}
     | .kokoro.voice //= "af_heart"
+    | .gemini //= {}
+    | .gemini.voice //= "Kore"
+    | .gemini.model //= "gemini-2.5-flash-preview-tts"
     | .ocr //= {}
     | .ocr.engine //= "tesseract"
     | .ocr.langs //= "eng"
@@ -111,14 +115,14 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
   local path="$1" value="$2" tmp
   case "$path" in
     .provider|.rate|.maxChars|.piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|\
-    .espeak.voice|.spd.voice|.ocr.engine|.ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs|.ocr.minConfidence|\
+    .gemini.voice|.ocr.engine|.ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs|.ocr.minConfidence|\
     .sanitizer.urls|.sanitizer.inlineCode|.sanitizer.announceCodeBlocks|\
     .sanitizer.stripMarkdown|.sanitizer.expandUnits|.ui.lastTab|.ui.sampleText) ;;
     *) return 2 ;;
   esac
   case "$path" in
     .provider) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
-    .piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|.espeak.voice|.spd.voice)
+    .piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|.gemini.voice)
       [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]] || return 3 ;;
     .rate) awk -v value="$value" 'BEGIN { exit !(value >= 0.5 && value <= 2.0) }' || return 3 ;;
     .maxChars) [[ "$value" =~ ^[0-9]+$ ]] || return 3 ;;
