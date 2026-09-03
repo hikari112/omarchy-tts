@@ -76,6 +76,12 @@ JSON
     | .ocr //= {}
     | .ocr.engine //= "tesseract"
     | .ocr.langs //= "eng"
+    | .ocr.tesseract //= {}
+    | .ocr.tesseract.langs //= .ocr.langs
+    | .ocr.easyocr //= {}
+    | .ocr.easyocr.langs //= "eng"
+    | .ocr.openai //= {}
+    | .ocr.openai.model //= "gpt-4.1-mini"
     | .ocr.minConfidence //= 60
     | .sanitizer //= {}
     | .sanitizer.urls //= "domain"
@@ -105,7 +111,7 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
   local path="$1" value="$2" tmp
   case "$path" in
     .provider|.rate|.maxChars|.piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|\
-    .espeak.voice|.spd.voice|.ocr.engine|.ocr.langs|.ocr.minConfidence|\
+    .espeak.voice|.spd.voice|.ocr.engine|.ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs|.ocr.minConfidence|\
     .sanitizer.urls|.sanitizer.inlineCode|.sanitizer.announceCodeBlocks|\
     .sanitizer.stripMarkdown|.sanitizer.expandUnits|.ui.lastTab|.ui.sampleText) ;;
     *) return 2 ;;
@@ -117,7 +123,8 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
     .rate) awk -v value="$value" 'BEGIN { exit !(value >= 0.5 && value <= 2.0) }' || return 3 ;;
     .maxChars) [[ "$value" =~ ^[0-9]+$ ]] || return 3 ;;
     .ocr.minConfidence) [[ "$value" =~ ^[0-9]+$ ]] && [[ "$value" -le 100 ]] || return 3 ;;
-    .ocr.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
+    .ocr.engine) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
+    .ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
     .sanitizer.urls) [[ "$value" == domain || "$value" == link ]] || return 3 ;;
     .sanitizer.inlineCode|.sanitizer.announceCodeBlocks|.sanitizer.stripMarkdown|.sanitizer.expandUnits)
       [[ "$value" == true || "$value" == false ]] || return 3 ;;

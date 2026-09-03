@@ -229,6 +229,7 @@ def install_system_provider(provider: str) -> None:
 # tries to fetch the model at first use through spaCy's own downloader, which
 # shells out to pip - absent from a uv-created venv - so the backend installs
 # cleanly and then cannot speak a word.
+OCR_ENGINES = {"easyocr"}
 SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
                "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
 
@@ -248,6 +249,27 @@ def install_kokoro() -> None:
     run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
 
 
+EASYOCR_PACKAGES = ("easyocr",)
+
+
+def install_easyocr() -> None:
+    uv = ensure_uv()
+    target = ENGINE / "easyocr"
+    write_state("running", "engine", 20, "Installing the EasyOCR engine (this is large)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_venv(uv, target, KOKORO_PYTHON)
+    python = str(target / "bin/python")
+    run_checked([uv, "pip", "install", "--python", python, *EASYOCR_PACKAGES])
+    # The engine never downloads at read time - a screen capture must not turn
+    # into a surprise network fetch - so the English models are fetched here.
+    write_state("running", "engine", 70, "Downloading the English recognition models")
+    models = target / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    run_checked([python, "-c",
+                 "import sys, easyocr; easyocr.Reader(['en'], gpu=False, verbose=False, "
+                 "model_storage_directory=sys.argv[1], download_enabled=True)", str(models)])
+
+
 def prove(target: str) -> None:
     """Make the freshly installed backend speak before calling it done.
 
@@ -261,13 +283,15 @@ def prove(target: str) -> None:
     speak = Path(__file__).resolve().parent / "speak"
     if not speak.exists():
         return
-    write_state("running", "verify", 90, "Checking it can speak")
+    ocr = target in OCR_ENGINES
+    write_state("running", "verify", 90, "Checking it can read" if ocr else "Checking it can speak")
     try:
-        subprocess.run([str(speak), "--verify", provider], timeout=180,
-                       capture_output=True, check=True)
+        subprocess.run([str(speak), "--verify-ocr" if ocr else "--verify", provider],
+                       timeout=300 if ocr else 180, capture_output=True, check=True)
     except subprocess.CalledProcessError as exc:
+        verb = "read" if ocr else "speak"
         raise RuntimeError(
-            f"{provider} installed but could not speak; it is marked as not working"
+            f"{provider} installed but could not {verb}; it is marked as not working"
         ) from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"{provider} installed but did not respond in time") from exc
@@ -284,6 +308,8 @@ def worker(target: str) -> int:
             install_voice()
         elif target == "kokoro":
             install_kokoro()
+        elif target == "easyocr":
+            install_easyocr()
         elif target.startswith(LANGUAGE_PREFIX):
             install_language(target[len(LANGUAGE_PREFIX):])
         elif target in SYSTEM_PACKAGES:
@@ -305,7 +331,7 @@ def start(target: str) -> None:
         except RuntimeError as exc:
             emit(ok=False, code="unknown_target", message=str(exc))
             return
-    elif target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
+    elif target not in {"recommended", "piper", "kokoro", *OCR_ENGINES, *SYSTEM_PACKAGES}:
         emit(ok=False, code="unknown_target", message="Unknown installation target")
         return
     lock_fd = os.open(SETUP_LOCK, os.O_CREAT | os.O_WRONLY, 0o600)
