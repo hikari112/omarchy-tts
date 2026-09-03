@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, needs GEMINI_API_KEY, text leaves your machine
+# desc: opt-in cloud, Gemini TTS through Vertex AI, text leaves your machine
 # kind: cloud
 # probe: [[ -n "${GEMINI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key gemini >/dev/null 2>&1
 # vendor: Google
@@ -19,6 +19,15 @@ MODEL="$(jq -r '.gemini.model // "gemini-2.5-flash-preview-tts"' "$TTS_CONFIG" 2
 # plain identifier before either happens.
 [[ "$VOICE" =~ ^[A-Za-z]+$ ]] || { printf 'Gemini: invalid voice name\n' >&2; exit 65; }
 [[ "$MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || { printf 'Gemini: invalid model name\n' >&2; exit 65; }
+# The same model is served by two hosts that accept different keys: a
+# Vertex AI key (the default here) and a Gemini Developer / AI Studio key.
+# A key for one is refused by the other with a 403, so this is configured,
+# never guessed by trying both - each try would send the text again.
+API="$(jq -r '.gemini.api // "vertex"' "$TTS_CONFIG" 2>/dev/null)"
+case "$API" in
+  developer) URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent" ;;
+  *)         URL="https://aiplatform.googleapis.com/v1/publishers/google/models/$MODEL:generateContent" ;;
+esac
 
 # Gemini's prebuilt voices are fixed and named; the character notes are
 # Google's own one-word descriptions.
@@ -53,11 +62,11 @@ trap 'rm -f "$body" "$headers"' EXIT
 # not applied here.
 curl_rc=0
 status="$(jq -Rs --arg v "$VOICE" \
-  '{contents:[{parts:[{text:.}]}],
+  '{contents:[{role:"user", parts:[{text:.}]}],
     generationConfig:{responseModalities:["AUDIO"],
       speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:$v}}}}}' |
   curl -sS --connect-timeout 15 --max-time 180 \
-    "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent" \
+    "$URL" \
     -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$body" \
     --write-out '%{http_code}' \
     3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?

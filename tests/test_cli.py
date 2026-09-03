@@ -721,9 +721,12 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         canned.write_text(json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {
             "mimeType": "audio/L16;codec=pcm;rate=24000",
             "data": base64.b64encode(b"\x00\x01" * 480).decode()}}]}}]}))
+        wav = self.root / "google-response.json"
+        wav.write_text(json.dumps({"audioContent": base64.b64encode(b"RIFF" + b"\x00" * 40).decode()}))
         for provider, variable in (("openai", "OPENAI_API_KEY"),
                                    ("elevenlabs", "ELEVENLABS_API_KEY"),
-                                   ("gemini", "GEMINI_API_KEY")):
+                                   ("gemini", "GEMINI_API_KEY"),
+                                   ("google", "GOOGLE_API_KEY")):
             env = {**os.environ,
                    "PATH": f"{self.bin}:{os.environ['PATH']}",
                    "FAKE_CURL_ARGS": str(self.args),
@@ -734,10 +737,12 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                    "TTS_PLUGIN_DIR": str(ROOT),
                    "TTS_CONFIG": str(self.config),
                    "TTS_SILENT": "1",
-                   "TTS_VOICE": "Kore" if provider == "gemini" else "test-voice",
+                   "TTS_VOICE": {"gemini": "Kore", "google": "en-US-Chirp3-HD-Aoede"}.get(provider, "test-voice"),
                    variable: secret}
             if provider == "gemini":
                 env["FAKE_OUTPUT_FILE"] = str(canned)
+            if provider == "google":
+                env["FAKE_OUTPUT_FILE"] = str(wav)
             result = subprocess.run([ROOT / "providers" / provider], input=spoken,
                                     text=True, capture_output=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -748,6 +753,10 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             payload = json.loads(self.body.read_text())
             if provider == "gemini":
                 self.assertEqual(payload["contents"][0]["parts"][0]["text"], spoken)
+                self.assertIn("aiplatform.googleapis.com", arguments)
+            elif provider == "google":
+                self.assertEqual(payload["input"]["text"], spoken)
+                self.assertEqual(payload["voice"]["languageCode"], "en-US")
             else:
                 self.assertEqual(payload["input" if provider == "openai" else "text"], spoken)
             self.assertIn(secret, self.headers.read_text())
@@ -790,6 +799,51 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         metrics = json.loads((self.root / "ocr-metrics.json").read_text())
         self.assertEqual(metrics["provider"], engine + "-ocr")
         self.assertNotIn("base64", (self.root / "ocr-metrics.json").read_text())
+
+    def test_gemini_host_follows_the_configured_api_and_is_never_guessed(self):
+        canned = self.root / "gemini-response.json"
+        canned.write_text(json.dumps({"candidates": [{"content": {"parts": [{"inlineData": {
+            "mimeType": "audio/L16;codec=pcm;rate=24000",
+            "data": base64.b64encode(b"\x00\x01" * 480).decode()}}]}}]}))
+        self.config.write_text(json.dumps({"gemini": {"api": "developer"}}))
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_OUTPUT_FILE": str(canned),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "TTS_SILENT": "1", "TTS_VOICE": "Kore",
+               "GEMINI_API_KEY": "secret-key-that-must-not-leak"}
+        result = subprocess.run([ROOT / "providers" / "gemini"], input="Probe.",
+                                text=True, capture_output=True, env=env, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("generativelanguage.googleapis.com", self.args.read_text())
+        self.assertEqual(self.args.read_text().count("googleapis.com"), 1,
+                         "one configured host, one request")
+
+    def test_google_voice_list_is_limited_to_the_configured_languages(self):
+        listing = self.root / "voices.json"
+        listing.write_text(json.dumps({"voices": [
+            {"name": "en-US-Chirp3-HD-Aoede", "languageCodes": ["en-US"], "ssmlGender": "FEMALE"},
+            {"name": "en-GB-Neural2-A", "languageCodes": ["en-GB"], "ssmlGender": "FEMALE"},
+            {"name": "de-DE-Neural2-B", "languageCodes": ["de-DE"], "ssmlGender": "MALE"}]}))
+        self.config.write_text(json.dumps({"google": {"voiceLanguages": "en-GB,de"}}))
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_OUTPUT_FILE": str(listing),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "GOOGLE_API_KEY": "secret-key-that-must-not-leak"}
+        result = subprocess.run([ROOT / "providers" / "google", "--voices"],
+                                text=True, capture_output=True, env=env,
+                                stdin=subprocess.DEVNULL, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([v["value"] for v in json.loads(result.stdout)],
+                         ["en-GB-Neural2-A", "de-DE-Neural2-B"])
+        self.assertNotIn("secret-key", self.args.read_text())
 
     def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
         metrics = self.root / "metrics.json"
