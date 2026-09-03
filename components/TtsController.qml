@@ -122,11 +122,11 @@ Item {
   }
   function cancelSetup() { action([setupBin, "cancel"]) }
   function storeKey(provider, key) {
-    if ((provider !== "openai" && provider !== "elevenlabs") || key.length < 8) return
+    if (["openai", "elevenlabs", "google"].indexOf(provider) < 0 || key.length < 8) return
     pendingKey = key; pendingKeyProvider = provider; keySaving = true; keyResult = { ok: false, message: "" }
     keyProc.command = [setupBin, "key-store", provider]; restart(keyProc)
   }
-  function removeKey(provider) { if (provider === "openai" || provider === "elevenlabs") action([setupBin, "key-remove", provider]) }
+  function removeKey(provider) { if (["openai", "elevenlabs", "google"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
 
   Process {
     id: configProc; command: []

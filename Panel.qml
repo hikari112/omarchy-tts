@@ -30,6 +30,8 @@ Panel {
   property string confirmVoiceRemove: ""
   property string apiProvider: ""
   property string ocrApiProvider: ""
+  property string ocrApiVendor: ""
+  property string ocrConfirmKeyRemove: ""
   property string ocrConfirmInstall: ""
   property string ocrConfirmEngine: ""
   readonly property var activeOcrEngine: {
@@ -676,20 +678,24 @@ Panel {
                     font.family: root.ff; font.pixelSize: Style.font.caption
                   }
                   Text {
-                    id: engineAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: !parent.parent.parent.ready
+                    id: engineAction; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; visible: !parent.parent.parent.ready || (parent.parent.parent.cloud && parent.parent.parent.modelData.keySource === "keyring")
                     text: { var d = parent.parent.parent
                             if (controller.verifying === "ocr:" + d.modelData.name) return "Testing…"
                             if (d.modelData.status === "nokey") return "Add key"
                             if (d.failing || d.untested) return "Test"
+                            if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
                             return "Install" }
                     color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
                         var row = parent.parent.parent.parent
                         if (row.modelData.status === "nokey") {
                           root.ocrApiProvider = row.modelData.name
+                          root.ocrApiVendor = row.modelData.vendor || row.modelData.name
                           controller.keyResult = ({ ok: false, message: "" })
                         } else if (row.failing || row.untested) {
                           controller.verifyOcrEngine(row.modelData.name)
+                        } else if (row.cloud && row.modelData.keySource === "keyring") {
+                          root.ocrConfirmKeyRemove = row.modelData.name
                         } else {
                           root.ocrConfirmEngine = row.modelData.name
                           root.ocrConfirmInstall = row.modelData.install
@@ -716,9 +722,21 @@ Panel {
               }
             }
           }
+          Rectangle {
+            width: parent.width; height: ocrKeyRemoveRow.implicitHeight + 16; radius: 6
+            visible: root.ocrConfirmKeyRemove !== ""; color: root.tint(0.08)
+            border.width: 1; border.color: Color.popups.border
+            Row {
+              id: ocrKeyRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
+              Text { text: "Remove the " + root.ocrConfirmKeyRemove + " API key?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
+              Button { text: "Cancel"; bordered: true; onClicked: root.ocrConfirmKeyRemove = "" }
+              Button { text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.ocrConfirmKeyRemove); root.ocrConfirmKeyRemove = "" } }
+            }
+          }
           ApiKeyDialog {
             width: parent.width; visible: root.ocrApiProvider !== ""
-            controller: controller; provider: root.ocrApiProvider; vendor: root.activeOcrEngine && root.activeOcrEngine.vendor ? root.activeOcrEngine.vendor : root.ocrApiProvider; foreground: root.fg
+            controller: controller; provider: root.ocrApiProvider; vendor: root.ocrApiVendor; foreground: root.fg
+            sends: "Screenshots of captured regions, windows or screens, and a test image,"
             onClosed: root.ocrApiProvider = ""
           }
           Text {

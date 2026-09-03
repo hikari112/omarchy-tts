@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Small integration checks for the public CLI/config boundary."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -765,6 +766,11 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             self.assertIn(secret, self.headers.read_text())
 
     def test_cloud_ocr_sends_the_image_in_the_body_and_nothing_in_argv(self):
+        for engine, variable in (("openai", "OPENAI_API_KEY"), ("google", "GOOGLE_API_KEY")):
+            with self.subTest(engine=engine):
+                self.cloud_ocr_check(engine, variable)
+
+    def cloud_ocr_check(self, engine, variable):
         secret = "secret-key-that-must-not-leak"
         image = (ROOT / "lib" / "ocr-probe.png").read_bytes()
         self.body.write_text("")
@@ -775,22 +781,27 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                "FAKE_CURL_HEADERS": str(self.headers),
                "FAKE_RESPONSE_HEADERS": str(self.response_headers),
                "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
-               "TTS_CONFIG": str(self.config), "OPENAI_API_KEY": secret,
+               "TTS_CONFIG": str(self.config), variable: secret,
                "FAKE_EMPTY_AUDIO": "1",
                "TTS_METRICS_FILE": str(self.root / "ocr-metrics.json")}
-        result = subprocess.run([ROOT / "ocr" / "openai"], input=image,
+        result = subprocess.run([ROOT / "ocr" / engine], input=image,
                                 capture_output=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         arguments = self.args.read_text()
         self.assertNotIn(secret, arguments)
-        self.assertNotIn("base64,", arguments, "the screenshot must not travel through argv")
+        self.assertNotIn("key=", arguments, "the key must not ride in the URL")
+        encoded = base64.b64encode(image).decode()[:64]
+        self.assertNotIn(encoded, arguments, "the screenshot must not travel through argv")
         payload = json.loads(self.body.read_text())
-        parts = payload["messages"][0]["content"]
-        image_url = next(p["image_url"]["url"] for p in parts if p["type"] == "image_url")
-        self.assertTrue(image_url.startswith("data:image/png;base64,"))
+        if engine == "openai":
+            parts = payload["messages"][0]["content"]
+            image_url = next(p["image_url"]["url"] for p in parts if p["type"] == "image_url")
+            self.assertTrue(image_url.startswith("data:image/png;base64," + encoded))
+        else:
+            self.assertTrue(payload["requests"][0]["image"]["content"].startswith(encoded))
         self.assertIn(secret, self.headers.read_text())
         metrics = json.loads((self.root / "ocr-metrics.json").read_text())
-        self.assertEqual(metrics["provider"], "openai-ocr")
+        self.assertEqual(metrics["provider"], engine + "-ocr")
         self.assertNotIn("base64", (self.root / "ocr-metrics.json").read_text())
 
     def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):

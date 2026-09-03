@@ -8,6 +8,9 @@ Rectangle {
   required property var controller
   property string provider: ""
   property string vendor: provider
+  // What this key lets the plugin send. A speech key sends text; an OCR key
+  // sends pictures of the screen, and the dialog must say which.
+  property string sends: "Highlighted text and test samples"
   property color foreground: Color.popups.text
   signal closed
   width: parent ? parent.width : implicitWidth
@@ -25,7 +28,7 @@ Rectangle {
     Text { text: "Add " + root.vendor + " API key"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle }
     Text {
       width: parent.width; wrapMode: Text.WordWrap
-      text: "The key is saved in the system keyring and is never written to settings or logs. Highlighted text and test samples will be sent to " + root.vendor + " and may incur charges."
+      text: "The key is saved in the system keyring and is never written to settings or logs. " + root.sends + " will be sent to " + root.vendor + " and may incur charges."
       color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
     TextField {
