@@ -230,6 +230,8 @@ def install_system_provider(provider: str) -> None:
 # shells out to pip - absent from a uv-created venv - so the backend installs
 # cleanly and then cannot speak a word.
 OCR_ENGINES = {"easyocr"}
+# Every cloud key the plugin will store; the google key is OCR-only.
+CLOUD_KEYS = ("openai", "elevenlabs", "google")
 SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
                "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
 
@@ -406,7 +408,7 @@ def cancel() -> None:
 
 
 def key_store(provider: str) -> None:
-    if provider not in {"openai", "elevenlabs"}:
+    if provider not in CLOUD_KEYS:
         emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
         return
     key = sys.stdin.readline().rstrip("\r\n")
@@ -428,7 +430,7 @@ def key_store(provider: str) -> None:
 
 
 def key_remove(provider: str) -> None:
-    if provider not in {"openai", "elevenlabs"}:
+    if provider not in CLOUD_KEYS:
         emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
         return
     tool = shutil.which("secret-tool")
@@ -447,7 +449,7 @@ def cleanup() -> None:
     result["removed"].append("shortcuts")
     tool = shutil.which("secret-tool")
     if tool:
-        for provider in ("openai", "elevenlabs"):
+        for provider in CLOUD_KEYS:
             subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
                            capture_output=True)
         result["removed"].append("API keys")

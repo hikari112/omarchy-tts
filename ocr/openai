@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, reads screenshots with OpenAI vision, most accurate
+# desc: opt-in cloud, transcribes screenshots with an OpenAI vision model
 # kind: cloud
 # probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
 # vendor: OpenAI

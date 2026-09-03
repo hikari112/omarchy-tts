@@ -181,13 +181,14 @@ not an option for you.
 ### Recognition engines
 
 Engines are chosen on the Screen tab the same way voices are: listed, proven,
-then selected. One is bundled; the other two are opt-in.
+then selected. One is bundled; the others are opt-in.
 
 | Engine | Kind | When to use it |
 |---|---|---|
 | `tesseract` | local, default | Fast and deterministic on ordinary screen text. |
 | `easyocr` | local, opt-in | Stylised, italic, or low-contrast text the default gives up on — game dialogue, posters, video frames. Costs about 6 GB of disk in a private Python environment and several seconds of model loading per capture. |
-| `openai` | cloud, opt-in | The most accurate of the three. **Every capture is sent as an image to OpenAI**, including `--window` and `--screen`, which ship your whole display. Uses the same key as the OpenAI speech provider. |
+| `google` | cloud, opt-in | Google Cloud Vision, a purpose-built OCR API with per-word confidence, so the confidence floor applies exactly as it does locally. **Every capture is sent as an image to Google**, including `--window` and `--screen`. Needs a Google Cloud project with the Vision API enabled and an API key (1,000 images a month free). |
+| `openai` | cloud, opt-in | A vision model transcribing the image; accurate, but reports no confidence, so the floor cannot apply. **Every capture is sent as an image to OpenAI**, including `--window` and `--screen`. Uses the same key as the OpenAI speech provider. |
 
 The Screen tab says plainly which of these is true for the engine you have
 selected; a cloud engine turns the "captures are read on this computer" line

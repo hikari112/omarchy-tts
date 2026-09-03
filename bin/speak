@@ -253,7 +253,7 @@ verify_provider() { # verify_provider <name>
 
 key_source() { # env | keyring | config | none
   local name="$1" env_name=""
-  case "$name" in openai) env_name=OPENAI_API_KEY ;; elevenlabs) env_name=ELEVENLABS_API_KEY ;; *) return ;; esac
+  case "$name" in openai) env_name=OPENAI_API_KEY ;; elevenlabs) env_name=ELEVENLABS_API_KEY ;; google) env_name=GOOGLE_API_KEY ;; *) return ;; esac
   [[ -n "${!env_name:-}" ]] && { printf env; return; }
   if command -v secret-tool >/dev/null 2>&1 &&
       secret-tool lookup service omarchy-tts key "$name" >/dev/null 2>&1; then
