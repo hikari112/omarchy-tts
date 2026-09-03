@@ -43,10 +43,6 @@ KOKORO_PYTHON = "3.12"
 JOB_PID = 0
 JOB_IDENTITY = ""
 
-SYSTEM_PACKAGES = {
-    "espeak-ng": ["espeak-ng"],
-    "spd": ["speech-dispatcher"],
-}
 
 
 def ensure_private_runtime() -> None:
@@ -216,13 +212,6 @@ def install_language(code: str) -> None:
         subprocess.run([str(speak), "--refresh-languages"], capture_output=True, timeout=60)
 
 
-def install_system_provider(provider: str) -> None:
-    packages = SYSTEM_PACKAGES[provider]
-    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
-    if not pkexec or not pacman:
-        raise RuntimeError("Graphical package installation is unavailable")
-    write_state("running", "permission", 10, "Waiting for administrator approval")
-    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", *packages])
 
 
 # Kokoro's English G2P needs a spaCy model that is not on PyPI. Left out, it
@@ -231,7 +220,7 @@ def install_system_provider(provider: str) -> None:
 # cleanly and then cannot speak a word.
 OCR_ENGINES = {"easyocr"}
 # Every cloud key the plugin will store; the google key is OCR-only.
-CLOUD_KEYS = ("openai", "elevenlabs", "google")
+CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini")
 SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
                "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
 
@@ -314,8 +303,6 @@ def worker(target: str) -> int:
             install_easyocr()
         elif target.startswith(LANGUAGE_PREFIX):
             install_language(target[len(LANGUAGE_PREFIX):])
-        elif target in SYSTEM_PACKAGES:
-            install_system_provider(target)
         else:
             raise RuntimeError("Unknown installation target")
         prove(target)
@@ -333,7 +320,7 @@ def start(target: str) -> None:
         except RuntimeError as exc:
             emit(ok=False, code="unknown_target", message=str(exc))
             return
-    elif target not in {"recommended", "piper", "kokoro", *OCR_ENGINES, *SYSTEM_PACKAGES}:
+    elif target not in {"recommended", "piper", "kokoro", *OCR_ENGINES}:
         emit(ok=False, code="unknown_target", message="Unknown installation target")
         return
     lock_fd = os.open(SETUP_LOCK, os.O_CREAT | os.O_WRONLY, 0o600)

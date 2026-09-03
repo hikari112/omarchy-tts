@@ -117,16 +117,16 @@ Item {
   function setBinding(actionName, chord) { action([bindingsBin, "set", actionName, chord]) }
   function startSetup(target) { error = ""; setupStartProc.command = [setupBin, "start", target]; restart(setupStartProc); setupJob = { status: "starting", step: "prepare", progress: 1, message: "Preparing setup" }; setupJobPoll.running = true }
   function installProvider(provider) {
-    var targets = ({ "piper": "piper", "kokoro": "kokoro", "espeak-ng": "espeak-ng", "spd": "spd", "easyocr": "easyocr" })
+    var targets = ({ "piper": "piper", "kokoro": "kokoro", "easyocr": "easyocr" })
     if (targets[provider]) startSetup(targets[provider])
   }
   function cancelSetup() { action([setupBin, "cancel"]) }
   function storeKey(provider, key) {
-    if (["openai", "elevenlabs", "google"].indexOf(provider) < 0 || key.length < 8) return
+    if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) < 0 || key.length < 8) return
     pendingKey = key; pendingKeyProvider = provider; keySaving = true; keyResult = { ok: false, message: "" }
     keyProc.command = [setupBin, "key-store", provider]; restart(keyProc)
   }
-  function removeKey(provider) { if (["openai", "elevenlabs", "google"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
+  function removeKey(provider) { if (["openai", "elevenlabs", "google", "gemini"].indexOf(provider) >= 0) action([setupBin, "key-remove", provider]) }
 
   Process {
     id: configProc; command: []

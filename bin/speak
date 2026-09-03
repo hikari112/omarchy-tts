@@ -253,7 +253,7 @@ verify_provider() { # verify_provider <name>
 
 key_source() { # env | keyring | config | none
   local name="$1" env_name=""
-  case "$name" in openai) env_name=OPENAI_API_KEY ;; elevenlabs) env_name=ELEVENLABS_API_KEY ;; google) env_name=GOOGLE_API_KEY ;; *) return ;; esac
+  case "$name" in openai) env_name=OPENAI_API_KEY ;; elevenlabs) env_name=ELEVENLABS_API_KEY ;; google) env_name=GOOGLE_API_KEY ;; gemini) env_name=GEMINI_API_KEY ;; *) return ;; esac
   [[ -n "${!env_name:-}" ]] && { printf env; return; }
   if command -v secret-tool >/dev/null 2>&1 &&
       secret-tool lookup service omarchy-tts key "$name" >/dev/null 2>&1; then
@@ -283,8 +283,7 @@ voice_for_provider() { # voice_for_provider <name>
       [[ -n "$voice" ]] || voice="$(cached_remote_voices elevenlabs | jq -r '.[0].value // empty')"
       ;;
     kokoro) voice="$(cfg .kokoro.voice af_heart)" ;;
-    espeak-ng) voice="$(cfg .espeak.voice en-us)" ;;
-    spd) voice="$(cfg .spd.voice default)" ;;
+    gemini) voice="$(cfg .gemini.voice Kore)" ;;
   esac
   printf '%s' "$voice"
 }
@@ -438,6 +437,7 @@ emit_info() {
                keySource:$keySource,
                model:(if $name=="openai" then ($config.openai.model // "gpt-4o-mini-tts")
                       elif $name=="elevenlabs" then ($config.elevenlabs.model // "eleven_turbo_v2_5")
+                      elif $name=="gemini" then ($config.gemini.model // "gemini-2.5-flash-preview-tts")
                       else null end), usage:$usage,
                maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
@@ -489,11 +489,9 @@ emit_info() {
     kokoro)
       voice="$(voice_for_provider kokoro)"; voice_path=.kokoro.voice
       vs='["af_heart","af_bella","af_nicole","af_sarah","am_adam","am_michael","bf_emma","bf_isabella","bm_george","bm_lewis"]' ;;
-    espeak-ng)
-      voice="$(voice_for_provider espeak-ng)"; voice_path=.espeak.voice
-      vs="$(espeak-ng --voices 2>/dev/null | awk 'NR>1 {print $4}' | sort -u | jq -Rsc 'split("\n") | map(select(length>0))')" ;;
-    spd)
-      voice="$(voice_for_provider spd)"; voice_path=.spd.voice; vs="$(jq -nc --arg voice "$voice" '[$voice]')" ;;
+    gemini)
+      voice="$(voice_for_provider gemini)"; voice_path=.gemini.voice
+      vs="$(provider_voice_options gemini)" ;;
     *) voice=""; voice_path=.voice; vs='[]' ;;
   esac
   local speaking=false

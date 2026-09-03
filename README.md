@@ -60,8 +60,7 @@ The base plugin uses `bash`, `wl-clipboard`, `jq`, `python3`, `flock`
 from its configured Arch repositories.
 
 The guided local-engine setup is always explicit. It may request administrator
-approval through `pkexec` to install `uv`, `espeak-ng`, or
-`speech-dispatcher`, then uses `uv` to create an isolated environment under
+approval through `pkexec` to install `uv`, then uses `uv` to create an isolated environment under
 `~/.local/share/omarchy-tts/`. The release pins its direct engine packages to
 known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses `kokoro==0.9.4` and
 `soundfile==0.14.0` in a supported Python 3.12 environment, plus its pinned
@@ -92,7 +91,7 @@ speak --snip                  # drag a region, OCR it, speak it
 speak --window                # read the focused window
 speak --stop                  # stop
 speak --list                  # list providers
-speak --provider espeak-ng    # override for one run
+speak --provider kokoro       # override for one run
 speak --usage elevenlabs      # refresh paid-plan usage (JSON)
 speak --refresh-voices elevenlabs # refresh the account's private voice list
 ```
@@ -225,11 +224,10 @@ Bundled, all optional except piper:
 | Provider | Kind | Notes |
 |----------|------|-------|
 | `piper` | local | **default** — neural, fast, ~60 MB/voice |
-| `espeak-ng` | local | robotic but instant; `omarchy pkg add espeak-ng` |
-| `spd` | local | speech-dispatcher, the standard a11y stack |
 | `kokoro` | local | best quality, slow cold start, opt-in |
 | `openai` | cloud | opt-in; **text leaves your machine** |
 | `elevenlabs` | cloud | opt-in; **text leaves your machine** |
+| `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; **text leaves your machine** |
 
 ### Bring your own
 
