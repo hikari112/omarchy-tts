@@ -95,7 +95,7 @@ JSON
     | .rate = (if (.rate|type)=="number" and .rate>=0.5 and .rate<=2 then .rate else 1.0 end)
     | .maxChars = (if (.maxChars|type)=="number" and .maxChars>=0 then (.maxChars|floor) else 0 end)
     | .ocr.minConfidence = (if (.ocr.minConfidence|type)=="number" and .ocr.minConfidence>=0 and .ocr.minConfidence<=100 then (.ocr.minConfidence|floor) else 60 end)
-    | .ui.lastTab = (if (.ui.lastTab|type)=="number" and .ui.lastTab>=0 and .ui.lastTab<=4 then (.ui.lastTab|floor) else 0 end)
+    | .ui.lastTab = (if (.ui.lastTab|type)=="number" and .ui.lastTab>=0 and .ui.lastTab<=5 then (.ui.lastTab|floor) else 0 end)
   ' "$CONFIG" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$CONFIG"; then
     return 0
   fi
@@ -128,7 +128,7 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
     .sanitizer.urls) [[ "$value" == domain || "$value" == link ]] || return 3 ;;
     .sanitizer.inlineCode|.sanitizer.announceCodeBlocks|.sanitizer.stripMarkdown|.sanitizer.expandUnits)
       [[ "$value" == true || "$value" == false ]] || return 3 ;;
-    .ui.lastTab) [[ "$value" =~ ^[0-4]$ ]] || return 3 ;;
+    .ui.lastTab) [[ "$value" =~ ^[0-5]$ ]] || return 3 ;;
   esac
   tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
   if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ || "$value" == true || "$value" == false ]]; then

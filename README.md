@@ -127,7 +127,8 @@ a change straight after making it:
   are installed, with size and a one-click download that reports progress and
   verifies the md5 before installing.
 - **Text** — live before/after sanitizer preview and readability rules.
-- **Screen** — OCR engine, confidence floor, and per-engine language selection.
+- **Screen** — OCR engine and confidence floor.
+- **Languages** — which languages the selected engine recognises, and installing more.
 - **Keys** — capture, install, update, or remove the plugin-owned shortcuts.
 
 Settings write on change; there is no Save button. Configuration is created
