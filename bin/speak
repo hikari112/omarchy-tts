@@ -780,7 +780,30 @@ exec {speech_lock_fd}>&-
 wait "$child"
 rc=$?
 
-# Real use is the best evidence there is. A cancellation is not a failure.
+# Whether this run was cancelled is a question about ownership, not about the
+# exit status. A provider that execs a player does not necessarily die by the
+# signal we sent it: mpv catches SIGTERM and exits 4 of its own accord, so
+# stopping cloud speech looked exactly like a backend that could not speak.
+# Ownership answers it for every provider without enumerating anyone's codes.
+speech_cancelled=0
+exec {speech_lock_fd}>"$SPEECH_LOCK"
+flock "$speech_lock_fd"
+current_owner="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [[ -n "$speech_owner" && "$current_owner" != "$speech_owner" ]]; then
+  # Someone stopped us or replaced us; the state is already theirs to own.
+  speech_cancelled=1
+else
+  rm -f "$PID_FILE"
+  set_status idle
+fi
+flock -u "$speech_lock_fd"
+exec {speech_lock_fd}>&-
+
+if [[ $speech_cancelled -eq 1 ]]; then
+  exit 0
+fi
+
+# Real use is the best evidence there is.
 if [[ $rc -eq 0 ]]; then
   health_set "$PROVIDER" ok ""
 elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 74 && $rc -ne 69 ]]; then
@@ -796,18 +819,6 @@ case "$rc" in
   75) notify-send -a "Speak" "$PROVIDER rate limit reached" \
         "Wait for the limit to reset. Provider health was preserved." 2>/dev/null ;;
 esac
-# A superseding invocation owns these files now. Never erase its state when
-# this older provider finally notices that it was cancelled.
-exec {speech_lock_fd}>"$SPEECH_LOCK"
-flock "$speech_lock_fd"
-current_owner="$(cat "$PID_FILE" 2>/dev/null || true)"
-if [[ "$current_owner" == "$speech_owner" ]]; then
-  rm -f "$PID_FILE"
-  set_status idle
-fi
-flock -u "$speech_lock_fd"
-exec {speech_lock_fd}>&-
-
 # 143/137 = we cancelled it on purpose, not a failure
 [[ $rc -eq 143 || $rc -eq 137 ]] && exit 0
 exit $rc

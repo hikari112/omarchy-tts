@@ -898,5 +898,66 @@ o.bind("SUPER + ALT + X", "Stop speaking", "speak --stop")
         self.assertEqual(self.lua.read_text(), before)
 
 
+class CancelledSpeechTests(unittest.TestCase):
+    """Stopping speech must never be recorded as a broken provider.
+
+    A provider that execs a player does not necessarily die by the signal sent
+    to it. mpv catches SIGTERM and exits 4, so stopping cloud speech marked the
+    backend failing, the panel then offered only "Replace key", and the
+    provider could not be selected again.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        (self.home / "run").mkdir(parents=True)
+        self.providers = self.home / "config" / "omarchy-tts" / "providers"
+        self.providers.mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_provider(self, name, body):
+        path = self.providers / name
+        path.write_text("#!/usr/bin/env bash\n"
+                        f"# desc: test provider {name}\n"
+                        "# kind: local\n"
+                        "# probe: true\n"
+                        f"{body}\n")
+        path.chmod(0o755)
+
+    def status_of(self, name):
+        info = json.loads(subprocess.run([SPEAK, "--info"], text=True,
+                                         capture_output=True, env=self.env).stdout)
+        return next(p["status"] for p in info["providers"] if p["name"] == name)
+
+    def test_stopping_a_signal_translating_provider_is_not_a_failure(self):
+        # Exits 4 on SIGTERM instead of dying by signal, exactly as mpv does.
+        self.write_provider("mpvlike",
+                            'trap "exit 4" TERM\ncat > /dev/null\nsleep 30 &\nwait $!')
+        speaking = subprocess.Popen([SPEAK, "--provider", "mpvlike"],
+                                    stdin=subprocess.PIPE, text=True, env=self.env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        speaking.stdin.write("Interrupt me.\n")
+        speaking.stdin.close()
+        time.sleep(1.5)
+        subprocess.run([SPEAK, "--stop"], env=self.env, capture_output=True)
+        speaking.wait(timeout=30)
+        self.assertNotEqual(self.status_of("mpvlike"), "failing",
+                            "a stopped provider was recorded as broken")
+
+    def test_a_genuine_failure_is_still_recorded(self):
+        self.write_provider("brokenlike", "cat > /dev/null; exit 4")
+        subprocess.run([SPEAK, "--provider", "brokenlike"], input="Hello.",
+                       text=True, env=self.env, capture_output=True)
+        self.assertEqual(self.status_of("brokenlike"), "failing",
+                         "an uncancelled failure must still mark the provider")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
