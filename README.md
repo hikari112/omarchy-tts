@@ -31,8 +31,8 @@ TTS keeps that interaction consistent even when the source changes:
 | What you indicate | What the plugin does |
 |---|---|
 | Selected or copied text | Reads the text directly |
-| A copied image | Runs local OCR, then reads the result |
-| A dragged region | Captures those pixels, runs local OCR, then reads them |
+| A copied image | Runs OCR (local by default), then reads the result |
+| A dragged region | Captures those pixels, runs OCR, then reads them |
 | The focused window or monitor | Captures it without requiring pointer precision |
 
 This is assistive desktop reading for dyslexia, ADHD, low vision, eye strain,
@@ -60,7 +60,8 @@ The base plugin uses `bash`, `wl-clipboard`, `jq`, `python3`, `flock`
 from its configured Arch repositories.
 
 The guided local-engine setup is always explicit. It may request administrator
-approval through `pkexec` to install `uv`, then uses `uv` to create an isolated
+approval through `pkexec` to install `uv` or a `tesseract-data-*` language
+pack (names are checked against `pacman -Si` first), then uses `uv` to create an isolated
 environment under `~/.local/share/omarchy-tts/`. The release pins its direct
 engine packages to known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses
 `kokoro==0.9.4` and `soundfile==0.14.0` in a supported Python 3.12 environment,
@@ -89,11 +90,16 @@ speak --selection             # speak the highlighted text
 speak --clipboard             # speak clipboard text, or OCR a clipboard image
 speak --snip                  # drag a region, OCR it, speak it
 speak --window                # read the focused window
+speak --screen                # read the focused monitor
+speak --ocr-engine easyocr --snip  # one capture through another engine
 speak --stop                  # stop
 speak --list                  # list providers
 speak --provider kokoro       # override for one run
+speak --verify kokoro         # prove a provider can speak (silent)
+speak --verify-ocr easyocr    # prove an engine can read a known image
 speak --usage elevenlabs      # refresh paid-plan usage (JSON)
-speak --refresh-voices elevenlabs # refresh the account's private voice list
+speak --refresh-voices google # refresh a cloud provider's voice list
+speak --refresh-languages     # re-read which OCR languages are installed
 ```
 
 ## Voices
@@ -148,11 +154,11 @@ a second implementation of it.
 
 | Text | Screen |
 |---|---|
-| ![Live sanitizer preview and text rules](docs/screenshots/text.png) | ![Local OCR confidence and language settings](docs/screenshots/screen.png) |
+| ![Live sanitizer preview and text rules](docs/screenshots/text.png) | ![Recognition engines with privacy notes and the confidence floor](docs/screenshots/screen.png) |
 
-| Keys |
-|---|
-| ![Managed on-demand reading shortcuts](docs/screenshots/keys.png) |
+| Languages | Keys |
+|---|---|
+| ![Recognition languages for the selected engine](docs/screenshots/languages.png) | ![Managed on-demand reading shortcuts](docs/screenshots/keys.png) |
 
 The Languages view is separate from Screen so recognition-engine selection
 and language-pack browsing remain focused tasks.
@@ -282,10 +288,10 @@ OpenAI request and token limits update from response headers; organization-wide
 usage is deliberately not queried with the normal speech key because that API
 requires a separate organization admin key.
 
-ElevenLabs voice names are fetched only when **Refresh cloud voices** is
-pressed (or `speak --refresh-voices elevenlabs` is run). Merely opening the
-panel never contacts a provider. The account-specific list is kept in the
-private cache and refresh output reports only its item count.
+ElevenLabs and Google Cloud voice lists are fetched only when **Refresh cloud
+voices** is pressed (or `speak --refresh-voices <provider>` is run). Merely
+opening the panel never contacts a provider. The account-specific list is kept
+in the private cache and refresh output reports only its item count.
 
 Cloud telemetry and voice metadata are stored mode 0600 under
 `~/.cache/omarchy-tts/`. Telemetry contains counts, timestamps, request IDs,
