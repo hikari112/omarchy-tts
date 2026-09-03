@@ -11,17 +11,22 @@ import argparse
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
+os.umask(0o077)
+
 PLUGIN = Path(__file__).resolve().parents[1]
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 # Without a session runtime dir, fall back to an owner-only XDG state
 # directory rather than sticky /tmp.
 RUNTIME = (Path(os.environ["XDG_RUNTIME_DIR"]) / "omarchy-tts"
@@ -33,6 +38,8 @@ ENGINE = DATA / "engines"
 VOICES = DATA / "voices" / "piper"
 STATE = RUNTIME / "setup.json"
 SETUP_LOCK = RUNTIME / "setup.lock"
+HEALTH = CACHE_HOME / "omarchy-tts" / "health.json"
+VOICE_CACHE = CACHE_HOME / "omarchy-tts" / "voices"
 VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
 BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
 DEFAULT_VOICE = "en_US-amy-medium"
@@ -41,11 +48,20 @@ KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")
 KOKORO_PYTHON = "3.12"
 JOB_PID = 0
 JOB_IDENTITY = ""
+JOB_TARGET = ""
+HELPER_TIMEOUT = 30
+INSTALL_TIMEOUT = 1800
+CONTROL_JSON_MAX_BYTES = 65_536
+HEALTH_MAX_BYTES = 1_048_576
+SETUP_LOCK_FD_ENV = "OMARCHY_TTS_SETUP_LOCK_FD"
 
-SYSTEM_PACKAGES = {
-    "espeak-ng": ["espeak-ng"],
-    "spd": ["speech-dispatcher"],
-}
+
+class SetupCancelled(Exception):
+    """Raised from the worker's signal handler so transactions can roll back."""
+
+
+def cancel_worker_signal(_signum, _frame) -> None:
+    raise SetupCancelled
 
 
 def ensure_private_runtime() -> None:
@@ -57,20 +73,95 @@ def ensure_private_runtime() -> None:
     RUNTIME.chmod(0o700)
 
 
+def open_private_lock(path: Path) -> int:
+    """Open an owner-only regular lock file without following a symlink."""
+    flags = os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise RuntimeError(f"Unsafe lock file: {path}")
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def claim_inherited_setup_lock() -> int:
+    """Verify and retain the lock descriptor supplied by start()."""
+    raw_descriptor = os.environ.pop(SETUP_LOCK_FD_ENV, "")
+    if not re.fullmatch(r"[0-9]+", raw_descriptor):
+        raise RuntimeError("Setup worker has no inherited lock")
+    descriptor = int(raw_descriptor)
+    if descriptor <= 2:
+        raise RuntimeError("Setup worker received an invalid lock")
+    try:
+        inherited = os.fstat(descriptor)
+        expected = SETUP_LOCK.stat()
+    except OSError as exc:
+        raise RuntimeError("Setup worker lock is unavailable") from exc
+    if (not stat.S_ISREG(inherited.st_mode)
+            or inherited.st_uid != os.getuid()
+            or (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino)):
+        raise RuntimeError("Setup worker received the wrong lock")
+    try:
+        # The inherited open-file description already owns this lock. Calling
+        # flock again both verifies that fact and safely acquires it for a
+        # direct, correctly supervised invocation.
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise RuntimeError("Another setup worker owns the lock") from exc
+    return descriptor
+
+
 def emit(**values) -> None:
     print(json.dumps(values, ensure_ascii=False), flush=True)
 
 
-def atomic_json(path: Path, value: dict) -> None:
-    ensure_private_runtime()
+def replace_json(path: Path, value: dict) -> None:
+    """Durably replace a small private JSON control file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
         os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def read_small_json(path: Path, maximum: int = CONTROL_JSON_MAX_BYTES):
+    """Parse a bounded, owner-controlled regular file without following links."""
+    flags = (os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_size > maximum):
+            raise ValueError(f"Unsafe or oversized JSON control file: {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            return json.loads(stream.read(maximum + 1))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    ensure_private_runtime()
+    replace_json(path, value)
 
 
 def write_state(status: str, step: str = "", progress: int = 0,
@@ -78,6 +169,8 @@ def write_state(status: str, step: str = "", progress: int = 0,
     if JOB_PID:
         extra.setdefault("pid", JOB_PID)
         extra.setdefault("processIdentity", JOB_IDENTITY)
+        extra.setdefault("target", JOB_TARGET)
+        extra.setdefault("cancellable", True)
     current = {"status": status, "step": step, "progress": progress,
                "message": message, **extra}
     atomic_json(STATE, current)
@@ -85,27 +178,48 @@ def write_state(status: str, step: str = "", progress: int = 0,
 
 def process_identity(pid: int) -> str:
     try:
-        return Path(f"/proc/{pid}/stat").read_text().split()[21]
+        # The command name in /proc/<pid>/stat is parenthesized and may itself
+        # contain spaces. Split after its final ')' so field 22 (start time)
+        # cannot shift underneath us.
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return fields[19]
     except (OSError, IndexError):
         return ""
+
+
+def process_group(pid: int) -> int:
+    try:
+        return os.getpgid(pid) if pid > 1 else 0
+    except (OSError, ValueError):
+        return 0
 
 
 def piper_binary() -> Path:
     return ENGINE / "piper" / "bin" / "piper"
 
 
+def nonempty_file(path: Path) -> bool:
+    """Treat concurrent removal or an unreadable model as not installed."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def status() -> dict:
     voice = VOICES / f"{DEFAULT_VOICE}.onnx"
     legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
     engine_ready = os.access(piper_binary(), os.X_OK) or shutil.which("piper") is not None
-    voice_ready = ((voice.is_file() and voice.stat().st_size > 0)
-                   or (legacy_voice.is_file() and legacy_voice.stat().st_size > 0))
+    voice_ready = ((nonempty_file(voice) and nonempty_file(Path(f"{voice}.json")))
+                   or (nonempty_file(legacy_voice)
+                       and nonempty_file(Path(f"{legacy_voice}.json"))))
     bindings = False
     try:
         result = subprocess.run([BINDINGS_TOOL, "status"], text=True,
                                 capture_output=True, timeout=3)
         bindings = result.returncode == 0 and json.loads(result.stdout).get("installed", False)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, TypeError, AttributeError,
+            subprocess.TimeoutExpired):
         pass
     return {
         "ok": True,
@@ -118,11 +232,20 @@ def status() -> dict:
     }
 
 
-def run_checked(argv: list[str], *, env: dict | None = None) -> None:
-    result = subprocess.run(argv, env=env, text=True, capture_output=True)
-    if result.returncode:
-        message = result.stderr.strip() or result.stdout.strip() or f"{argv[0]} failed"
-        raise RuntimeError(message[-800:])
+def run_checked(argv: list[str], *, env: dict | None = None,
+                timeout: int = INSTALL_TIMEOUT) -> None:
+    """Run an installer without retaining an unbounded log in memory."""
+    with tempfile.TemporaryFile() as log:
+        try:
+            result = subprocess.run(argv, env=env, stdout=log,
+                                    stderr=subprocess.STDOUT, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{argv[0]} did not finish within {timeout} seconds") from exc
+        if result.returncode:
+            length = log.tell()
+            log.seek(max(0, length - 8192))
+            message = log.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError((message or f"{argv[0]} failed")[-800:])
 
 
 def ensure_uv() -> str:
@@ -132,7 +255,9 @@ def ensure_uv() -> str:
     pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
     if not pkexec or not pacman:
         raise RuntimeError("The uv installer is unavailable")
-    write_state("running", "permission", 5, "Administrator approval is required to install uv")
+    write_state("running", "permission", 5,
+                "Administrator approval is required to install uv",
+                cancellable=False)
     run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", "uv"])
     uv = shutil.which("uv")
     if not uv:
@@ -140,22 +265,10 @@ def ensure_uv() -> str:
     return uv
 
 
-def ensure_venv(uv: str, target: Path, python_version: str | None = None) -> None:
-    """Create a managed venv, preserving an incompatible/partial predecessor."""
-    interpreter = target / "bin/python"
-    if interpreter.exists():
-        if python_version is None:
-            return
-        result = subprocess.run(
-            [interpreter, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
-            text=True, capture_output=True,
-        )
-        if result.returncode == 0 and result.stdout.strip() == python_version:
-            return
-
-    if target.exists() and any(target.iterdir()):
-        backup = target.with_name(f"{target.name}.previous.{time.time_ns()}")
-        target.replace(backup)
+def create_venv(uv: str, target: Path, python_version: str | None = None) -> None:
+    """Create a fresh managed environment at a private staging path."""
+    if target.exists() or target.is_symlink():
+        raise RuntimeError(f"Unsafe existing staging path: {target}")
     argv = [uv, "venv"]
     if python_version is not None:
         argv.extend(["--python", python_version])
@@ -163,12 +276,11 @@ def ensure_venv(uv: str, target: Path, python_version: str | None = None) -> Non
     run_checked(argv)
 
 
-def install_piper() -> None:
+def build_piper(target: Path) -> None:
     uv = ensure_uv()
-    target = ENGINE / "piper"
     write_state("running", "engine", 15, "Preparing the Piper speech engine")
     target.parent.mkdir(parents=True, exist_ok=True)
-    ensure_venv(uv, target)
+    create_venv(uv, target)
     run_checked([uv, "pip", "install", "--python", str(target / "bin/python"),
                  PIPER_PACKAGE])
 
@@ -177,40 +289,100 @@ def install_voice() -> None:
     write_state("running", "voice", 55, "Downloading and verifying the Amy voice")
     env = {**os.environ, "PIPER_VOICES_DIR": str(VOICES)}
     VOICES.mkdir(parents=True, exist_ok=True)
-    run_checked([VOICE_TOOL, "add", DEFAULT_VOICE], env=env)
+    # `add` already repairs an incomplete or corrupt pair. Do not force a
+    # network re-download when an existing verified voice is healthy.
+    run_checked([VOICE_TOOL, "add", DEFAULT_VOICE], env=env,
+                timeout=1000)
     run_checked([VOICE_TOOL, "use", DEFAULT_VOICE], env=env)
 
 
-def install_system_provider(provider: str) -> None:
-    packages = SYSTEM_PACKAGES[provider]
+# Tesseract language data is one package per language, so a fixed list would
+# be 129 entries that go stale. The code is instead constrained by shape and
+# then confirmed against the real package database before anything is
+# installed: QML can name a language, never a command or an arbitrary package.
+LANGUAGE_PREFIX = "lang:"
+LANGUAGE_CODE = re.compile(r"^[a-z]{3,4}(_[a-z]+)?$")
+
+
+def language_package(code: str) -> str:
+    if not LANGUAGE_CODE.fullmatch(code):
+        raise RuntimeError("Unsupported language code")
+    package = f"tesseract-data-{code}"
+    pacman = shutil.which("pacman")
+    if not pacman:
+        raise RuntimeError("Package management is unavailable")
+    try:
+        known = subprocess.run([pacman, "-Si", package], capture_output=True,
+                               text=True, timeout=HELPER_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("Package availability could not be checked") from exc
+    if known.returncode:
+        raise RuntimeError(f"No language package named {package}")
+    return package
+
+
+def install_language(code: str) -> None:
+    package = language_package(code)
     pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
     if not pkexec or not pacman:
         raise RuntimeError("Graphical package installation is unavailable")
-    write_state("running", "permission", 10, "Waiting for administrator approval")
-    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", *packages])
+    write_state("running", "permission", 10, "Waiting for administrator approval",
+                cancellable=False)
+    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", package])
+    write_state("running", "verify", 85, "Checking the language is available")
+    speak = Path(__file__).resolve().parent / "speak"
+    if speak.exists():
+        result = subprocess.run([str(speak), "--refresh-languages", "tesseract"],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or
+                               "The language installed, but recognition could not refresh it")
 
 
 # Kokoro's English G2P needs a spaCy model that is not on PyPI. Left out, it
 # tries to fetch the model at first use through spaCy's own downloader, which
-# shells out to pip - absent from a uv-created venv - so the backend installs
-# cleanly and then cannot speak a word.
+# shells out to pip—absent from a uv-created venv—after setup has completed.
 SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
-               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
+               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+               "#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85")
+OCR_ENGINES = {"easyocr"}
+# Every cloud key the plugin will store. Google and OpenAI credentials are
+# shared by their speech and OCR adapters.
+CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini")
 
 
-def install_kokoro() -> None:
+def build_kokoro(target: Path) -> None:
     uv = ensure_uv()
-    target = ENGINE / "kokoro"
     write_state("running", "engine", 20, "Installing the Kokoro speech engine")
     target.parent.mkdir(parents=True, exist_ok=True)
     # Kokoro 0.9.4 publishes Requires-Python <3.13. Omarchy can carry a newer
     # system Python, so ask uv for a supported interpreter instead of letting
     # installation depend on whichever version Arch happens to ship today.
-    ensure_venv(uv, target, KOKORO_PYTHON)
+    create_venv(uv, target, KOKORO_PYTHON)
     python = str(target / "bin/python")
     run_checked([uv, "pip", "install", "--python", python, *KOKORO_PACKAGES])
     write_state("running", "engine", 60, "Installing the English language model")
     run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
+
+
+EASYOCR_PACKAGES = ("easyocr==1.7.2",)
+
+
+def build_easyocr(target: Path) -> None:
+    uv = ensure_uv()
+    write_state("running", "engine", 20, "Installing the EasyOCR engine (this is large)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    create_venv(uv, target, KOKORO_PYTHON)
+    python = str(target / "bin/python")
+    run_checked([uv, "pip", "install", "--python", python, *EASYOCR_PACKAGES])
+    # The engine never downloads at read time - a screen capture must not turn
+    # into a surprise network fetch - so the English models are fetched here.
+    write_state("running", "engine", 70, "Downloading the English recognition models")
+    models = target / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    run_checked([python, "-c",
+                 "import sys, easyocr; easyocr.Reader(['en'], gpu=False, verbose=False, "
+                 "model_storage_directory=sys.argv[1], download_enabled=True)", str(models)])
 
 
 def prove(target: str) -> None:
@@ -220,50 +392,224 @@ def prove(target: str) -> None:
     Kokoro installed cleanly and could not synthesise a sample, was reported
     ready, and silently disabled every shortcut.
     """
+    if target.startswith(LANGUAGE_PREFIX):
+        return          # a language pack has no speech of its own to prove
     provider = {"recommended": "piper"}.get(target, target)
     speak = Path(__file__).resolve().parent / "speak"
     if not speak.exists():
         return
-    write_state("running", "verify", 90, "Checking it can speak")
+    ocr = target in OCR_ENGINES
+    write_state("running", "verify", 90, "Checking it can read" if ocr else "Checking it can speak")
     try:
-        subprocess.run([str(speak), "--verify", provider], timeout=180,
-                       capture_output=True, check=True)
+        subprocess.run([str(speak), "--verify-ocr" if ocr else "--verify", provider],
+                       timeout=300 if ocr else 180, capture_output=True,
+                       text=True, check=True)
     except subprocess.CalledProcessError as exc:
+        verb = "read" if ocr else "speak"
+        detail = (exc.stderr or exc.stdout or "").strip()[-800:]
         raise RuntimeError(
-            f"{provider} installed but could not speak; it is marked as not working"
+            f"{provider} installed but could not {verb}; "
+            + (detail or "it is marked as not working")
         ) from exc
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"{provider} installed but did not respond in time") from exc
 
 
-def worker(target: str) -> int:
-    global JOB_PID, JOB_IDENTITY
-    JOB_PID = os.getpid()
-    JOB_IDENTITY = process_identity(JOB_PID)
-    write_state("running", "prepare", 2, "Preparing setup", target=target)
-    try:
-        if target in ("recommended", "piper"):
-            install_piper()
-            install_voice()
-        elif target == "kokoro":
-            install_kokoro()
-        elif target in SYSTEM_PACKAGES:
-            install_system_provider(target)
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def recover_engine_transaction(name: str) -> None:
+    """Roll back an interrupted activation and discard abandoned staging."""
+    target = ENGINE / name
+    journal = ENGINE / f".{name}.transaction.json"
+    if target.is_symlink():
+        raise RuntimeError(f"Refusing to replace symlinked engine: {target}")
+    if target.exists() and not target.is_dir():
+        raise RuntimeError(f"Refusing to replace non-directory engine: {target}")
+
+    if journal.is_symlink():
+        raise RuntimeError(f"Refusing unsafe engine recovery journal: {journal}")
+    if journal.exists():
+        try:
+            record = read_small_json(journal)
+            if not isinstance(record, dict):
+                raise ValueError("transaction journal is not an object")
+            staging = Path(record["staging"])
+            backup = Path(record["backup"])
+            had_previous = record["hadPrevious"]
+            phase = record.get("phase", "activating")
+            if (staging.parent != ENGINE or backup.parent != ENGINE
+                    or not staging.name.startswith(f".{name}.staging.")
+                    or not backup.name.startswith(f"{name}.previous.")
+                    or not isinstance(had_previous, bool)
+                    or phase not in {"activating", "proved"}
+                    or staging.is_symlink() or backup.is_symlink()
+                    or (staging.exists() and not staging.is_dir())
+                    or (backup.exists() and not backup.is_dir())):
+                raise ValueError("unsafe transaction paths")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Engine recovery journal is unreadable: {journal}"
+            ) from exc
+
+        if phase == "proved" and target.is_dir() and not staging.exists():
+            # Proof completed and the phase marker reached durable storage.
+            # Finish the commit if power failed before backup/journal cleanup.
+            remove_path(backup)
         else:
-            raise RuntimeError("Unknown installation target")
-        prove(target)
-        write_state("done", "complete", 100, "Ready")
-        return 0
-    except Exception as exc:  # boundary: convert backend failures to UI state
-        write_state("error", "failed", 0, str(exc), retryable=True)
+            # A backup exists only after the formerly active generation moved
+            # out of place. It is the last generation known to predate this
+            # uncommitted activation, whether or not the new target is present.
+            if backup.exists():
+                remove_path(target)
+                backup.replace(target)
+            elif not had_previous and target.exists() and not staging.exists():
+                # A first install reached activation but not proof. Do not
+                # bless it merely because there is no generation to restore.
+                remove_path(target)
+        remove_path(staging)
+        journal.unlink(missing_ok=True)
+
+    # Staging directories never become authoritative without a journal. With
+    # the setup lock held, any leftovers here belong to a dead older worker.
+    for abandoned in ENGINE.glob(f".{name}.staging.*"):
+        remove_path(abandoned)
+
+    # Older releases had no journal. The only unambiguous orphan is a missing
+    # target beside a previous generation; restore the newest one rather than
+    # making the installation appear absent.
+    backups = sorted(
+        (item for item in ENGINE.glob(f"{name}.previous.*")
+         if item.is_dir() and not item.is_symlink()),
+        key=lambda item: item.stat().st_mtime_ns, reverse=True,
+    )
+    if not target.exists() and backups:
+        backups[0].replace(target)
+
+
+def prune_engine_backups(name: str, keep: int = 1) -> None:
+    backups = sorted(ENGINE.glob(f"{name}.previous.*"),
+                     key=lambda item: item.lstat().st_mtime_ns, reverse=True)
+    for old in backups[keep:]:
+        remove_path(old)
+
+
+def install_engine_transaction(name: str, builder, *, after_activate=None) -> None:
+    """Build privately, activate atomically, prove, and roll back on failure."""
+    target = ENGINE / name
+    staging = ENGINE / f".{name}.staging.{os.getpid()}"
+    backup = ENGINE / f"{name}.previous.{time.time_ns()}"
+    journal = ENGINE / f".{name}.transaction.json"
+    ENGINE.mkdir(parents=True, exist_ok=True)
+    recover_engine_transaction(name)
+    remove_path(staging)
+    had_previous = target.exists()
+    transaction = {
+        "name": name,
+        "staging": str(staging),
+        "backup": str(backup),
+        "hadPrevious": had_previous,
+        "phase": "activating",
+    }
+    try:
+        builder(staging)
+        if staging.is_symlink() or not staging.is_dir():
+            raise RuntimeError(f"Engine builder produced an unsafe staging path: {staging}")
+        replace_json(journal, transaction)
+        if had_previous:
+            target.replace(backup)
+        try:
+            staging.replace(target)
+        except BaseException:
+            if had_previous and backup.exists() and not target.exists():
+                backup.replace(target)
+            raise
+        try:
+            if after_activate is not None:
+                after_activate()
+            prove(name)
+            replace_json(journal, {**transaction, "phase": "proved"})
+        except BaseException:
+            remove_path(target)
+            if had_previous and backup.exists():
+                backup.replace(target)
+            raise
+        remove_path(backup)
+        journal.unlink(missing_ok=True)
+        # A successfully proved replacement no longer needs rollback copies.
+        # Engine environments are large, so do not retain an unrelated stale
+        # generation merely because it predates this transaction.
+        prune_engine_backups(name, keep=0)
+    finally:
+        # This also resolves partially completed filesystem moves before the
+        # worker publishes its terminal status. If the process is killed too
+        # hard to run finally, the same journal is consumed on the next run.
+        recover_engine_transaction(name)
+
+
+def worker(target: str) -> int:
+    global JOB_PID, JOB_IDENTITY, JOB_TARGET
+    try:
+        lock_fd = claim_inherited_setup_lock()
+    except (OSError, RuntimeError) as exc:
+        print(f"speak-setup: {exc}", file=sys.stderr)
         return 1
+    JOB_PID = os.getpid()
+    if os.getpgrp() != JOB_PID:
+        print("speak-setup: worker does not own a private process group", file=sys.stderr)
+        os.close(lock_fd)
+        return 1
+    JOB_IDENTITY = process_identity(JOB_PID)
+    JOB_TARGET = target
+    signal.signal(signal.SIGTERM, cancel_worker_signal)
+    signal.signal(signal.SIGINT, cancel_worker_signal)
+    try:
+        write_state("running", "prepare", 2, "Preparing setup", target=target)
+        try:
+            if target in ("recommended", "piper"):
+                install_engine_transaction("piper", build_piper,
+                                           after_activate=install_voice)
+            elif target == "kokoro":
+                install_engine_transaction("kokoro", build_kokoro)
+            elif target == "easyocr":
+                install_engine_transaction("easyocr", build_easyocr)
+            elif target.startswith(LANGUAGE_PREFIX):
+                install_language(target[len(LANGUAGE_PREFIX):])
+                prove(target)
+            else:
+                raise RuntimeError("Unknown installation target")
+            write_state("done", "complete", 100, "Ready")
+            return 0
+        except SetupCancelled:
+            write_state("cancelled", "cancelled", 0, "Cancelled",
+                        pid=0, processIdentity="", cancellable=False)
+            return 130
+        except Exception as exc:  # boundary: convert backend failures to UI state
+            write_state("error", "failed", 0, str(exc), retryable=True)
+            return 1
+    finally:
+        os.close(lock_fd)
 
 
 def start(target: str) -> None:
-    if target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
+    if target.startswith(LANGUAGE_PREFIX):
+        try:
+            language_package(target[len(LANGUAGE_PREFIX):])
+        except RuntimeError as exc:
+            emit(ok=False, code="unknown_target", message=str(exc))
+            return
+    elif target not in {"recommended", "piper", "kokoro", *OCR_ENGINES}:
         emit(ok=False, code="unknown_target", message="Unknown installation target")
         return
-    lock_fd = os.open(SETUP_LOCK, os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        lock_fd = open_private_lock(SETUP_LOCK)
+    except (OSError, RuntimeError):
+        emit(ok=False, code="lock_error", message="Setup lock is unavailable")
+        return
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -271,11 +617,14 @@ def start(target: str) -> None:
         emit(ok=False, code="already_running", message="Setup is already running")
         return
     try:
-        current = json.loads(STATE.read_text())
+        current = read_small_json(STATE)
+        if not isinstance(current, dict):
+            raise ValueError("invalid setup state")
         pid = int(current.get("pid", 0))
         identity = str(current.get("processIdentity", ""))
         if current.get("status") in {"starting", "running"} and pid > 1 \
-                and identity and process_identity(pid) == identity:
+                and identity and process_identity(pid) == identity \
+                and process_group(pid) == pid:
             emit(ok=False, code="already_running", message="Setup is already running")
             os.close(lock_fd)
             return
@@ -284,24 +633,38 @@ def start(target: str) -> None:
     RUNTIME.mkdir(parents=True, exist_ok=True)
     write_state("starting", "prepare", 1, "Preparing setup", target=target)
     try:
+        worker_environment = os.environ.copy()
+        worker_environment[SETUP_LOCK_FD_ENV] = str(lock_fd)
         process = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "_worker", target],
             start_new_session=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             pass_fds=(lock_fd,),
+            env=worker_environment,
         )
-    finally:
+    except OSError:
         os.close(lock_fd)
+        write_state("error", "failed", 0,
+                    "Setup worker could not be launched", retryable=True)
+        emit(ok=False, code="worker_start_failed",
+             message="Setup could not start safely")
+        return
+    os.close(lock_fd)
     # Do not tell the panel that setup is cancellable until the child has
     # published both its PID and process-start identity. Without this handoff,
     # an immediate Cancel could acknowledge success while the unregistered
     # installer continued in the background.
     registered = False
+    registered_identity = ""
     for _ in range(200):
         try:
-            child_state = json.loads(STATE.read_text())
+            child_state = read_small_json(STATE)
+            if not isinstance(child_state, dict):
+                raise ValueError("invalid setup state")
+            registered_identity = str(child_state.get("processIdentity", ""))
             registered = (int(child_state.get("pid", 0)) == process.pid
-                          and bool(child_state.get("processIdentity")))
+                          and bool(registered_identity)
+                          and process_group(process.pid) == process.pid)
         except (OSError, ValueError, TypeError):
             registered = False
         if registered or process.poll() is not None:
@@ -313,74 +676,284 @@ def start(target: str) -> None:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
         write_state("error", "failed", 0,
                     "Setup worker did not initialize safely", retryable=True)
         emit(ok=False, code="worker_start_failed",
              message="Setup could not start safely")
         return
-    emit(ok=True, started=True, pid=process.pid)
+    emit(ok=True, started=True, pid=process.pid,
+         processIdentity=registered_identity)
 
 
 def cancel() -> None:
     try:
-        state = json.loads(STATE.read_text())
+        state = read_small_json(STATE)
+        if not isinstance(state, dict):
+            raise ValueError("invalid setup state")
         pid = int(state.get("pid", 0))
         identity = str(state.get("processIdentity", ""))
-        if pid > 1 and identity and process_identity(pid) == identity:
-            os.killpg(pid, signal.SIGTERM)
-        write_state("cancelled", "cancelled", 0, "Cancelled")
-        emit(ok=True)
+        active = state.get("status") in {"starting", "running"}
+        cancellable = state.get("cancellable", True) is not False
+        if active and not cancellable:
+            emit(ok=False, code="not_cancellable",
+                 message="This package-manager step must finish before it can be cancelled")
+            return
+        if not (active and pid > 1 and identity
+                and process_identity(pid) == identity
+                and process_group(pid) == pid):
+            raise ValueError("no live setup worker")
+        os.killpg(pid, signal.SIGTERM)
     except (OSError, ValueError, TypeError):
         emit(ok=False, code="not_running", message="No setup job is running")
+        return
+    emit(ok=True, stopping=True)
+
+
+def job_status() -> None:
+    try:
+        current = read_small_json(STATE)
+    except (OSError, ValueError, TypeError):
+        emit(status="idle", step="", progress=0, message="")
+        return
+    if not isinstance(current, dict):
+        emit(status="idle", step="", progress=0, message="")
+        return
+    try:
+        pid = int(current.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    identity = str(current.get("processIdentity", ""))
+    current_status = str(current.get("status", ""))
+    if current_status in {"starting", "running"} and pid > 1 \
+            and (not identity or process_identity(pid) != identity
+                 or process_group(pid) != pid):
+        current.update(status="error", step="failed", progress=0,
+                       message="Setup stopped unexpectedly", retryable=True,
+                       pid=0, processIdentity="")
+        atomic_json(STATE, current)
+    emit(**current)
+
+
+def invalidate_health(provider: str) -> bool:
+    """Atomically forget proof affected by a credential mutation."""
+    keys = {provider}
+    if provider in {"openai", "google"}:
+        keys.add(f"ocr:{provider}")
+    if not HEALTH.exists():
+        return True
+    lock_fd: int | None = None
+    temporary: Path | None = None
+    try:
+        HEALTH.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = HEALTH.with_name(f"{HEALTH.name}.lock")
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            value = read_small_json(HEALTH, HEALTH_MAX_BYTES)
+        except (OSError, ValueError):
+            return True  # malformed cache entries are already treated as untested
+        if not isinstance(value, dict):
+            return True
+        for key in keys:
+            value.pop(key, None)
+        descriptor, name = tempfile.mkstemp(prefix=f".{HEALTH.name}.", dir=HEALTH.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+        temporary.chmod(0o600)
+        os.replace(temporary, HEALTH)
+        temporary = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+
+def reset_account_state(provider: str) -> bool:
+    """Forget account-derived voices after a credential boundary changes."""
+    ok = True
+    try:
+        (VOICE_CACHE / f"{provider}.json").unlink(missing_ok=True)
+    except OSError:
+        ok = False
+    voice_path = {"elevenlabs": ".elevenlabs.voiceId",
+                  "google": ".google.voice"}.get(provider)
+    if voice_path:
+        speak = PLUGIN / "bin" / "speak"
+        try:
+            result = subprocess.run(
+                [str(speak), "--set-stdin-json", voice_path], input='""\n',
+                text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=HELPER_TIMEOUT,
+            )
+            ok = result.returncode == 0 and ok
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+    return ok
+
+
+def invalidate_credential_state(provider: str) -> bool:
+    health_ok = invalidate_health(provider)
+    account_ok = reset_account_state(provider)
+    return health_ok and account_ok
+
+
+def keyring_contains(tool: str, provider: str) -> bool:
+    """Return key presence while distinguishing absence from keyring failure."""
+    try:
+        result = subprocess.run(
+            [tool, "lookup", "service", "omarchy-tts", "key", provider],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("The system keyring did not respond") from exc
+    if result.returncode == 0:
+        return True
+    # libsecret uses status 1 with no diagnostic for an absent item. Any other
+    # result is operational trouble, not proof that no credential exists.
+    if result.returncode == 1 and not result.stderr.strip():
+        return False
+    raise RuntimeError("The system keyring did not respond")
 
 
 def key_store(provider: str) -> None:
-    if provider not in {"openai", "elevenlabs"}:
+    if provider not in CLOUD_KEYS:
         emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
         return
-    key = sys.stdin.readline().rstrip("\r\n")
-    if len(key) < 8:
-        emit(ok=False, code="invalid_key", message="The API key is too short")
+    raw_key = sys.stdin.readline(4098)
+    key = raw_key.rstrip("\r\n")
+    if (len(key) < 8 or len(key) > 4096
+            or any(not 33 <= ord(character) <= 126 for character in key)):
+        emit(ok=False, code="invalid_key", message="Enter a valid API key without surrounding whitespace")
         return
     tool = shutil.which("secret-tool")
     if not tool:
         emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
         return
-    result = subprocess.run([tool, "store", f"--label=omarchy-tts {provider}",
-                             "service", "omarchy-tts", "key", provider],
-                            input=key, text=True, capture_output=True)
+    try:
+        result = subprocess.run(
+            [tool, "store", f"--label=omarchy-tts {provider}",
+             "service", "omarchy-tts", "key", provider],
+            input=key, text=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        key = ""
+        emit(ok=False, code="keyring_failed",
+             message="The system keyring did not respond")
+        return
     key = ""
     if result.returncode:
         emit(ok=False, code="keyring_failed", message="Could not save the API key")
     else:
-        emit(ok=True)
+        invalidated = invalidate_credential_state(provider)
+        emit(ok=True, warning="" if invalidated else "Saved, but cached health could not be cleared")
 
 
 def key_remove(provider: str) -> None:
-    if provider not in {"openai", "elevenlabs"}:
+    if provider not in CLOUD_KEYS:
         emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
         return
     tool = shutil.which("secret-tool")
     if not tool:
         emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
         return
-    result = subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
-                            capture_output=True)
-    emit(ok=result.returncode == 0,
-         message="API key removed" if result.returncode == 0 else "No stored key was found")
+    try:
+        present = keyring_contains(tool, provider)
+    except RuntimeError as exc:
+        emit(ok=False, code="keyring_failed", message=str(exc))
+        return
+    if not present:
+        invalidated = invalidate_credential_state(provider)
+        emit(ok=True, code="not_found", message="No stored key was found",
+             warning="" if invalidated else "Cached health could not be cleared")
+        return
+    try:
+        result = subprocess.run(
+            [tool, "clear", "service", "omarchy-tts", "key", provider],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        emit(ok=False, code="keyring_failed",
+             message="The system keyring did not respond")
+        return
+    if result.returncode:
+        emit(ok=False, code="keyring_failed",
+             message="Could not remove the stored API key")
+        return
+    invalidated = invalidate_credential_state(provider)
+    emit(ok=True, message="API key removed",
+         warning="" if invalidated else "Cached health could not be cleared")
 
 
-def cleanup() -> None:
-    result = {"ok": True, "removed": []}
-    subprocess.run([BINDINGS_TOOL, "remove"], capture_output=True)
-    result["removed"].append("shortcuts")
+def cleanup() -> int:
+    removed: list[str] = []
+    removed_keys: list[str] = []
+    failures: list[str] = []
+    try:
+        binding_result = subprocess.run(
+            [BINDINGS_TOOL, "remove"], capture_output=True,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        failures.append("Could not remove managed shortcuts")
+    else:
+        if binding_result.returncode == 0:
+            removed.append("shortcuts")
+        else:
+            failures.append("Could not remove managed shortcuts")
     tool = shutil.which("secret-tool")
     if tool:
-        for provider in ("openai", "elevenlabs"):
-            subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
-                           capture_output=True)
-        result["removed"].append("API keys")
-    emit(**result)
+        for provider in CLOUD_KEYS:
+            try:
+                present = keyring_contains(tool, provider)
+            except RuntimeError:
+                failures.append(f"Could not inspect the {provider} API key")
+                continue
+            if present:
+                try:
+                    cleared = subprocess.run(
+                        [tool, "clear", "service", "omarchy-tts", "key", provider],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=HELPER_TIMEOUT,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    failures.append(f"Could not remove the {provider} API key")
+                else:
+                    if cleared.returncode:
+                        failures.append(f"Could not remove the {provider} API key")
+                    else:
+                        removed_keys.append(provider)
+            if not invalidate_credential_state(provider):
+                failures.append(f"Could not clear cached {provider} state")
+        if removed_keys:
+            removed.append("stored API keys (" + ", ".join(removed_keys) + ")")
+    else:
+        failures.append("The system keyring is unavailable")
+    ok = not failures
+    emit(ok=ok, removed=removed, failures=failures)
+    return 0 if ok else 1
 
 
 def diagnostics() -> None:
@@ -395,7 +968,6 @@ def diagnostics() -> None:
 
 
 def main() -> int:
-    ensure_private_runtime()
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
@@ -413,12 +985,16 @@ def main() -> int:
     cleanup_parser.add_argument("--yes", action="store_true")
     sub.add_parser("diagnostics")
     args = parser.parse_args()
+    try:
+        ensure_private_runtime()
+    except (OSError, RuntimeError) as exc:
+        print(f"speak-setup: {exc}", file=sys.stderr)
+        emit(ok=False, code="runtime_error", message=str(exc))
+        return 1
     if args.command == "status": emit(**status())
     elif args.command == "start": start(args.target)
     elif args.command == "_worker": return worker(args.target)
-    elif args.command == "job":
-        try: print(STATE.read_text(), end="")
-        except OSError: emit(status="idle", step="", progress=0, message="")
+    elif args.command == "job": job_status()
     elif args.command == "cancel": cancel()
     elif args.command == "key-store": key_store(args.provider)
     elif args.command == "key-remove": key_remove(args.provider)
@@ -427,7 +1003,7 @@ def main() -> int:
             emit(ok=False, code="confirmation_required",
                  message="cleanup removes managed shortcuts and stored API keys; rerun with --yes")
             return 2
-        cleanup()
+        return cleanup()
     elif args.command == "diagnostics": diagnostics()
     return 0
 

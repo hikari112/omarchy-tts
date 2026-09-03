@@ -43,8 +43,9 @@ HTML_TAG = re.compile(r"</?[a-zA-Z][^>]{0,200}>")
 
 # --- OCR reflow -----------------------------------------------------------
 
-# A line holding one stray character (UI chrome bleeding into the grab) or a
-# short run of punctuation. "a", "A", "I" are real words and must survive.
+# A line holding one stray character from UI chrome. Alphanumeric singletons
+# are filtered only inside a multi-line capture; a screen containing just "7"
+# or "B" is still valid content and must survive.
 ORPHAN_LINE = re.compile(
     r"^(?:[^\w\s]{1,3}"                      # ")" or "--"
     r"|[b-hj-zB-HJ-Z0-9][^\w\s]?"            # "8", "2)"
@@ -90,6 +91,7 @@ def _reflow_ocr(text: str) -> str:
     words. Only a blank line is a real break.
     """
     paras, cur = [], []
+    nonempty_lines = sum(bool(line.strip()) for line in text.splitlines())
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -98,7 +100,7 @@ def _reflow_ocr(text: str) -> str:
                 cur = []
             continue
         line = COLUMN_BLEED.sub("", line)
-        if not line or ORPHAN_LINE.match(line):
+        if not line or (nonempty_lines > 1 and ORPHAN_LINE.match(line)):
             continue
         cur.append(line)
     if cur:
@@ -110,7 +112,8 @@ def _reflow_ocr(text: str) -> str:
         for line in para:
             if not buf:
                 buf = line
-            elif buf.endswith("-"):
+            elif (buf.endswith("-") and len(buf) > 1 and buf[-2].isalpha()
+                  and line[:1].islower()):
                 buf = buf[:-1] + line          # word split across lines
             else:
                 buf += " " + line
@@ -211,11 +214,11 @@ def sanitize(text: str, announce_code=True, max_chars=0, ocr=False,
         if strip_markdown:
             line = MD_HEADER.sub("", line)
             line = MD_QUOTE.sub("", line)
+            line = MD_BULLET.sub(r"\1", line)
             line = MD_CHECK.sub(
                 lambda m: f"{m.group(1)}{'done, ' if m.group(2).lower() == 'x' else 'not done, '}",
                 line,
             )
-            line = MD_BULLET.sub(r"\1", line)
             if line.strip().startswith("|"):
                 line = _handle_table_row(line)
         cleaned.append(line)
@@ -253,9 +256,26 @@ def sanitize(text: str, announce_code=True, max_chars=0, ocr=False,
     if max_chars and len(text) > max_chars:
         cut = text[:max_chars]
         pivot = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-        text = cut[: pivot + 1] if pivot > max_chars * 0.4 else cut.rsplit(" ", 1)[0] + "."
+        if pivot > max_chars * 0.4:
+            text = cut[: pivot + 1]
+        else:
+            boundary = cut.rsplit(" ", 1)[0] if " " in cut else cut
+            boundary = boundary.rstrip(" ,;:") or cut
+            if boundary.endswith((".", "!", "?")):
+                text = boundary
+            elif len(boundary) < max_chars:
+                text = boundary + "."
+            else:
+                # An unbroken token has no safe word boundary. Replace its
+                # final character rather than exceeding the caller's limit.
+                text = boundary[:-1] + "."
 
     return text.strip()
+
+
+def _boolean_option(options: dict, key: str, default: bool) -> bool:
+    value = options.get(key, default)
+    return value if isinstance(value, bool) else default
 
 
 def main() -> int:
@@ -268,25 +288,36 @@ def main() -> int:
                     help="drop code blocks silently instead of naming them")
     ap.add_argument("--config", help="read sanitizer options from this JSON config")
     args = ap.parse_args()
+    if args.max_chars < 0 or args.max_chars > 1_048_576:
+        ap.error("--max-chars must be between 0 and 1048576")
 
     opts = {}
     if args.config:
         try:
             with open(args.config, encoding="utf-8") as handle:
-                opts = json.load(handle).get("sanitizer", {})
+                config = json.load(handle)
+                opts = config.get("sanitizer", {}) if isinstance(config, dict) else {}
+                if not isinstance(opts, dict):
+                    opts = {}
         except (OSError, ValueError, TypeError):
             opts = {}
+    input_text = sys.stdin.read(1_048_577)
+    if len(input_text.encode("utf-8")) > 1_048_576:
+        print("sanitize: input exceeds the 1 MiB safety limit", file=sys.stderr)
+        return 2
     out = sanitize(
-        sys.stdin.read(),
-        announce_code=(not args.no_announce_code and opts.get("announceCodeBlocks", True)),
+        input_text,
+        announce_code=(not args.no_announce_code
+                       and _boolean_option(opts, "announceCodeBlocks", True)),
         max_chars=args.max_chars,
         ocr=args.ocr,
-        urls=opts.get("urls", "domain"),
-        inline_code=opts.get("inlineCode", True),
-        strip_markdown=opts.get("stripMarkdown", True),
-        expand_units=opts.get("expandUnits", True),
+        urls=(opts.get("urls") if isinstance(opts.get("urls"), str)
+              and opts.get("urls") in ("domain", "link") else "domain"),
+        inline_code=_boolean_option(opts, "inlineCode", True),
+        strip_markdown=_boolean_option(opts, "stripMarkdown", True),
+        expand_units=_boolean_option(opts, "expandUnits", True),
     )
-    if not out or not re.search(r"[A-Za-z0-9]", out):
+    if not out or not any(char.isalnum() for char in out):
         return 1
     sys.stdout.write(out)
     return 0

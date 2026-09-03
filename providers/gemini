@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# desc: Gemini speech through the Google AI Developer API. Text leaves your machine.
+# title: Gemini
+# kind: cloud
+# probe: [[ -n "${GEMINI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key gemini >/dev/null 2>&1
+# vendor: Google
+# keyname: gemini
+# keyenv: GEMINI_API_KEY
+# voices: remote
+# maxchars: 8000
+set -uo pipefail
+umask 077
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+source "$TTS_PLUGIN_DIR/lib/cloud.sh"
+RESPONSE_MAX_BYTES=134217728
+
+VOICE="${TTS_VOICE:-}"
+[[ -z "$VOICE" ]] && VOICE="$(jq -r '.gemini.voice // "Kore"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="Kore"
+MODEL="$(jq -r '.gemini.model // "gemini-2.5-flash-preview-tts"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="gemini-2.5-flash-preview-tts"
+# Both end up in a URL path and a JSON string; refuse anything that is not a
+# plain identifier before either happens.
+[[ "$VOICE" =~ ^[A-Za-z]+$ ]] || { printf 'Gemini: invalid voice name\n' >&2; exit 65; }
+[[ "$MODEL" =~ ^[A-Za-z0-9._-]+$ ]] || { printf 'Gemini: invalid model name\n' >&2; exit 65; }
+# The same model is served by two hosts that accept different keys: Vertex AI
+# express mode (an API key, no project or location in the URL - verified on
+# the wire with a Vertex key) and the Gemini Developer / AI Studio API. A key
+# for one is refused by the other with a 403, so this is configured, never
+# guessed by trying both - each try would send the text again.
+API="$(jq -r '.gemini.api // "vertex"' "$TTS_CONFIG" 2>/dev/null)"
+case "$API" in
+  vertex)    URL="https://aiplatform.googleapis.com/v1/publishers/google/models/$MODEL:generateContent" ;;
+  developer) URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent" ;;
+  *) printf 'Gemini: unsupported API selection; use vertex or developer\n' >&2; exit 65 ;;
+esac
+
+# Gemini's prebuilt voices are fixed and named; the character notes are
+# Google's own one-word descriptions.
+if [[ "${1:-}" == "--voices" ]]; then
+  jq -nc '[ ["Kore","Firm"], ["Puck","Upbeat"], ["Zephyr","Bright"], ["Charon","Informative"],
+            ["Fenrir","Excitable"], ["Leda","Youthful"], ["Orus","Firm"], ["Aoede","Breezy"],
+            ["Callirrhoe","Easy-going"], ["Autonoe","Bright"], ["Enceladus","Breathy"], ["Iapetus","Clear"],
+            ["Umbriel","Easy-going"], ["Algieba","Smooth"], ["Despina","Smooth"], ["Erinome","Clear"],
+            ["Algenib","Gravelly"], ["Rasalgethi","Informative"], ["Laomedeia","Upbeat"], ["Achernar","Soft"],
+            ["Alnilam","Firm"], ["Schedar","Even"], ["Gacrux","Mature"], ["Pulcherrima","Forward"],
+            ["Achird","Friendly"], ["Zubenelgenubi","Casual"], ["Vindemiatrix","Gentle"], ["Sadachbia","Lively"],
+            ["Sadaltager","Knowledgeable"], ["Sulafat","Warm"] ]
+          | map({value: .[0], label: (.[0] + " · " + .[1])})'
+  exit 0
+fi
+
+if [[ "${1:-}" == "--usage" ]]; then
+  if cloud_metrics_valid; then
+    jq -c '. + {account:{source:"request_headers",note:"Request limits update after each speech request."}}' \
+      "$TTS_METRICS_FILE"
+  else
+    jq -nc --arg model "$MODEL" '{provider:"gemini",model:$model,account:{source:"request_headers",note:"Rate limits appear after the first speech request."}}'
+  fi
+  exit 0
+fi
+
+KEY="$(get_key GEMINI_API_KEY gemini)" || exit 1
+need curl "install with: omarchy pkg add curl"
+
+body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-gemini.XXXXXX.json")" || exit 1
+trap 'rm -f "$body"' EXIT
+headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-gemini-headers.XXXXXX")" || exit 1
+trap 'rm -f "$body" "$headers"' EXIT
+pcm="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-gemini.XXXXXX.pcm")" || exit 1
+trap 'rm -f "$body" "$headers" "$pcm"' EXIT
+# The key goes in a header through fd 3, never the ?key= query string: a URL
+# is argv. Speed is not a request parameter for this model, so TTS_RATE is
+# not applied here.
+curl_rc=0
+status="$(jq -Rs --arg v "$VOICE" \
+  '{contents:[{role:"user", parts:[{text:.}]}],
+    generationConfig:{responseModalities:["AUDIO"],
+      speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:$v}}}}}' |
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 180 \
+    --max-filesize "$RESPONSE_MAX_BYTES" \
+    "$URL" \
+    -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$body" \
+    --write-out '%{http_code}' \
+    3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
+if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail Gemini "$curl_rc"; exit $?; fi
+[[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'Gemini: invalid HTTP response\n' >&2; exit 74; }
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+  cloud_record gemini "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$body"
+  cloud_fail Gemini "$status" "$body" "$headers"; exit $?
+fi
+
+# A 200 can still carry a refusal instead of audio.
+if reason="$(jq -er '.promptFeedback.blockReason // empty' "$body" 2>/dev/null)" && [[ -n "$reason" ]]; then
+  cloud_record gemini "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$body" 0 blocked
+  printf 'Gemini: request was blocked by the service safety policy\n' >&2; exit 74
+fi
+mime="$(jq -er 'first(.candidates[]?.content.parts[]?.inlineData
+  | select((.data? | type) == "string" and (.data | length) > 0))
+  | .mimeType // empty' "$body" 2>/dev/null)" || mime=""
+rate=24000
+[[ "$mime" =~ (^|[\;[:space:]])rate=([0-9]+) ]] && rate="${BASH_REMATCH[2]}"
+invalid_audio=0
+if [[ ! "$mime" =~ ^audio/L16($|[\;[:space:]]) || "$rate" -lt 8000 || "$rate" -gt 192000 ]] ||
+    ! jq -er 'first(.candidates[]?.content.parts[]?.inlineData
+      | select((.data? | type) == "string" and (.data | length) > 0)) | .data' \
+      "$body" 2>/dev/null | base64 -d > "$pcm" 2>/dev/null; then
+  invalid_audio=1
+else
+  pcm_size="$(stat -c%s "$pcm" 2>/dev/null || printf 0)"
+  [[ "$pcm_size" =~ ^[0-9]+$ && "$pcm_size" -gt 0 ]] || invalid_audio=1
+  [[ $invalid_audio -ne 0 ]] || (( pcm_size % 2 == 0 )) || invalid_audio=1
+fi
+if [[ $invalid_audio -ne 0 ]]; then
+  cloud_record gemini "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$body" 0 invalid_response
+  printf 'Gemini: service returned no audio\n' >&2; exit 74
+fi
+cloud_record gemini "$MODEL" "${TTS_INPUT_CHARS:-0}" "$status" "$headers" "$body"
+play_raw "$rate" 1 < "$pcm"

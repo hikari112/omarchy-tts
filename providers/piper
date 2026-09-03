@@ -1,16 +1,36 @@
 #!/usr/bin/env bash
-# desc: local neural voice, fast and natural (default)
+# desc: Fast, natural, runs here. The default.
+# title: Piper
 # kind: local
-# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (compgen -G "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}/*.onnx" >/dev/null || compgen -G "$HOME/.local/share/piper-voices/*.onnx" >/dev/null)
+# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (for model in "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"/*.onnx "$HOME/.local/share/piper-voices"/*.onnx; do [[ -s "$model" && -s "$model.json" ]] && exit 0; done; exit 1)
 # install: managed venv · piper-tts==1.7.0
 # voices: downloadable
+# ratemin: 0.5
+# ratemax: 2.0
 set -uo pipefail
+umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 PIPER_BIN="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper"
 [[ -x "$PIPER_BIN" ]] || PIPER_BIN="$(command -v piper || true)"
 [[ -n "$PIPER_BIN" ]] || need piper "install it from the Provider tab"
 
 VOICES_DIR="${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"
+# Voice model and sidecar are a single installation. Hold a shared lock while
+# Piper reads/uses them so repair/removal cannot expose a mixed pair.
+VOICE_STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
+VOICE_STATE_DIR="${VOICE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tts/run}"
+[[ ! -L "$VOICE_STATE_DIR" ]] || {
+  printf 'speak: unsafe Piper runtime directory symlink: %s\n' "$VOICE_STATE_DIR" >&2
+  exit 1
+}
+mkdir -p "$VOICE_STATE_DIR" || exit 1
+[[ ! -L "$VOICE_STATE_DIR" && "$(stat -c %u "$VOICE_STATE_DIR" 2>/dev/null)" == "$UID" ]] || {
+  printf 'speak: unsafe Piper runtime directory: %s\n' "$VOICE_STATE_DIR" >&2
+  exit 1
+}
+chmod 700 "$VOICE_STATE_DIR" || exit 1
+exec {voice_lock_fd}>>"$VOICE_STATE_DIR/voice-files.lock" || exit 1
+flock -s "$voice_lock_fd" || exit 1
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.piper.voice // "en_US-amy-medium"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="en_US-amy-medium"
@@ -18,9 +38,9 @@ VOICE="${TTS_VOICE:-}"
 if [[ -f "$VOICE" ]]; then MODEL="$VOICE"; else MODEL="$VOICES_DIR/$VOICE.onnx"; fi
 [[ -f "$MODEL" ]] || MODEL="$HOME/.local/share/piper-voices/$VOICE.onnx"
 
-if [[ ! -f "$MODEL" ]]; then
+if [[ ! -s "$MODEL" || ! -s "$MODEL.json" ]]; then
   echo "speak: piper voice not found: $MODEL" >&2
-  notify-send -a "Speak" "Voice missing" "Download it: speak-voice add $VOICE" 2>/dev/null
+  notify-send -a "Speak" "Voice missing or incomplete" "Repair it: speak-voice add $VOICE --repair" 2>/dev/null
   exit 1
 fi
 

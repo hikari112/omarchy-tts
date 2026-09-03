@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
   workflow_dispatch:
 
@@ -18,21 +18,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.6.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
 
-      - name: Sanitizer tests
-        run: python3 tests/test_sanitize.py
-
-      - name: CLI configuration tests
-        run: python3 tests/test_cli.py
+      - name: Test suite
+        run: |
+          set +e
+          test_log="$RUNNER_TEMP/omarchy-tts-tests.log"
+          python3 -m unittest discover -s tests -v >"$test_log" 2>&1
+          test_status=$?
+          cat "$test_log"
+          set -e
+          if (( test_status != 0 )); then
+            # Public Actions pages require sign-in to view logs. Preserve a
+            # bounded list of test identifiers in the public Checks annotation.
+            # The strict allowlist cannot disclose output, paths, or environment
+            # data from a failing test.
+            failure_ids="$(grep -E '^(FAIL|ERROR): test_[A-Za-z0-9_]+ \([A-Za-z0-9_.]+\)$' "$test_log" \
+              | head -20 | paste -sd ';' - || true)"
+            [[ -n "$failure_ids" ]] || failure_ids="Test process failed before unittest reported an identifier"
+            printf '::error title=Python test suite failed::%s\n' "$failure_ids"
+          fi
+          exit "$test_status"
 
       - name: Python syntax
-        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py tests/*.py
 
       - name: Shell syntax
         run: |

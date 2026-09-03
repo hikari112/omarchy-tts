@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # speak-voice - browse, download and switch local voice models.
 set -uo pipefail
+umask 077
 
 VOICES_DIR="${PIPER_VOICES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts/voices/piper}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
@@ -13,13 +14,45 @@ STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tts/run}"
 DL_STATE="$STATE_DIR/download.json"
 DL_LOCK="$STATE_DIR/download.lock"
+FILES_LOCK="$STATE_DIR/voice-files.lock"
 OWNER_PID=""
 
 CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
 FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
 CACHE_MAX_AGE_DAYS=7
+CATALOGUE_MAX_BYTES=16777216
+MODEL_MAX_BYTES=1073741824
+SIDECAR_MAX_BYTES=16777216
+STATE_MAX_BYTES=65536
+DOWNLOAD_LOCK_FD_ENV=OMARCHY_TTS_DOWNLOAD_LOCK_FD
 
-mkdir -p "$VOICES_DIR" "$CACHE_DIR"
+usage() {
+  cat <<'USAGE'
+Usage: speak-voice <command>
+
+  list                    installed voices (* = active)
+  available [--json]      every downloadable voice
+  add <voice> [--async] [--repair] download or repair a voice
+  remove <voice>          delete a downloaded voice
+  use <voice>             make a voice the default
+  status [--json]         progress of a download in flight
+  cancel                  cancel the active download
+  refresh                 re-fetch the voice catalogue
+  browse                  open the sample page in a browser
+
+Voice names look like <lang>-<name>-<quality>, e.g. en_US-amy-medium.
+USAGE
+}
+
+case "${1:-}" in
+  -h|--help|help) usage; exit 0 ;;
+  "") usage >&2; exit 1 ;;
+esac
+
+case "$1" in
+  status|cancel|browse) ;;
+  *) mkdir -p "$VOICES_DIR" "$CACHE_DIR" || exit 1 ;;
+esac
 [[ ! -L "$STATE_DIR" ]] || {
   printf 'speak-voice: unsafe runtime directory symlink: %s\n' "$STATE_DIR" >&2; exit 1;
 }
@@ -38,98 +71,234 @@ migrate_legacy_voices() {
   local legacy="$HOME/.local/share/piper-voices"
   [[ -d "$legacy" ]] || return 0
   [[ "$(readlink -f "$legacy")" != "$(readlink -f "$VOICES_DIR")" ]] || return 0
-  local model name
+  local model name files_lock_fd
+  exec {files_lock_fd}>>"$FILES_LOCK" || return 1
+  flock "$files_lock_fd" || { exec {files_lock_fd}>&-; return 1; }
   for model in "$legacy"/*.onnx; do
-    [[ -e "$model" ]] || continue
+    [[ -f "$model" && ! -L "$model" && -s "$model" &&
+       -f "$model.json" && ! -L "$model.json" && -s "$model.json" ]] || continue
     name="$(basename "$model")"
-    [[ -e "$VOICES_DIR/$name" ]] && continue
-    mv -n "$model" "$VOICES_DIR/$name" 2>/dev/null || continue
-    [[ -e "$legacy/$name.json" ]] && mv -n "$legacy/$name.json" "$VOICES_DIR/$name.json" 2>/dev/null
+    [[ ! -e "$VOICES_DIR/$name" && ! -L "$VOICES_DIR/$name" &&
+       ! -e "$VOICES_DIR/$name.json" && ! -L "$VOICES_DIR/$name.json" ]] || continue
+    mv -T -n -- "$model" "$VOICES_DIR/$name" 2>/dev/null || continue
+    if [[ -e "$model" || ! -e "$VOICES_DIR/$name" ]] ||
+       ! mv -T -n -- "$model.json" "$VOICES_DIR/$name.json" 2>/dev/null ||
+       [[ -e "$model.json" || ! -e "$VOICES_DIR/$name.json" ]]; then
+      mv -T -n -- "$VOICES_DIR/$name" "$model" 2>/dev/null || true
+    fi
   done
   rmdir "$legacy" 2>/dev/null || true
+  flock -u "$files_lock_fd"
+  exec {files_lock_fd}>&-
 }
-migrate_legacy_voices
+case "$1" in
+  list|available|add|remove|use)
+    migrate_legacy_voices || { printf 'speak-voice: could not migrate legacy voices safely\n' >&2; exit 1; } ;;
+esac
 
 PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # Resolved from the installed plugin directory.
 # shellcheck disable=SC1091
 source "$PLUGIN_DIR/lib/config.sh"
-tts_config_init || { printf 'speak-voice: could not initialize %s\n' "$CONFIG" >&2; exit 1; }
+case "$1" in
+  list|remove|use)
+    tts_config_init || { printf 'speak-voice: could not initialize %s\n' "$CONFIG" >&2; exit 1; } ;;
+esac
 
 die() { printf 'speak-voice: %s\n' "$*" >&2; exit 1; }
 
-usage() {
-  cat <<'USAGE'
-Usage: speak-voice <command>
+process_identity() { # process_identity <pid> -> Linux start-time field
+  local pid="$1" stat_line rest
+  local -a fields
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  IFS= read -r stat_line 2>/dev/null < "/proc/$pid/stat" || return 1
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${fields[19]}"
+}
 
-  list                    installed voices (* = active)
-  available [--json]      every downloadable voice
-  add <voice> [--async]   download a voice
-  remove <voice>          delete a downloaded voice
-  use <voice>             make a voice the default
-  status [--json]         progress of a download in flight
-  cancel                  cancel the active download
-  refresh                 re-fetch the voice catalogue
-  browse                  open the sample page in a browser
+process_group() { # process_group <pid> -> Linux process-group ID
+  local pid="$1" stat_line rest
+  local -a fields
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  IFS= read -r stat_line 2>/dev/null < "/proc/$pid/stat" || return 1
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [[ "${fields[2]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${fields[2]}"
+}
 
-Voice names look like <lang>-<name>-<quality>, e.g. en_US-amy-medium.
-USAGE
+terminate_download_worker() { # terminate_download_worker <pid> <identity>
+  local pid="$1" identity="$2" current="" group=""
+  current="$(process_identity "$pid" || true)"
+  if [[ -n "$identity" && "$current" == "$identity" ]]; then
+    group="$(process_group "$pid" || true)"
+    if [[ "$group" == "$pid" ]]; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
+    else
+      # Never turn a malformed launch into a signal for the caller's group.
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  fi
+  # This is a child of the launcher, so wait for its trap to finish cleanup.
+  # Recheck the start identity before escalating in case the numeric PID was
+  # somehow reused after the child exited.
+  for _ in {1..100}; do
+    current="$(process_identity "$pid" || true)"
+    [[ -z "$current" || "$current" != "$identity" ]] && break
+    sleep 0.01
+  done
+  current="$(process_identity "$pid" || true)"
+  if [[ -n "$identity" && "$current" == "$identity" ]]; then
+    group="$(process_group "$pid" || true)"
+    if [[ "$group" == "$pid" ]]; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    else
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
 }
 
 active_voice() { jq -r '.piper.voice // "en_US-amy-medium"' "$CONFIG" 2>/dev/null; }
 
-is_installed() { [[ -f "$VOICES_DIR/$1.onnx" ]]; }
+is_installed() {
+  [[ -s "$VOICES_DIR/$1.onnx" && -s "$VOICES_DIR/$1.onnx.json" ]]
+}
+
+catalogue_valid() {
+  [[ -s "$1" ]] || return 1
+  [[ "$(stat -c%s "$1" 2>/dev/null || printf '%s' $((CATALOGUE_MAX_BYTES + 1)))" \
+      -le "$CATALOGUE_MAX_BYTES" ]] || return 1
+  jq -e '
+    type == "object" and length > 0 and length <= 10000
+    and all(to_entries[];
+      (.key | type == "string" and length > 0 and length <= 128)
+      and (.value | type == "object")
+      and (.value.files | type == "object" and length >= 1 and length <= 16)
+      and all(.value.files | to_entries[];
+        (.key | type == "string" and length > 0 and length <= 512)
+        and (.value | type == "object")
+        and (.value.size_bytes
+             | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .)
+        and (.value.md5_digest == null
+             or (.value.md5_digest
+                 | type == "string" and length <= 128))))
+  ' "$1" >/dev/null 2>&1
+}
 
 # The catalogue is 240K and changes rarely; refetch only when stale or absent.
 ensure_catalogue() {
   local force="${1:-no}" stale=1
-  if [[ "$force" != yes && -s "$CATALOGUE" ]]; then
+  if [[ "$force" != yes && ! -L "$CATALOGUE" && -s "$CATALOGUE" ]] && catalogue_valid "$CATALOGUE"; then
+    chmod 600 "$CATALOGUE" || return 1
     if [[ -z "$(find "$CATALOGUE" -mtime +$CACHE_MAX_AGE_DAYS 2>/dev/null)" ]]; then stale=0; fi
   fi
   [[ $stale -eq 0 ]] && return 0
   if ! command -v curl >/dev/null 2>&1; then
-    [[ -s "$CATALOGUE" && "$force" != yes ]]
+    [[ ! -L "$CATALOGUE" && -s "$CATALOGUE" && "$force" != yes ]] && catalogue_valid "$CATALOGUE"
     return
   fi
   local tmp; tmp="$(mktemp "${CATALOGUE}.XXXXXX")" || return 1
-  if curl -sL --fail --max-time 30 "$CATALOGUE_URL" -o "$tmp" &&
-      jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
-    mv "$tmp" "$CATALOGUE"; return 0
+  if curl -sL --fail --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 30 --max-filesize "$CATALOGUE_MAX_BYTES" \
+      "$CATALOGUE_URL" -o "$tmp" &&
+      catalogue_valid "$tmp"; then
+    if chmod 600 "$tmp" && mv -T -- "$tmp" "$CATALOGUE"; then return 0; fi
   fi
   rm -f "$tmp"
   # A stale catalogue still beats none at all.
-  if [[ -s "$CATALOGUE" && "$force" != yes ]]; then return 0; fi
+  if [[ ! -L "$CATALOGUE" && -s "$CATALOGUE" && "$force" != yes ]] && catalogue_valid "$CATALOGUE"; then
+    chmod 600 "$CATALOGUE" || return 1
+    return 0
+  fi
   return 1
 }
 
 write_state() { # write_state <status> <voice> <got> <total> [message]
   local pid="${OWNER_PID:-0}" identity="" tmp
-  [[ "$pid" -gt 1 ]] && identity="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  [[ "$pid" -gt 1 ]] && identity="$(process_identity "$pid" || true)"
+  [[ ! -e "$DL_STATE" || -f "$DL_STATE" || -L "$DL_STATE" ]] || return 1
   tmp="$(mktemp "${DL_STATE}.XXXXXX")" || return 1
-  jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
+  if ! jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
         --arg m "${5:-}" \
         --argjson pid "$pid" --arg identity "$identity" \
         '{status:$s, voice:$v, bytes:$g, total:$t, message:$m,
           pid:$pid, processIdentity:$identity,
           percent: (if $t > 0 then (($g / $t) * 100 | floor) else 0 end)}' \
-    > "$tmp" 2>/dev/null && mv "$tmp" "$DL_STATE"
+      > "$tmp" 2>/dev/null || ! chmod 600 "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -e "$DL_STATE" && ! -f "$DL_STATE" && ! -L "$DL_STATE" ]] ||
+      ! mv -T -- "$tmp" "$DL_STATE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+download_state_valid() {
+  [[ ! -L "$DL_STATE" && -f "$DL_STATE" && -s "$DL_STATE" &&
+     "$(stat -c%s "$DL_STATE" 2>/dev/null || printf '%s' $((STATE_MAX_BYTES + 1)))" \
+       -le "$STATE_MAX_BYTES" ]] &&
+    jq -e 'type == "object"' "$DL_STATE" >/dev/null 2>&1
 }
 
 emit_available() {
   ensure_catalogue || die "could not fetch the voice catalogue (offline?)"
-  local installed; installed="$(
-    for m in "$VOICES_DIR"/*.onnx; do [[ -e "$m" ]] && basename "$m" .onnx; done |
+  local installed files_lock_fd
+  exec {files_lock_fd}>>"$FILES_LOCK" || die "could not lock installed voices"
+  flock -s "$files_lock_fd" || die "could not lock installed voices"
+  installed="$(
+    for m in "$VOICES_DIR"/*.onnx; do
+      [[ -e "$m" ]] || continue
+      voice="$(basename "$m" .onnx)"
+      is_installed "$voice" && voice_size_valid "$voice" && printf '%s\n' "$voice"
+    done |
       jq -Rsc 'split("\n") | map(select(length > 0))'
   )"
-  jq -c --argjson inst "$installed" '
+  exec {files_lock_fd}>&-
+  jq -c --argjson inst "$installed" \
+        --argjson modelMax "$MODEL_MAX_BYTES" \
+        --argjson sidecarMax "$SIDECAR_MAX_BYTES" '
+    def clean($fallback; $maximum):
+      if type == "string" and length > 0
+      then (gsub("[[:cntrl:]]"; " ") | .[0:$maximum])
+      else $fallback end;
+    def safe_path($suffix):
+      (type == "string") and length > 0 and length <= 512
+      and endswith($suffix)
+      and (startswith("/") | not)
+      and (contains("//") | not)
+      and (test("(^|/)\\.\\.?(/|$)") | not)
+      and test("^[A-Za-z0-9._/-]+$");
+    def digest_ok:
+      . == null or (type == "string" and test("^[0-9A-Fa-f]{32}$"));
+    def file_ok($suffix; $maximum):
+      (.key | safe_path($suffix))
+      and (.value | type == "object")
+      and (.value.size_bytes
+           | type == "number" and . >= 1 and . <= $maximum and floor == .)
+      and (.value.md5_digest | digest_ok);
     to_entries
-    | map({
+    | map(select(.key | test("^[A-Za-z0-9._-]+$")))
+    | map(([.value.files | to_entries[] | select(.key | endswith(".onnx"))]) as $models
+          | ([.value.files | to_entries[] | select(.key | endswith(".onnx.json"))]) as $sidecars
+          | select(($models | length) == 1 and ($sidecars | length) == 1)
+          | select($models[0] | file_ok(".onnx"; $modelMax))
+          | select($sidecars[0] | file_ok(".onnx.json"; $sidecarMax))
+          | .)
+    | map(.key as $voiceKey | {
         key: .key,
-        name: .value.name,
-        lang: .value.language.name_english,
-        country: (.value.language.country_english // ""),
-        code: .value.language.code,
-        quality: .value.quality,
+        name: (.value.name | clean($voiceKey; 256)),
+        lang: (if (.value.language|type) == "object"
+               then (.value.language.name_english | clean("Unknown language"; 128))
+               else "Unknown language" end),
+        country: (if (.value.language|type) == "object"
+                  then (.value.language.country_english | clean(""; 128)) else "" end),
+        code: (if (.value.language|type) == "object"
+               then (.value.language.code | clean(""; 32)) else "" end),
+        quality: (.value.quality | clean("unknown"; 32)),
         sizeMB: ((( [.value.files | to_entries[] | select(.key | endswith(".onnx")) | .value.size_bytes ][0] // 0) / 1048576) | floor),
         installed: (.key as $k | $inst | index($k) != null)
       })
@@ -139,10 +308,182 @@ emit_available() {
 
 file_meta() { # file_meta <voice> <suffix> -> "path<TAB>size<TAB>md5"
   jq -r --arg k "$1" --arg sfx "$2" '
-    .[$k].files | to_entries[] | select(.key | endswith($sfx))
+    [ .[$k].files | to_entries[] | select(.key | endswith($sfx)) ]
+    | select(length == 1) | .[0]
     | "\(.key)\t\(.value.size_bytes)\t\(.value.md5_digest)"
-  ' "$CATALOGUE" 2>/dev/null | head -1
+  ' "$CATALOGUE" 2>/dev/null
 }
+
+valid_size() { # value maximum
+  local value="$1" maximum="$2"
+  [[ "$value" =~ ^[0-9]+$ && ${#value} -le 10 ]] || return 1
+  awk -v value="$value" -v maximum="$maximum" \
+    'BEGIN { exit !(value >= 1 && value <= maximum) }'
+}
+
+valid_repo_file() { # relative-path required-suffix
+  local path="$1" suffix="$2"
+  [[ -n "$path" && ${#path} -le 512 && "$path" == *"$suffix" &&
+     "$path" != /* && "$path" != */ && "$path" != *//* &&
+     "$path" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  local segment
+  while IFS= read -r segment; do
+    [[ -n "$segment" && "$segment" != . && "$segment" != .. ]] || return 1
+  done < <(tr / '\n' <<< "$path")
+}
+
+installed_file_valid() { # voice suffix
+  local voice="$1" suffix="$2" meta path expected_size expected_digest file got maximum
+  meta="$(file_meta "$voice" "$suffix")"
+  IFS=$'\t' read -r path expected_size expected_digest <<< "$meta"
+  file="$VOICES_DIR/$voice$suffix"
+  [[ -n "$path" && -s "$file" ]] || return 1
+  maximum="$MODEL_MAX_BYTES"
+  [[ "$suffix" == .onnx.json ]] && maximum="$SIDECAR_MAX_BYTES"
+  if valid_size "$expected_size" "$maximum"; then
+    [[ "$(stat -c%s "$file" 2>/dev/null)" == "$expected_size" ]] || return 1
+  else
+    return 1
+  fi
+  if [[ -n "$expected_digest" && "$expected_digest" != null ]]; then
+    command -v md5sum >/dev/null 2>&1 || return 1
+    got="$(md5sum "$file" | cut -d' ' -f1)"
+    [[ "$got" == "$expected_digest" ]] || return 1
+  fi
+}
+
+voice_size_valid() { # cheap catalogue rendering check
+  local voice="$1" suffix meta path expected_size file maximum
+  for suffix in .onnx .onnx.json; do
+    meta="$(file_meta "$voice" "$suffix")"
+    IFS=$'\t' read -r path expected_size _ <<< "$meta"
+    file="$VOICES_DIR/$voice$suffix"
+    [[ -n "$path" && -s "$file" ]] || return 1
+    maximum="$MODEL_MAX_BYTES"
+    [[ "$suffix" == .onnx.json ]] && maximum="$SIDECAR_MAX_BYTES"
+    if valid_size "$expected_size" "$maximum"; then
+      [[ "$(stat -c%s "$file" 2>/dev/null)" == "$expected_size" ]] || return 1
+    else
+      return 1
+    fi
+  done
+}
+
+voice_is_valid() {
+  installed_file_valid "$1" .onnx && installed_file_valid "$1" .onnx.json
+}
+
+installed_pair_usable() { # voice -> bounded local model and JSON sidecar
+  local voice="$1"
+  local model="$VOICES_DIR/$voice.onnx"
+  local sidecar="$VOICES_DIR/$voice.onnx.json" model_size sidecar_size
+  [[ -s "$model" && -s "$sidecar" ]] || return 1
+  model_size="$(stat -c%s "$model" 2>/dev/null)" || return 1
+  sidecar_size="$(stat -c%s "$sidecar" 2>/dev/null)" || return 1
+  valid_size "$model_size" "$MODEL_MAX_BYTES" || return 1
+  valid_size "$sidecar_size" "$SIDECAR_MAX_BYTES" || return 1
+  jq -e 'type == "object"' "$sidecar" >/dev/null 2>&1
+}
+
+voice_is_usable() { # voice -> catalogue-verified when metadata is cached
+  local voice="$1"
+  installed_pair_usable "$voice" || return 1
+  # Switching an already-installed local voice must remain an offline action.
+  # When trustworthy catalogue metadata is present, take advantage of its
+  # exact size/digest checks; custom and legacy voices still get structural
+  # validation without forcing a network request.
+  if [[ ! -L "$CATALOGUE" ]] && catalogue_valid "$CATALOGUE" &&
+      jq -e --arg voice "$voice" 'has($voice)' "$CATALOGUE" >/dev/null 2>&1; then
+    voice_is_valid "$voice"
+  fi
+}
+
+recover_voice_artifacts() { # voice
+  local voice="$1" item mtime newest_mtime=0 transaction="" files_lock_fd
+  local found=0
+  local -a artifacts=(
+    "$VOICES_DIR/.$voice.onnx.stage."* "$VOICES_DIR/.$voice.onnx.json.stage."*
+    "$VOICES_DIR/.$voice.onnx.previous."* "$VOICES_DIR/.$voice.onnx.json.previous."*
+  )
+  for item in "${artifacts[@]}"; do
+    [[ -e "$item" || -L "$item" ]] && { found=1; break; }
+  done
+  [[ $found -eq 1 ]] || return 0
+
+  exec {files_lock_fd}>>"$FILES_LOCK" || return 1
+  flock "$files_lock_fd" || { exec {files_lock_fd}>&-; return 1; }
+  # A fully verified published pair wins. Artifacts beside it can only be
+  # debris left after commit or an older interrupted attempt.
+  if voice_is_valid "$voice"; then
+    if ! rm -f -- "${artifacts[@]}"; then
+      flock -u "$files_lock_fd"; exec {files_lock_fd}>&-
+      return 1
+    fi
+    flock -u "$files_lock_fd"; exec {files_lock_fd}>&-
+    return 0
+  fi
+
+  # Otherwise restore both files associated with the newest interrupted
+  # publication. A signal-safe cancellation normally does this immediately;
+  # this path covers SIGKILL, a shell crash, or power loss.
+  for item in "$VOICES_DIR/.$voice.onnx.previous."* \
+              "$VOICES_DIR/.$voice.onnx.json.previous."*; do
+    [[ -f "$item" && ! -L "$item" ]] || continue
+    mtime="$(stat -c%Y "$item" 2>/dev/null || printf 0)"
+    if [[ "$mtime" =~ ^[0-9]+$ && "$mtime" -ge "$newest_mtime" ]]; then
+      newest_mtime="$mtime"
+      transaction="${item##*.previous.}"
+    fi
+  done
+  if [[ -n "$transaction" ]]; then
+    if [[ -f "$VOICES_DIR/.$voice.onnx.previous.$transaction" &&
+          ! -L "$VOICES_DIR/.$voice.onnx.previous.$transaction" ]]; then
+      rm -f "$VOICES_DIR/$voice.onnx"
+      mv -T -- "$VOICES_DIR/.$voice.onnx.previous.$transaction" "$VOICES_DIR/$voice.onnx" || {
+        flock -u "$files_lock_fd"; exec {files_lock_fd}>&-; return 1;
+      }
+    fi
+    if [[ -f "$VOICES_DIR/.$voice.onnx.json.previous.$transaction" &&
+          ! -L "$VOICES_DIR/.$voice.onnx.json.previous.$transaction" ]]; then
+      rm -f "$VOICES_DIR/$voice.onnx.json"
+      mv -T -- "$VOICES_DIR/.$voice.onnx.json.previous.$transaction" \
+        "$VOICES_DIR/$voice.onnx.json" || {
+        flock -u "$files_lock_fd"; exec {files_lock_fd}>&-; return 1;
+      }
+    fi
+  fi
+  if ! rm -f -- "${artifacts[@]}"; then
+    flock -u "$files_lock_fd"; exec {files_lock_fd}>&-
+    return 1
+  fi
+  flock -u "$files_lock_fd"; exec {files_lock_fd}>&-
+}
+
+publish_voice_pair() ( # voice model-stage sidecar-stage model-backup sidecar-backup
+  local voice="$1" model_stage="$2" sidecar_stage="$3"
+  local model_backup="$4" sidecar_backup="$5" files_lock_fd
+  exec {files_lock_fd}>>"$FILES_LOCK" || return 1
+  flock "$files_lock_fd" || return 1
+
+  [[ ! -e "$VOICES_DIR/$voice.onnx" ]] ||
+    mv -T -- "$VOICES_DIR/$voice.onnx" "$model_backup" || return 1
+  if [[ -e "$VOICES_DIR/$voice.onnx.json" ]] &&
+      ! mv -T -- "$VOICES_DIR/$voice.onnx.json" "$sidecar_backup"; then
+    [[ ! -e "$model_backup" ]] || mv -T -- "$model_backup" "$VOICES_DIR/$voice.onnx"
+    return 1
+  fi
+  if ! mv -T -- "$sidecar_stage" "$VOICES_DIR/$voice.onnx.json" ||
+      ! mv -T -- "$model_stage" "$VOICES_DIR/$voice.onnx"; then
+    rm -f "$VOICES_DIR/$voice.onnx" "$VOICES_DIR/$voice.onnx.json"
+    [[ ! -e "$model_backup" ]] || mv -T -- "$model_backup" "$VOICES_DIR/$voice.onnx"
+    [[ ! -e "$sidecar_backup" ]] || mv -T -- "$sidecar_backup" "$VOICES_DIR/$voice.onnx.json"
+    return 1
+  fi
+  # The pair is committed at this point. A stale backup is harmless and must
+  # not turn a successful atomic publication into a reported failure.
+  rm -f "$model_backup" "$sidecar_backup" || true
+  return 0
+)
 
 fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <report>
   local path="$1" dest="$2" size="$3" md5="$4" voice="$5" report="$6"
@@ -156,7 +497,8 @@ fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <re
       done ) & poller=$!
   fi
   local rc=0
-  curl -sL --fail --retry 2 --connect-timeout 15 --max-time 900 \
+  curl -sL --fail --retry 2 --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 900 --max-filesize "$size" \
     "$FILE_BASE/$path?download=true" -o "$part" || rc=$?
   if [[ -n "$poller" ]]; then
     kill "$poller" 2>/dev/null
@@ -167,53 +509,90 @@ fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <re
     local got_size; got_size="$(stat -c%s "$part" 2>/dev/null || echo 0)"
     [[ "$got_size" == "$size" ]] || { rm -f "$part"; return 2; }
   fi
-  if [[ -n "$md5" && "$md5" != "null" ]] && command -v md5sum >/dev/null 2>&1; then
+  if [[ -n "$md5" && "$md5" != "null" ]]; then
+    command -v md5sum >/dev/null 2>&1 || { rm -f "$part"; return 3; }
     local got_md5; got_md5="$(md5sum "$part" | cut -d' ' -f1)"
     [[ "$got_md5" == "$md5" ]] || { rm -f "$part"; return 2; }
   fi
-  mv "$part" "$dest"
+  mv -T -- "$part" "$dest"
 }
 
-do_add() { # do_add <voice> <report>
-  local voice="$1" report="${2:-no}"
-  ensure_catalogue || { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no catalogue"; return 1; }
-  jq -e --arg k "$voice" 'has($k)' "$CATALOGUE" >/dev/null 2>&1 ||
-    { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no such voice"; return 1; }
+add_failure() { # report voice message
+  if [[ "$1" == yes ]]; then
+    write_state error "$2" 0 0 "$3" || true
+  else
+    printf 'speak-voice: %s\n' "$3" >&2
+  fi
+  return 1
+}
 
-  # Re-running add is an idempotent repair operation. Never replace a working
-  # model merely to fill in its small metadata sidecar.
-  if is_installed "$voice"; then
-    local existing_meta existing_path existing_size existing_digest
-    existing_meta="$(file_meta "$voice" ".onnx.json")"
-    IFS=$'\t' read -r existing_path existing_size existing_digest <<< "$existing_meta"
-    if [[ ! -f "$VOICES_DIR/$voice.onnx.json" && -n "$existing_path" ]]; then
-      fetch_file "$existing_path" "$VOICES_DIR/$voice.onnx.json" \
-        "$existing_size" "$existing_digest" "$voice" no || return 1
-    fi
+do_add() { # do_add <voice> <report> <force-repair>
+  local voice="$1" report="${2:-no}" force="${3:-no}"
+  ensure_catalogue || {
+    add_failure "$report" "$voice" "could not fetch the voice catalogue (offline?)"
+    return 1
+  }
+  jq -e --arg k "$voice" 'has($k)' "$CATALOGUE" >/dev/null 2>&1 ||
+    { add_failure "$report" "$voice" "no such voice: $voice"; return 1; }
+  recover_voice_artifacts "$voice" || {
+    add_failure "$report" "$voice" "could not recover an interrupted install"
+    return 1
+  }
+
+  # Verify existing bytes against the catalogue. A valid install is left alone;
+  # a partial/truncated one is repaired without deleting its current files until
+  # both replacements have downloaded and passed integrity checks.
+  if [[ "$force" != yes ]] && is_installed "$voice" && voice_is_valid "$voice"; then
     [[ "$report" == yes ]] && write_state "done" "$voice" 1 1 "Already installed"
     return 0
   fi
 
-  local m p s d
+  local m p s d mj pj sj dj model_stage sidecar_stage model_backup sidecar_backup
   m="$(file_meta "$voice" ".onnx")"
   IFS=$'\t' read -r p s d <<< "$m"
-  [[ -n "$p" ]] || { [[ "$report" == yes ]] && write_state error "$voice" 0 0 "no model file"; return 1; }
-
-  [[ "$report" == yes ]] && write_state downloading "$voice" 0 "$s"
-  if ! fetch_file "$p" "$VOICES_DIR/$voice.onnx" "$s" "$d" "$voice" "$report"; then
-    [[ "$report" == yes ]] && write_state error "$voice" 0 "$s" "download failed"
+  if ! valid_repo_file "$p" .onnx ||
+      ! valid_size "$s" "$MODEL_MAX_BYTES" ||
+      ! [[ -z "$d" || "$d" == null || "$d" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    add_failure "$report" "$voice" "invalid model metadata"
     return 1
   fi
+  d="${d,,}"
 
-  local mj pj sj dj
   mj="$(file_meta "$voice" ".onnx.json")"
   IFS=$'\t' read -r pj sj dj <<< "$mj"
-  if [[ -n "$pj" ]]; then
-    fetch_file "$pj" "$VOICES_DIR/$voice.onnx.json" "$sj" "$dj" "$voice" no || {
-      rm -f "$VOICES_DIR/$voice.onnx"
-      [[ "$report" == yes ]] && write_state error "$voice" 0 "$s" "config download failed"
-      return 1
-    }
+  if ! valid_repo_file "$pj" .onnx.json ||
+      ! valid_size "$sj" "$SIDECAR_MAX_BYTES" ||
+      ! [[ -z "$dj" || "$dj" == null || "$dj" =~ ^[0-9a-fA-F]{32}$ ]]; then
+    add_failure "$report" "$voice" "invalid voice config metadata"
+    return 1
+  fi
+  dj="${dj,,}"
+  model_stage="$VOICES_DIR/.$voice.onnx.stage.$BASHPID"
+  sidecar_stage="$VOICES_DIR/.$voice.onnx.json.stage.$BASHPID"
+  model_backup="$VOICES_DIR/.$voice.onnx.previous.$BASHPID"
+  sidecar_backup="$VOICES_DIR/.$voice.onnx.json.previous.$BASHPID"
+  rm -f "$model_stage" "$model_stage.part" "$sidecar_stage" "$sidecar_stage.part" \
+    "$model_backup" "$sidecar_backup"
+
+  [[ "$report" == yes ]] && write_state downloading "$voice" 0 "$s"
+  if ! fetch_file "$p" "$model_stage" "$s" "$d" "$voice" "$report"; then
+    add_failure "$report" "$voice" "model download or verification failed"
+    return 1
+  fi
+  fetch_file "$pj" "$sidecar_stage" "$sj" "$dj" "$voice" no || {
+    rm -f "$model_stage" "$model_stage.part" "$sidecar_stage" "$sidecar_stage.part"
+    add_failure "$report" "$voice" "voice config download or verification failed"
+    return 1
+  }
+  # Download serialization and model use are separate concerns: a download
+  # may proceed while Piper is speaking, then waits only for this atomic swap.
+  # Keep both old files until the pair has committed so publication failure
+  # can restore the exact working installation.
+  if ! publish_voice_pair "$voice" "$model_stage" "$sidecar_stage" \
+      "$model_backup" "$sidecar_backup"; then
+    rm -f "$model_stage" "$sidecar_stage"
+    add_failure "$report" "$voice" "could not publish voice safely"
+    return 1
   fi
   [[ "$report" == yes ]] && write_state "done" "$voice" "$s" "$s"
   return 0
@@ -221,9 +600,13 @@ do_add() { # do_add <voice> <report>
 
 case "${1:-}" in
   list)
+    [[ $# -eq 1 ]] || die "list takes no arguments"
+    exec {files_lock_fd}>>"$FILES_LOCK" || die "could not lock installed voices"
+    flock -s "$files_lock_fd" || die "could not lock installed voices"
     act="$(active_voice)"; found=0
     for m in "$VOICES_DIR"/*.onnx; do
       [[ -e "$m" ]] || continue
+      voice_is_usable "$(basename "$m" .onnx)" || continue
       found=1; n="$(basename "$m" .onnx)"
       mark="  "; [[ "$n" == "$act" ]] && mark="* "
       printf '%s%-28s %s\n' "$mark" "$n" "$(du -h "$m" | cut -f1)"
@@ -231,6 +614,7 @@ case "${1:-}" in
     [[ $found -eq 0 ]] && echo "No voices installed. Try: speak-voice add en_US-amy-medium"
     ;;
   available)
+    [[ $# -le 2 && ( $# -eq 1 || "${2:-}" == "--json" ) ]] || die "available accepts only --json"
     if [[ "${2:-}" == "--json" ]]; then
       emit_available
     else
@@ -240,57 +624,251 @@ case "${1:-}" in
   add)
     [[ -n "${2:-}" ]] || die "need a voice name"
     [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
-    if [[ "${3:-}" == "--async" ]]; then
-      exec {download_lock_fd}>"$DL_LOCK"
+    async=no; repair=no
+    for option in "${@:3}"; do
+      case "$option" in
+        --async) async=yes ;;
+        --repair) repair=yes ;;
+        *) die "unknown add option: $option" ;;
+      esac
+    done
+    if [[ "$async" == yes ]]; then
+      [[ ! -L "$DL_LOCK" ]] || die "unsafe voice-download lock symlink"
+      exec {download_lock_fd}>>"$DL_LOCK" || die "could not lock voice downloads"
       flock -n "$download_lock_fd" || die "a voice download is already running"
-      setsid "$0" _download "$2" >/dev/null 2>&1 &
+      chmod 600 "$DL_LOCK" || die "could not secure voice-download lock"
+      write_state starting "$2" 0 0 "Preparing download" || die "could not write download state"
+      # Always force a setsid wrapper to fork. Without this, an environment
+      # with shell job control can make `$!` name the short-lived wrapper
+      # while the actual session leader gets a different PID. The worker is
+      # authoritative and registers its own PID/start identity in DL_STATE.
+      setsid --fork --wait env "$DOWNLOAD_LOCK_FD_ENV=$download_lock_fd" \
+        "$0" _download "$2" "$repair" >/dev/null 2>&1 &
+      download_launcher_pid=$!
+      download_launcher_identity="$(process_identity "$download_launcher_pid" || true)"
       exec {download_lock_fd}>&-
+      download_registered=0
+      for _ in {1..200}; do
+        if download_state_valid; then
+          state_voice="$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)"
+          state_status="$(jq -r '.status // ""' "$DL_STATE" 2>/dev/null)"
+          state_pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
+          state_identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
+          if [[ "$state_voice" == "$2" && "$state_pid" =~ ^[0-9]+$ &&
+                "$state_pid" -gt 1 && -n "$state_identity" ]]; then
+            current_identity="$(process_identity "$state_pid" || true)"
+            state_group="$(process_group "$state_pid" || true)"
+            if [[ "$state_status" == "done" || "$state_status" == "error" ||
+                  "$state_status" == "cancelled" ||
+                  ( ( "$state_status" == "starting" || "$state_status" == "downloading" ) &&
+                    "$current_identity" == "$state_identity" && "$state_group" == "$state_pid" ) ]]; then
+              download_registered=1
+              break
+            fi
+          fi
+        fi
+        kill -0 "$download_launcher_pid" 2>/dev/null || break
+        sleep 0.01
+      done
+      if [[ $download_registered -ne 1 ]]; then
+        # If the wrapper did fork but initialization failed before state was
+        # published, recover its sole child from procfs and stop only that
+        # verified process/session. This also releases the inherited lock.
+        launcher_child=""
+        if [[ -r "/proc/$download_launcher_pid/task/$download_launcher_pid/children" ]]; then
+          read -r launcher_child _ \
+            < "/proc/$download_launcher_pid/task/$download_launcher_pid/children" || true
+        fi
+        if [[ "$launcher_child" =~ ^[0-9]+$ && "$launcher_child" -gt 1 ]]; then
+          child_identity="$(process_identity "$launcher_child" || true)"
+          terminate_download_worker "$launcher_child" "$child_identity"
+        fi
+        current_launcher_identity="$(process_identity "$download_launcher_pid" || true)"
+        if [[ -n "$download_launcher_identity" &&
+              "$current_launcher_identity" == "$download_launcher_identity" ]]; then
+          kill -TERM "$download_launcher_pid" 2>/dev/null || true
+        fi
+        wait "$download_launcher_pid" 2>/dev/null || true
+        write_state error "$2" 0 0 "Download worker did not initialize safely"
+        die "download could not start safely"
+      fi
       echo "started"
     else
-      exec {download_lock_fd}>"$DL_LOCK"
+      [[ ! -L "$DL_LOCK" ]] || die "unsafe voice-download lock symlink"
+      exec {download_lock_fd}>>"$DL_LOCK" || die "could not lock voice downloads"
       flock -n "$download_lock_fd" || die "a voice download is already running"
+      chmod 600 "$DL_LOCK" || die "could not secure voice-download lock"
       echo "Downloading $2 ..."
-      do_add "$2" no || die "download failed"
+      if ! do_add "$2" no "$repair"; then
+        exec {download_lock_fd}>&-
+        exit 1
+      fi
       echo "Installed. Use it with: speak-voice use $2"
       exec {download_lock_fd}>&-
     fi
     ;;
   _download)
+    [[ $# -le 3 ]] || die "invalid download worker arguments"
+    download_voice="${2:-}"
+    download_repair="${3:-no}"
+    [[ "$download_voice" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
+    [[ "$download_repair" == yes || "$download_repair" == no ]] || die "invalid repair mode"
+    worker_lock_fd="${!DOWNLOAD_LOCK_FD_ENV:-}"
+    unset "$DOWNLOAD_LOCK_FD_ENV"
+    [[ "$worker_lock_fd" =~ ^[0-9]+$ && "$worker_lock_fd" -gt 2 ]] ||
+      die "download worker has no inherited lock"
+    inherited_lock="$(stat -Lc '%d:%i:%u' "/proc/$BASHPID/fd/$worker_lock_fd" 2>/dev/null || true)"
+    expected_lock="$(stat -Lc '%d:%i:%u' "$DL_LOCK" 2>/dev/null || true)"
+    [[ -n "$inherited_lock" && "$inherited_lock" == "$expected_lock" &&
+       "$expected_lock" == *":$UID" && ! -L "$DL_LOCK" && -f "$DL_LOCK" ]] ||
+      die "download worker received an unsafe lock"
+    flock -n "$worker_lock_fd" || die "another voice download owns the lock"
     OWNER_PID=$BASHPID
     export OWNER_PID
-    trap 'rm -f "$VOICES_DIR/${2:-}".onnx.part "$VOICES_DIR/${2:-}".onnx.json.part; write_state cancelled "${2:-}" 0 0 "Cancelled"; exit 143' TERM INT
-    do_add "${2:-}" yes ;;
+    [[ "$(process_group "$OWNER_PID" || true)" == "$OWNER_PID" ]] || exit 1
+    # Invoked indirectly by the TERM/INT trap below.
+    # shellcheck disable=SC2317,SC2329
+    cancel_download_worker() {
+      local files_lock_fd cleanup_failed=0
+      if ! exec {files_lock_fd}>>"$FILES_LOCK" || ! flock "$files_lock_fd"; then
+        write_state error "$download_voice" 0 0 "Cancellation cleanup could not lock voice files"
+        exit 143
+      fi
+      rm -f "$VOICES_DIR/.$download_voice.onnx.stage.$BASHPID"* \
+        "$VOICES_DIR/.$download_voice.onnx.json.stage.$BASHPID"* || cleanup_failed=1
+      if [[ -e "$VOICES_DIR/.$download_voice.onnx.previous.$BASHPID" ]]; then
+        rm -f "$VOICES_DIR/$download_voice.onnx" || cleanup_failed=1
+        mv -T -- "$VOICES_DIR/.$download_voice.onnx.previous.$BASHPID" \
+          "$VOICES_DIR/$download_voice.onnx" || cleanup_failed=1
+      fi
+      if [[ -e "$VOICES_DIR/.$download_voice.onnx.json.previous.$BASHPID" ]]; then
+        rm -f "$VOICES_DIR/$download_voice.onnx.json" || cleanup_failed=1
+        mv -T -- "$VOICES_DIR/.$download_voice.onnx.json.previous.$BASHPID" \
+          "$VOICES_DIR/$download_voice.onnx.json" || cleanup_failed=1
+      fi
+      flock -u "$files_lock_fd"
+      exec {files_lock_fd}>&-
+      if [[ $cleanup_failed -ne 0 ]]; then
+        write_state error "$download_voice" 0 0 "Cancellation stopped the download, but file recovery is still required"
+        exit 143
+      fi
+      write_state cancelled "$download_voice" 0 0 "Cancelled"
+      exit 143
+    }
+    trap cancel_download_worker TERM INT
+    write_state starting "$download_voice" 0 0 "Preparing download" || exit 1
+    do_add "$download_voice" yes "$download_repair"
+    download_rc=$?
+    trap - TERM INT
+    exit "$download_rc" ;;
   status)
-    if [[ -s "$DL_STATE" ]]; then cat "$DL_STATE"
+    [[ $# -le 2 && ( $# -eq 1 || "${2:-}" == "--json" ) ]] || die "status accepts only --json"
+    if [[ -e "$DL_STATE" || -L "$DL_STATE" ]]; then
+      if [[ ! -L "$DL_STATE" && -f "$DL_STATE" ]]; then
+        chmod 600 "$DL_STATE" 2>/dev/null || die "could not secure download state"
+      fi
+      if ! download_state_valid; then
+        if write_state error "" 0 0 "Download state was unreadable; try again"; then
+          cat "$DL_STATE"
+        else
+          jq -nc '{status:"error",voice:"",bytes:0,total:0,percent:0,
+            message:"Download state path is unsafe; remove it and try again"}'
+        fi
+      else
+        state_status="$(jq -r '.status // "idle"' "$DL_STATE")"
+        state_pid="$(jq -r '.pid // 0' "$DL_STATE")"
+        state_identity="$(jq -r '.processIdentity // ""' "$DL_STATE")"
+        if [[ "$state_status" == starting || "$state_status" == downloading ]]; then
+          current_identity="$(process_identity "$state_pid" || true)"
+          state_group="$(process_group "$state_pid" || true)"
+          if [[ -z "$state_identity" || "$state_identity" != "$current_identity" ||
+                "$state_group" != "$state_pid" ]]; then
+            state_voice="$(jq -r '.voice // ""' "$DL_STATE")"
+            write_state error "$state_voice" 0 0 "Download stopped unexpectedly"
+            cat "$DL_STATE"
+          else
+            cat "$DL_STATE"
+          fi
+        else
+          cat "$DL_STATE"
+        fi
+      fi
     else echo '{"status":"idle","voice":"","bytes":0,"total":0,"percent":0,"message":""}'; fi
     ;;
   cancel)
+    [[ $# -eq 1 ]] || die "cancel takes no arguments"
+    download_state_valid || die "no active voice download"
+    state_status="$(jq -r '.status // "idle"' "$DL_STATE" 2>/dev/null)"
     pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
     identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
-    current="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" && "$identity" == "$current" ]]; then
-      kill -TERM -- "-$pid" 2>/dev/null || true
+    current="$(process_identity "$pid" || true)"
+    group="$(process_group "$pid" || true)"
+    if [[ "$state_status" == starting || "$state_status" == downloading ]] &&
+        [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" &&
+           "$identity" == "$current" && "$group" == "$pid" ]] &&
+        kill -TERM -- "-$pid" 2>/dev/null; then
+      for _ in {1..200}; do
+        current="$(process_identity "$pid" || true)"
+        [[ -z "$current" || "$current" != "$identity" ]] && break
+        sleep 0.01
+      done
+    else
+      die "no active voice download"
     fi
+    current="$(process_identity "$pid" || true)"
+    final_status="$(jq -r '.status // "idle"' "$DL_STATE" 2>/dev/null)"
+    # Completion can win the race with Cancel after the state was inspected.
+    # Keep the truthful terminal result and the fully verified installation.
+    [[ "$final_status" == "done" ]] && exit 0
+    [[ -z "$current" || "$current" != "$identity" || "$final_status" == cancelled ]] ||
+      die "voice download did not stop; try again"
     cancelled_voice="$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)"
-    [[ "$cancelled_voice" =~ ^[A-Za-z0-9._-]+$ ]] &&
-      rm -f "$VOICES_DIR/$cancelled_voice.onnx.part" "$VOICES_DIR/$cancelled_voice.onnx.json.part"
-    write_state cancelled "$cancelled_voice" 0 0 "Cancelled"
+    if [[ "$cancelled_voice" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      if ! recover_voice_artifacts "$cancelled_voice"; then
+        write_state error "$cancelled_voice" 0 0 \
+          "Download stopped, but voice file recovery failed; retry the repair"
+        die "download stopped, but voice file recovery failed; run: speak-voice add $cancelled_voice --repair"
+      fi
+    fi
+    [[ "$final_status" == cancelled ]] ||
+      write_state cancelled "$cancelled_voice" 0 0 "Cancelled"
     ;;
   remove)
     [[ -n "${2:-}" ]] || die "need a voice name"
     [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
-    [[ "$2" != "$(active_voice)" || "${3:-}" == "--force" ]] || die "choose another active voice before removing $2"
-    rm -f "$VOICES_DIR/$2.onnx" "$VOICES_DIR/$2.onnx.json" && echo "Removed $2"
+    [[ $# -eq 2 ]] || die "remove needs exactly one voice name"
+    [[ "$2" != "$(active_voice)" ]] || die "choose another active voice before removing $2"
+    [[ ! -L "$DL_LOCK" ]] || die "unsafe voice-download lock symlink"
+    exec {download_lock_fd}>>"$DL_LOCK" || die "could not lock voice downloads"
+    flock -n "$download_lock_fd" || die "a voice download is running; cancel it before removing a voice"
+    exec {files_lock_fd}>>"$FILES_LOCK" || die "could not lock installed voices"
+    flock "$files_lock_fd" || die "could not lock installed voices"
+    was_installed=no
+    [[ -e "$VOICES_DIR/$2.onnx" || -L "$VOICES_DIR/$2.onnx" ||
+       -e "$VOICES_DIR/$2.onnx.json" || -L "$VOICES_DIR/$2.onnx.json" ]] && was_installed=yes
+    rm -f "$VOICES_DIR/$2.onnx" "$VOICES_DIR/$2.onnx.json" \
+      "$VOICES_DIR/.$2.onnx.stage."* "$VOICES_DIR/.$2.onnx.json.stage."* \
+      "$VOICES_DIR/.$2.onnx.previous."* "$VOICES_DIR/.$2.onnx.json.previous."* ||
+      die "could not remove $2"
+    if [[ "$was_installed" == yes ]]; then echo "Removed $2"; else echo "$2 was not installed"; fi
     ;;
   use)
     [[ -n "${2:-}" ]] || die "need a voice name"
-    is_installed "$2" || die "not installed: $2"
+    [[ $# -eq 2 ]] || die "use needs exactly one voice name"
+    [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
+    exec {files_lock_fd}>>"$FILES_LOCK" || die "could not lock installed voices"
+    flock -s "$files_lock_fd" || die "could not lock installed voices"
+    voice_is_usable "$2" || die "voice is incomplete or corrupted; repair it with: speak-voice add $2 --repair"
     tts_config_set .piper.voice "$2" || die "could not update configuration"
     echo "Default voice is now $2"
     ;;
   refresh)
+    [[ $# -eq 1 ]] || die "refresh takes no arguments"
     ensure_catalogue yes || die "could not refresh the voice catalogue; existing cache was kept"
     echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
-  browse) xdg-open "https://rhasspy.github.io/piper-samples/" 2>/dev/null & ;;
-  *) usage ;;
+  browse)
+    [[ $# -eq 1 ]] || die "browse takes no arguments"
+    command -v xdg-open >/dev/null 2>&1 || die "xdg-open is not installed"
+    xdg-open "https://rhasspy.github.io/piper-samples/" 2>/dev/null & ;;
+  *) die "unknown command: $1 (try --help)" ;;
 esac

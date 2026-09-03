@@ -8,7 +8,13 @@ Rectangle {
   required property var controller
   property string provider: ""
   property string vendor: provider
+  property string purpose: "speech"
+  // What this key lets the plugin send. A speech key sends text; an OCR key
+  // sends pictures of the screen, and the dialog must say which.
+  property string sends: "Highlighted text and test samples"
   property color foreground: Color.popups.text
+  readonly property bool editing: visible && keyField.activeFocus
+  readonly property bool keyValid: /^[\x21-\x7e]{8,4096}$/.test(keyField.text)
   signal closed
   width: parent ? parent.width : implicitWidth
   height: content.implicitHeight + Style.space(24)
@@ -17,15 +23,27 @@ Rectangle {
   border.width: 1
   border.color: Color.accent
 
+  function saveKey() {
+    if (!root.keyValid || controller.keySaving) return
+    controller.storeKey(provider, keyField.text, purpose)
+    keyField.text = ""
+  }
+
+  onVisibleChanged: {
+    if (visible) Qt.callLater(function() { keyField.forceActiveFocus() })
+    else keyField.text = ""
+  }
+
   Column {
     id: content
     anchors.fill: parent
     anchors.margins: Style.space(12)
     spacing: Style.space(8)
-    Text { text: "Add " + root.vendor + " API key"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle }
+    Text { textFormat: Text.PlainText; text: "Add " + root.vendor + " API key"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.subtitle }
     Text {
       width: parent.width; wrapMode: Text.WordWrap
-      text: "The key is saved in the system keyring and is never written to settings or logs. Highlighted text and test samples will be sent to " + root.vendor + " and may incur charges."
+      textFormat: Text.PlainText
+      text: "The key is saved in the system keyring and is never written to settings or logs. " + root.sends + " will be sent to " + root.vendor + " and may incur charges."
       color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
     TextField {
@@ -35,20 +53,28 @@ Rectangle {
       placeholderText: "Paste API key"
       foreground: root.foreground
       selectByMouse: true
+      maximumLength: 4096
+      onAccepted: root.saveKey()
     }
     Text {
       width: parent.width; visible: root.controller.keyResult.message !== ""
+      textFormat: Text.PlainText
       text: root.controller.keyResult.message
       color: root.controller.keyResult.ok ? Color.accent : Color.urgent
       font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
+    Text {
+      width: parent.width; visible: keyField.text.length > 0 && !root.keyValid
+      text: "Keys must be 8–4096 printable ASCII characters with no spaces."
+      color: Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.caption
+    }
     Row {
       spacing: Style.space(8)
-      Button { text: "Cancel"; bordered: true; onClicked: { keyField.text = ""; root.closed() } }
+      Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { keyField.text = ""; root.closed() } }
       Button {
-        text: "Save key"; bordered: true; foreground: Color.accent
-        enabled: keyField.text.length >= 8 && !root.controller.keySaving
-        onClicked: { root.controller.storeKey(root.provider, keyField.text); keyField.text = "" }
+        text: "Save key"; bordered: true; focusable: true; foreground: Color.accent
+        enabled: root.keyValid && !root.controller.keySaving
+        onClicked: root.saveKey()
       }
     }
   }

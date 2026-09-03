@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# desc: An OpenAI vision model transcribes the capture. Screenshots leave your machine.
+# title: OpenAI
+# kind: cloud
+# probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
+# vendor: OpenAI
+# keyname: openai
+# keyenv: OPENAI_API_KEY
+# Reads a PNG on stdin, writes recognised text on stdout.
+set -uo pipefail
+umask 077
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+source "$TTS_PLUGIN_DIR/lib/cloud.sh"
+need curl "install with: omarchy pkg add curl"
+KEY="$(get_key OPENAI_API_KEY openai)" || exit 1
+IMAGE_MAX_BYTES=52428800
+RESPONSE_MAX_BYTES=16777216
+MODEL="$(jq -r '.ocr.openai.model // "gpt-4.1-mini"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="gpt-4.1-mini"
+
+if [[ "${1:-}" == "--languages" ]]; then
+  printf '[{"value":"eng","label":"Any language (model decides)","installed":true}]\n'; exit 0
+fi
+
+img="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr.XXXXXX.png")" || exit 1
+trap 'rm -f "$img"' EXIT
+body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-body.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$body"' EXIT
+headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-headers.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$body" "$headers"' EXIT
+head -c "$((IMAGE_MAX_BYTES + 1))" > "$img"
+[[ "$(stat -c%s "$img" 2>/dev/null || printf 0)" -le "$IMAGE_MAX_BYTES" ]] || {
+  printf 'OpenAI: image exceeds the 50 MiB safety limit\n' >&2; exit 65;
+}
+[[ -s "$img" ]] || { printf 'OpenAI: image is empty\n' >&2; exit 65; }
+IMAGE_MIME="${TTS_OCR_IMAGE_MIME:-image/png}"
+case "$IMAGE_MIME" in
+  image/png|image/jpeg|image/webp) ;;
+  *) printf 'OpenAI: this clipboard image format is not supported; copy PNG, JPEG, or WebP instead\n' >&2; exit 65 ;;
+esac
+b64="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-b64.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$body" "$headers" "$b64"' EXIT
+base64 -w0 "$img" > "$b64"
+
+# The image travels through a file, not argv: a full-screen capture exceeds
+# the kernel's single-argument limit as base64.
+# The instruction asks for a transcription, not a summary, so the model has
+# no licence to paraphrase what is on screen.
+curl_rc=0
+status="$(jq -n --arg m "$MODEL" --arg mime "$IMAGE_MIME" --rawfile b64 "$b64" '
+  {model:$m, temperature:0, max_completion_tokens:8192,
+   messages:[{role:"user", content:[
+     {type:"text", text:"Transcribe all readable text in this image exactly as written, preserving line breaks and reading order. Output only the text, with no commentary. If there is no text, output nothing."},
+     {type:"image_url", image_url:{url:("data:" + $mime + ";base64," + ($b64|rtrimstr("\n"))), detail:"high"}}]}]}' |
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 120 \
+    --max-filesize "$RESPONSE_MAX_BYTES" https://api.openai.com/v1/chat/completions \
+    -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$body" \
+    --write-out '%{http_code}' \
+    3<<< "Authorization: Bearer $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
+if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail OpenAI "$curl_rc"; exit $?; fi
+[[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'OpenAI: invalid HTTP response\n' >&2; exit 74; }
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+  cloud_record openai-ocr "$MODEL" 0 "$status" "$headers" "$body"
+  cloud_fail OpenAI "$status" "$body" "$headers"; exit $?
+fi
+finish="$(jq -r '.choices[0].finish_reason // empty' "$body" 2>/dev/null)"
+refusal="$(jq -r '.choices[0].message.refusal // empty' "$body" 2>/dev/null)"
+if [[ -n "$refusal" ]]; then
+  cloud_record openai-ocr "$MODEL" 0 "$status" "$headers" "$body" 0 refused
+  printf 'OpenAI: the vision model refused this capture\n' >&2; exit 74
+fi
+if [[ "$finish" != stop ]]; then
+  code=invalid_response; [[ "$finish" == length ]] && code=truncated
+  cloud_record openai-ocr "$MODEL" 0 "$status" "$headers" "$body" 0 "$code"
+  if [[ "$finish" == length ]]; then
+    printf 'OpenAI: transcription was truncated by the response limit\n' >&2
+  else
+    printf 'OpenAI: transcription response was incomplete\n' >&2
+  fi
+  exit 74
+fi
+if ! jq -e '.choices[0].message.content | type == "string"' "$body" >/dev/null 2>&1; then
+  cloud_record openai-ocr "$MODEL" 0 "$status" "$headers" "$body" 0 invalid_response
+  printf 'OpenAI: unreadable response\n' >&2; exit 74
+fi
+cloud_record openai-ocr "$MODEL" 0 "$status" "$headers" "$body"
+jq -r '.choices[0].message.content' "$body"

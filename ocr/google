@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# desc: Cloud Vision, purpose-built OCR with per-word confidence. Screenshots leave your machine.
+# title: Google Cloud
+# kind: cloud
+# probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
+# vendor: Google
+# keyname: google
+# keyenv: GOOGLE_API_KEY
+# confidence: true
+# Reads a PNG on stdin, writes recognised text on stdout.
+set -uo pipefail
+umask 077
+source "$TTS_PLUGIN_DIR/lib/play.sh"
+source "$TTS_PLUGIN_DIR/lib/keys.sh"
+source "$TTS_PLUGIN_DIR/lib/cloud.sh"
+need curl "install with: omarchy pkg add curl"
+KEY="$(get_key GOOGLE_API_KEY google)" || exit 1
+IMAGE_MAX_BYTES=52428800
+RESPONSE_MAX_BYTES=67108864
+MINCONF="${TTS_OCR_MINCONF:-$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)}"
+[[ "$MINCONF" =~ ^[0-9]+$ && "$MINCONF" -le 100 ]] || MINCONF=60
+
+# Vision detects languages itself; Google's own guidance is that no hint
+# gives the best result, so there is nothing to select here.
+if [[ "${1:-}" == "--languages" ]]; then
+  printf '[{"value":"eng","label":"Any language (auto-detected)","installed":true}]\n'; exit 0
+fi
+
+img="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr.XXXXXX.png")" || exit 1
+trap 'rm -f "$img"' EXIT
+b64="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-b64.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$b64"' EXIT
+body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-body.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$b64" "$body"' EXIT
+headers="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-ocr-headers.XXXXXX")" || exit 1
+trap 'rm -f "$img" "$b64" "$body" "$headers"' EXIT
+head -c "$((IMAGE_MAX_BYTES + 1))" > "$img"
+[[ "$(stat -c%s "$img" 2>/dev/null || printf 0)" -le "$IMAGE_MAX_BYTES" ]] || {
+  printf 'Google: image exceeds the 50 MiB safety limit\n' >&2; exit 65;
+}
+[[ -s "$img" ]] || { printf 'Google: image is empty\n' >&2; exit 65; }
+base64 -w0 "$img" > "$b64"
+
+# The key goes in a header through fd 3, not the ?key= query string Google
+# documents first: a URL is argv, and argv is visible to every process.
+curl_rc=0
+status="$(jq -n --rawfile b64 "$b64" '
+  {requests:[{image:{content:($b64|rtrimstr("\n"))},
+              features:[{type:"DOCUMENT_TEXT_DETECTION"}]}]}' |
+  curl -sS --proto '=https' --connect-timeout 15 --max-time 120 \
+    --max-filesize "$RESPONSE_MAX_BYTES" https://vision.googleapis.com/v1/images:annotate \
+    -H @/dev/fd/3 --data-binary @- --dump-header "$headers" --output "$body" \
+    --write-out '%{http_code}' \
+    3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
+if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail Google "$curl_rc"; exit $?; fi
+[[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'Google: invalid HTTP response\n' >&2; exit 74; }
+embedded_error=""
+if [[ "$status" =~ ^2[0-9][0-9]$ ]] &&
+    jq -e '.responses[0].error? != null' "$body" >/dev/null 2>&1; then
+  embedded_error="$(cloud_error_code "$status" "$body")"
+fi
+if [[ "$status" =~ ^2[0-9][0-9]$ && -z "$embedded_error" ]] &&
+    ! jq -e '.responses | type == "array" and length == 1 and (.[0] | type == "object")' \
+      "$body" >/dev/null 2>&1; then
+  embedded_error=invalid_response
+fi
+cloud_record google-ocr document-text-detection 0 "$status" "$headers" "$body" 0 "$embedded_error"
+if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail Google "$status" "$body" "$headers"; exit $?; fi
+
+# Vision can answer 200 with a per-image error inside the envelope.
+if [[ -n "$embedded_error" ]]; then
+  if [[ "$embedded_error" == invalid_response ]]; then
+    printf 'Google: response did not contain an OCR result\n' >&2
+    exit 74
+  fi
+  cloud_fail Google "$status" "$body" "$headers"; exit $?
+fi
+
+# Rebuild the text from words so the confidence floor applies per word, as it
+# does locally, and keep Vision's own breaks so lines survive for the reflow.
+jq -r --argjson floor "$MINCONF" '
+  def brk: (.property.detectedBreak.type // "") as $b
+    | if $b == "SPACE" or $b == "SURE_SPACE" or $b == "EOL_SURE_SPACE" then " "
+      elif $b == "LINE_BREAK" then "\n" else "" end;
+  [ .responses[0].fullTextAnnotation.pages[]?.blocks[]?.paragraphs[]?
+    | [ .words[]? | select(((.confidence // 1) * 100) >= $floor)
+        | (.symbols | map(.text + brk) | join("")) ]
+    | join("") | rtrimstr("\n") ]
+  | map(select(length > 0)) | join("\n")' "$body" 2>/dev/null ||
+  { printf 'Google: unreadable response\n' >&2; exit 74; }
