@@ -147,7 +147,8 @@ Panel {
     for (var i = 0; i < all.length; ++i) {
       var l = all[i]
       if (l.installed) continue
-      if (!q || String(l.value).toLowerCase().indexOf(q) >= 0) out.push(l)
+      if (!q || String(l.value).toLowerCase().indexOf(q) >= 0
+             || String(l.label).toLowerCase().indexOf(q) >= 0) out.push(l)
     }
     return out
   }
@@ -675,7 +676,7 @@ Panel {
                 width: langChip.implicitWidth + 18; height: 24; radius: 4
                 color: active ? root.tint(0.16) : "transparent"
                 border.width: 1; border.color: active ? root.tint(0.5) : Color.popups.border
-                Text { id: langChip; anchors.centerIn: parent; text: parent.modelData.value
+                Text { id: langChip; anchors.centerIn: parent; text: parent.modelData.label || parent.modelData.value
                        color: parent.active ? Color.accent : root.dim
                        font.family: root.ff; font.pixelSize: Style.font.caption }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -704,7 +705,9 @@ Panel {
                                            && (controller.setupJob.status === "running" || controller.setupJob.status === "starting")
               width: ListView.view.width; height: 28; radius: 4; color: "transparent"
               Text { anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter
-                     text: parent.modelData.value; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+                     text: (parent.modelData.label || parent.modelData.value)
+                           + (parent.modelData.label && parent.modelData.label !== parent.modelData.value ? "  " + parent.modelData.value : "")
+                     color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
               Text { anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
                      text: parent.busy ? "Installing…" : "󰇚 Install"
                      color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
