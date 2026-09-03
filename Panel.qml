@@ -17,7 +17,7 @@ Panel {
   readonly property color dim: Color.muted
   readonly property string ff: bar ? bar.fontFamily : Style.font.family
   property int currentTab: 0
-  readonly property var tabNames: ["Provider", "Voice", "Text", "Screen", "Keys"]
+  readonly property var tabNames: ["Provider", "Voice", "Text", "Screen", "Languages", "Keys"]
   property bool browsing: false
   property string voiceFilter: ""
   property string previewSource: "Visit https://omarchy.org in ~2s and run `speak --help`."
@@ -262,7 +262,7 @@ Panel {
   function restoreFromInfo() {
     if (!restorePending || !controller.infoLoaded) return
     restorePending = false
-    currentTab = Math.max(0, Math.min(4, Number(controller.info.ui?.lastTab || 0)))
+    currentTab = Math.max(0, Math.min(5, Number(controller.info.ui?.lastTab || 0)))
     sampleText = String(controller.info.ui?.sampleText || sampleText)
     controller.previewText(previewSource)
   }
@@ -311,9 +311,9 @@ Panel {
           else { var chord = root.chordFromEvent(event); if (chord) root.capturedChord = chord }
           event.accepted = true; return
         }
-        if (event.key === Qt.Key_Left) root.currentTab = (root.currentTab + 4) % 5
-        else if (event.key === Qt.Key_Right) root.currentTab = (root.currentTab + 1) % 5
-        else if (event.key >= Qt.Key_1 && event.key <= Qt.Key_5) root.currentTab = event.key - Qt.Key_1
+        if (event.key === Qt.Key_Left) root.currentTab = (root.currentTab + 5) % 6
+        else if (event.key === Qt.Key_Right) root.currentTab = (root.currentTab + 1) % 6
+        else if (event.key >= Qt.Key_1 && event.key <= Qt.Key_6) root.currentTab = event.key - Qt.Key_1
         else return
         event.accepted = true
       }
@@ -764,9 +764,16 @@ Panel {
               controller.setConfig(".ocr.minConfidence", s)
             }
           }
+        }
+
+        // Languages --------------------------------------------------------
+        // Engine and languages are separate tabs for the same reason Provider
+        // and Voice are: one is a choice made once, the other is browsed.
+        Column {
+          width: parent.width; spacing: 10; visible: !root.needsSetup && root.currentTab === 4
           Item {
             width: parent.width; height: langHeader.implicitHeight
-            PanelSectionHeader { id: langHeader; text: "Recognised languages"; foreground: root.fg }
+            PanelSectionHeader { id: langHeader; text: "Languages for " + (controller.info.ocr?.engine || "tesseract"); foreground: root.fg }
             Text {
               anchors.right: parent.right
               text: controller.refreshingLanguages !== "" ? "Checking…"
@@ -842,7 +849,7 @@ Panel {
 
         // Keys -------------------------------------------------------------
         Column {
-          width: parent.width; spacing: 4; visible: !root.needsSetup && root.currentTab === 4
+          width: parent.width; spacing: 4; visible: !root.needsSetup && root.currentTab === 5
           Item {
             width: parent.width; height: keysHeader.implicitHeight
             PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }
