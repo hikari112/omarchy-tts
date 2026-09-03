@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in local, stronger on stylised and low-contrast text, heavy
+# desc: Stronger on stylised and low-contrast text. Heavy, slow to start.
+# title: EasyOCR
 # kind: local
 # probe: [[ -x "${EASYOCR_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/bin/python}" ]]
 # install: easyocr

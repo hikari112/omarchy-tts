@@ -230,14 +230,14 @@ Bundled, all optional except piper:
 | `gemini` | cloud | opt-in; Gemini TTS, 30 named voices, speed fixed by the service; takes a Vertex AI key by default (`speak --set .gemini.api developer` for an AI Studio key); **text leaves your machine** |
 | `google` | cloud | opt-in; Cloud Text-to-Speech, voices fetched from the account, speed slider honoured; shares the `google` key with the Vision OCR engine; **text leaves your machine** |
 
-Google lists well over a thousand voices, so `google` only fetches the
-languages you ask for: `.google.voiceLanguages` (default `en`) is a
-comma-separated list of language-code prefixes, e.g.
-`speak --set .google.voiceLanguages en,de-DE`, then refresh cloud voices.
+Google lists well over a thousand voices. The Voice tab browses them with
+search, language, gender and family filters rather than a dropdown.
 
 ### Bring your own
 
-A provider is any executable that reads text on stdin and plays it. Drop one
+A provider is any executable that reads text on stdin and plays it. A
+`# title:` line gives it a display name; `# desc:` is a sentence or two shown
+beneath it. Drop one
 in `~/.config/omarchy-tts/providers/` and it shadows the bundled provider of
 the same name.
 

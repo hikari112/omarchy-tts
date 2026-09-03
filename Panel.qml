@@ -96,6 +96,50 @@ Panel {
   }
   readonly property bool activeIsCloud: activeProvider && activeProvider.kind === "cloud"
   property string voiceSort: "lang"
+
+  // Cloud voice browser. Google alone lists two thousand voices; a dropdown
+  // is not a way to choose among them. Filters degrade to nothing for a
+  // provider whose list carries no metadata (ElevenLabs).
+  property string remoteFilter: ""
+  property string remoteLanguage: ""
+  property string remoteGender: ""
+  property string remoteFamily: ""
+  readonly property var remoteVoices: (controller.info.voices || []).filter(function (v) { return v && typeof v === "object" })
+  readonly property var remoteLanguages: {
+    var seen = {}, out = []
+    for (var i = 0; i < remoteVoices.length; ++i) { var l = String(remoteVoices[i].language || ""); if (l && !seen[l]) { seen[l] = true; out.push(l) } }
+    return out.sort()
+  }
+  readonly property var remoteFamilies: {
+    var seen = {}, out = []
+    for (var i = 0; i < remoteVoices.length; ++i) { var f = String(remoteVoices[i].family || ""); if (f && !seen[f]) { seen[f] = true; out.push(f) } }
+    return out.sort()
+  }
+  readonly property bool remoteHasGender: remoteVoices.some(function (v) { return v.gender === "female" || v.gender === "male" })
+  readonly property var filteredRemoteVoices: {
+    var q = remoteFilter.toLowerCase().trim(), out = []
+    for (var i = 0; i < remoteVoices.length; ++i) {
+      var v = remoteVoices[i]
+      if (remoteLanguage && String(v.language || "") !== remoteLanguage) continue
+      if (remoteGender && String(v.gender || "") !== remoteGender) continue
+      if (remoteFamily && String(v.family || "") !== remoteFamily) continue
+      if (q && String(v.label || "").toLowerCase().indexOf(q) < 0 && String(v.value).toLowerCase().indexOf(q) < 0) continue
+      out.push(v)
+    }
+    out.sort(function (a, b) { return String(a.language || "").localeCompare(String(b.language || ""))
+                                      || String(a.label || a.value).localeCompare(String(b.label || b.value)) })
+    return out
+  }
+  // Open on the language of the voice in use, so two thousand rows are not
+  // the first thing shown.
+  function openRemoteBrowser() {
+    remoteFilter = ""; remoteGender = ""; remoteFamily = ""; remoteLanguage = ""
+    var current = String(controller.info.voice || "")
+    for (var i = 0; i < remoteVoices.length; ++i)
+      if (remoteVoices[i].value === current) { remoteLanguage = String(remoteVoices[i].language || ""); break }
+    browsing = true
+  }
+  readonly property bool remoteProvider: !!(root.activeProvider && root.activeProvider.voices === "remote")
   readonly property var voiceSorts: [
     { key: "lang", label: "Language" },
     { key: "name", label: "Name" },
@@ -174,6 +218,16 @@ Panel {
   }
 
   readonly property int adoptableCount: (controller.bindings.adoptable || []).length
+  // A chord already bound to one of our own commands by hand is adoptable,
+  // not a conflict; only a chord bound to something else needs attention.
+  readonly property var realConflicts: {
+    var adopt = controller.bindings.adoptable || [], out = []
+    var chords = adopt.map(function (a) { return String(typeof a === "object" ? (a.chord || a.key || "") : a).toUpperCase() })
+    var conflicts = controller.bindings.conflicts || []
+    for (var i = 0; i < conflicts.length; ++i)
+      if (chords.indexOf(String(conflicts[i]).toUpperCase()) < 0) out.push(conflicts[i])
+    return out
+  }
 
   readonly property int removeSizeMB: {
     var all = controller.catalogue || []
@@ -387,7 +441,7 @@ Panel {
                 Item {
                   width: parent.width; height: providerName.implicitHeight
                   Text { id: providerRadio; text: parent.parent.parent.selected ? "󰝥" : "󰝦"; color: parent.parent.parent.ready ? (parent.parent.parent.selected ? Color.accent : root.fg) : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
-                  Text { id: providerName; anchors.left: providerRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
+                  Text { id: providerName; anchors.left: providerRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.title || parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
                   Text { anchors.left: providerName.right; anchors.leftMargin: 6; anchors.baseline: providerName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                   Text { anchors.right: providerAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; text: { var d = parent.parent.parent
                             if (d.failing) return d.cloudError === "auth" ? "API key rejected" : "Not working"
@@ -451,7 +505,9 @@ Panel {
                   }
                   Text {
                     id: refreshUsage; anchors.right: parent.right; text: parent.parent.parent.modelData.name === "elevenlabs" ? (controller.refreshingUsage === parent.parent.parent.modelData.name ? "Refreshing…" : "Refresh usage") : "Updates after speech"
-                    color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
+                    // Only ElevenLabs exposes an account endpoint to refresh; for
+                    // the rest this is a note, and a note is not painted as a link.
+                    color: parent.parent.parent.modelData.name === "elevenlabs" ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
                     MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.name === "elevenlabs" && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
                   }
                 }
@@ -502,8 +558,10 @@ Panel {
         Column {
           width: parent.width; spacing: Style.space(10); visible: !root.needsSetup && root.currentTab === 1 && !root.browsing
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
-          Dropdown { width: parent.width; showLabel: false; foreground: root.fg; options: root.voiceOptions.length ? root.voiceOptions : [{ label: "No voice installed", value: "" }]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
+          Dropdown { width: parent.width; showLabel: false; foreground: root.fg; visible: !(root.remoteProvider && root.voiceOptions.length > 40); options: root.voiceOptions.length ? root.voiceOptions : [{ label: "No voice installed", value: "" }]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
+          Button { width: parent.width; visible: root.remoteProvider && root.voiceOptions.length > 40; text: root.activeVoiceLabel() || "Choose a voice"; iconText: "󰍉"; bordered: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
           Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
+          Button { width: parent.width; visible: root.remoteProvider && root.remoteVoices.length > 0 && root.voiceOptions.length <= 40; text: "Browse " + root.remoteVoices.length + " voices"; iconText: "󰍉"; bordered: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
           Button { width: parent.width; text: controller.refreshingVoices ? "Refreshing voices…" : "Refresh cloud voices"; iconText: "󰑐"; bordered: true; foreground: root.fg; visible: root.activeProvider && (root.activeProvider.name === "elevenlabs" || root.activeProvider.name === "google"); enabled: controller.refreshingVoices === ""; onClicked: controller.refreshVoices(root.activeProvider.name) }
           Item {
             width: parent.width; height: speedHeader.implicitHeight
@@ -545,7 +603,7 @@ Panel {
           }
         }
         Column {
-          width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 1 && root.browsing
+          width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 1 && root.browsing && !root.remoteProvider
           Item {
             width: parent.width; height: browseHeader.implicitHeight
             PanelSectionHeader { id: browseHeader; text: root.installedCount + " installed · " + ((controller.catalogue || []).length - root.installedCount) + " available"; foreground: root.fg }
@@ -616,13 +674,72 @@ Panel {
           Text { text: "Storage: ~/.local/share/omarchy-tts/voices/piper"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
 
+        // Cloud voices -----------------------------------------------------
+        Column {
+          width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 1 && root.browsing && root.remoteProvider
+          Item {
+            width: parent.width; height: remoteHeader.implicitHeight
+            PanelSectionHeader { id: remoteHeader; text: root.filteredRemoteVoices.length + " of " + root.remoteVoices.length + " voices"; foreground: root.fg }
+            Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } }
+          }
+          TextField { width: parent.width; placeholderText: "Search by name"; text: root.remoteFilter; foreground: root.fg; onTextChanged: root.remoteFilter = text }
+          Dropdown {
+            width: parent.width; showLabel: false; foreground: root.fg; visible: root.remoteLanguages.length > 1
+            options: [{ label: "All languages", value: "" }].concat(root.remoteLanguages.map(function (l) { return { label: l, value: l } }))
+            value: root.remoteLanguage
+            onValueChanged: if (value !== root.remoteLanguage) root.remoteLanguage = value
+          }
+          Flow {
+            width: parent.width; spacing: 6; visible: root.remoteHasGender
+            Repeater {
+              model: [{ label: "Any voice", value: "" }, { label: "Female", value: "female" }, { label: "Male", value: "male" }]
+              delegate: Rectangle {
+                required property var modelData
+                readonly property bool active: root.remoteGender === modelData.value
+                width: genderChip.implicitWidth + 18; height: 24; radius: 4
+                color: active ? root.tint(0.16) : "transparent"; border.width: 1; border.color: active ? root.tint(0.5) : Color.popups.border
+                Text { id: genderChip; anchors.centerIn: parent; text: parent.modelData.label; color: parent.active ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.remoteGender = parent.modelData.value }
+              }
+            }
+          }
+          Flow {
+            width: parent.width; spacing: 6; visible: root.remoteFamilies.length > 1
+            Repeater {
+              model: [""].concat(root.remoteFamilies)
+              delegate: Rectangle {
+                required property string modelData
+                readonly property bool active: root.remoteFamily === modelData
+                width: familyChip.implicitWidth + 18; height: 24; radius: 4
+                color: active ? root.tint(0.16) : "transparent"; border.width: 1; border.color: active ? root.tint(0.5) : Color.popups.border
+                Text { id: familyChip; anchors.centerIn: parent; text: parent.modelData || "All families"; color: parent.active ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.remoteFamily = parent.modelData }
+              }
+            }
+          }
+          ListView {
+            width: parent.width; height: Style.space(220); clip: true; spacing: 2; model: root.filteredRemoteVoices
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool active: modelData.value === controller.info.voice
+              width: ListView.view.width; height: 30; radius: 4; color: active ? root.tint(.10) : "transparent"
+              Text { anchors.left: parent.left; anchors.right: remoteAction.left; anchors.leftMargin: 8; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight
+                     text: parent.modelData.label || parent.modelData.value; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
+              Text { id: remoteAction; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                     text: parent.active ? "󰄬 Active" : "Use"; color: parent.active ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+              MouseArea { anchors.fill: parent; enabled: !parent.active; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.setConfig(controller.info.voicePath || ".google.voice", parent.modelData.value) }
+            }
+          }
+          Text { width: parent.width; wrapMode: Text.WordWrap; visible: root.filteredRemoteVoices.length === 0; text: "No voice matches. Clear a filter or refresh cloud voices."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+        }
+
         // Text -------------------------------------------------------------
         Column {
           width: parent.width; spacing: 8; visible: !root.needsSetup && root.currentTab === 2
           PanelSectionHeader { text: "What gets spoken"; foreground: root.fg }
           Row {
             width: parent.width; spacing: 8
-            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
+            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; font.family: root.ff; font.pixelSize: Style.font.caption; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
             Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: root.tint(.06); border.width: 1; border.color: Color.popups.border; Text { anchors.fill: parent; anchors.margins: 6; text: controller.preview || "Spoken preview"; color: root.fg; wrapMode: Text.WordWrap; clip: true; elide: Text.ElideRight; maximumLineCount: 5; font.family: root.ff; font.pixelSize: Style.font.caption } }
           }
           SettingToggle { label: "Read URLs as ‘link’"; checked: controller.info.sanitizer?.urls === "link"; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.urls", value ? "link" : "domain") } }
@@ -666,7 +783,7 @@ Panel {
                 Item {
                   width: parent.width; height: engineName.implicitHeight
                   Text { id: engineRadio; text: parent.parent.parent.selected ? "󰝥" : "󰝦"; color: parent.parent.parent.ready ? (parent.parent.parent.selected ? Color.accent : root.fg) : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
-                  Text { id: engineName; anchors.left: engineRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
+                  Text { id: engineName; anchors.left: engineRadio.right; anchors.leftMargin: 8; text: parent.parent.parent.modelData.title || parent.parent.parent.modelData.name; color: parent.parent.parent.usable ? root.fg : root.dim; font.family: root.ff; font.pixelSize: Style.font.body }
                   Text { anchors.left: engineName.right; anchors.leftMargin: 6; anchors.baseline: engineName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                   Text { anchors.right: engineAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
                     text: { var d = parent.parent.parent
@@ -773,7 +890,7 @@ Panel {
           width: parent.width; spacing: 10; visible: !root.needsSetup && root.currentTab === 4
           Item {
             width: parent.width; height: langHeader.implicitHeight
-            PanelSectionHeader { id: langHeader; text: "Languages for " + (controller.info.ocr?.engine || "tesseract"); foreground: root.fg }
+            PanelSectionHeader { id: langHeader; text: "Languages for " + (root.activeOcrEngine ? (root.activeOcrEngine.title || root.activeOcrEngine.name) : (controller.info.ocr?.engine || "tesseract")); foreground: root.fg }
             Text {
               anchors.right: parent.right
               text: controller.refreshingLanguages !== "" ? "Checking…"
@@ -817,6 +934,7 @@ Panel {
           }
           TextField {
             width: parent.width; visible: root.ocrLanguages.length > 0
+            placeholderText: "Search " + root.availableLanguages.length + " languages"
             text: root.languageFilter; foreground: root.fg
             onTextChanged: root.languageFilter = text
           }
@@ -830,8 +948,9 @@ Panel {
                                            && (controller.setupJob.status === "running" || controller.setupJob.status === "starting")
               width: ListView.view.width; height: 28; radius: 4; color: "transparent"
               Text { anchors.left: parent.left; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter
+                     textFormat: Text.StyledText
                      text: (parent.modelData.label || parent.modelData.value)
-                           + (parent.modelData.label && parent.modelData.label !== parent.modelData.value ? "  " + parent.modelData.value : "")
+                           + (parent.modelData.label && parent.modelData.label !== parent.modelData.value ? "  <font color=\"" + root.dim + "\">" + parent.modelData.value + "</font>" : "")
                      color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
               // Language packs are installed as tesseract-data packages, so
               // the action exists only for tesseract. Other engines list what
@@ -849,7 +968,7 @@ Panel {
 
         // Keys -------------------------------------------------------------
         Column {
-          width: parent.width; spacing: 4; visible: !root.needsSetup && root.currentTab === 5
+          width: parent.width; spacing: 6; visible: !root.needsSetup && root.currentTab === 5
           Item {
             width: parent.width; height: keysHeader.implicitHeight
             PanelSectionHeader { id: keysHeader; text: "Keybindings"; foreground: root.fg }
@@ -858,14 +977,12 @@ Panel {
               // "Not installed" beside six shortcuts that plainly work is a
               // contradiction. Unmanaged is a third state, not a broken one.
               text: controller.bindings.installed ? "● Managed"
-                    : ((controller.bindings.conflicts || []).length > 0
-                       ? "Needs attention"
-                       : root.adoptableCount > 0
-                       ? root.adoptableCount + " already set up"
-                       : "Not set up")
+                    : root.realConflicts.length > 0 ? "Needs attention"
+                    : root.adoptableCount > 0 ? "Written by hand"
+                    : "Not set up"
               color: controller.bindings.installed ? Color.accent
-                     : ((controller.bindings.conflicts || []).length > 0
-                        ? Color.urgent : (root.adoptableCount > 0 ? root.fg : root.dim))
+                     : root.realConflicts.length > 0 ? Color.urgent
+                     : (root.adoptableCount > 0 ? root.fg : root.dim)
               font.family: root.ff; font.pixelSize: Style.font.caption
             }
           }
@@ -901,7 +1018,7 @@ Panel {
             color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
           }
           Text { width: parent.width; wrapMode: Text.WordWrap; text: "Only the marked omarchy-tts block in bindings.lua is managed. Every write is backed up and rolled back if Hyprland reports an error."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
-          Text { width: parent.width; visible: (controller.bindings.conflicts || []).length > 0; wrapMode: Text.WordWrap; text: "Choose different shortcuts for: " + controller.bindings.conflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; visible: root.realConflicts.length > 0; wrapMode: Text.WordWrap; text: "Choose different shortcuts for: " + root.realConflicts.join(", "); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
 
         Rectangle {
@@ -928,7 +1045,7 @@ Panel {
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
             Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
-          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + (controller.info.provider || "") + (controller.info.voice ? " · " + root.activeVoiceLabel() : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + ((root.activeProvider ? (root.activeProvider.title || root.activeProvider.name) : controller.info.provider) || "") + (controller.info.voice ? " · " + root.activeVoiceLabel() : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: controller.error !== ""; text: controller.error; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
       }

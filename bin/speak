@@ -438,6 +438,7 @@ emit_info() {
       health="$(health_of "$n")"
       status="$(provider_status "$b" "$health")"
       jq -nc --arg name "$n" \
+             --arg title "$(meta_of "$b" title)" \
              --arg kind "$(meta_of "$b" kind)" \
              --arg desc "$(meta_of "$b" desc)" \
              --arg status "$status" \
@@ -449,7 +450,7 @@ emit_info() {
              --arg keySource "$(key_source "$n")" \
              --argjson config "$config" \
              --argjson usage "$(cloud_metrics_of "$n")" \
-             '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
+             '{name:$name, title:(if $title=="" then $name else $title end), health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor,
                keySource:$keySource,
                model:(if $name=="openai" then ($config.openai.model // "gpt-4o-mini-tts")
@@ -468,6 +469,7 @@ emit_info() {
       health="$(health_of "ocr:$n")"
       status="$(ocr_engine_status "$b" "$health")"
       jq -nc --arg name "$n" \
+             --arg title "$(meta_of "$b" title)" \
              --arg kind "$(meta_of "$b" kind)" \
              --arg desc "$(meta_of "$b" desc)" \
              --arg status "$status" \
@@ -475,7 +477,7 @@ emit_info() {
              --arg install "$(meta_of "$b" install)" \
              --arg vendor "$(meta_of "$b" vendor)" \
              --arg keySource "$(key_source "$(meta_of "$b" keyname)")" \
-             '{name:$name, health:$health, kind:(if $kind=="" then "local" else $kind end),
+             '{name:$name, title:(if $title=="" then $name else $title end), health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor, keySource:$keySource}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
@@ -521,9 +523,12 @@ emit_info() {
   esac
   local speaking=false
   is_speaking && speaking=true
+  # The voice list goes through a descriptor, not an argument: a cloud
+  # provider can list two thousand voices, which is past the single-argument
+  # limit and would make --info fail only for the accounts with the most.
   jq -nc \
     --argjson providers "$provs" \
-    --argjson voices "$vs" \
+    --slurpfile voicesFile <(printf '%s\n' "$vs") \
     --argjson config "$config" \
     --arg voice "$voice" \
     --arg voicePath "$voice_path" \
@@ -532,7 +537,7 @@ emit_info() {
     --argjson speaking "$speaking" \
     '{provider:($config.provider // "piper"), voice:$voice, voicePath:$voicePath,
       rate:($config.rate // 1.0), maxChars:($config.maxChars // 0),
-      speaking:$speaking, providers:$providers, voices:$voices,
+      speaking:$speaking, providers:$providers, voices:$voicesFile[0],
       ocr:{engine:($config.ocr.engine // "tesseract"),
         langs:(($config.ocr.engine // "tesseract") as $e
                | $config.ocr[$e].langs // (if $e == "tesseract" then $config.ocr.langs else null end) // "eng"),

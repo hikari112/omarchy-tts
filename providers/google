@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: opt-in cloud, Cloud Text-to-Speech, shares the Vision key, text leaves your machine
+# desc: Cloud Text-to-Speech, hundreds of voices, shares the Vision key. Text leaves your machine.
+# title: Google Cloud
 # kind: cloud
 # probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
 # vendor: Google
@@ -13,11 +14,11 @@ need curl "install with: omarchy pkg add curl"
 KEY="$(get_key GOOGLE_API_KEY google)" || exit 1
 API=https://texttospeech.googleapis.com/v1
 
-# Google lists well over a thousand voices across every language it speaks.
-# Only the languages asked for are listed, so the picker stays usable.
+# Every voice the account can use, with what a browser filters on. Names
+# encode their family (en-US-Chirp3-HD-Aoede); the family is lifted out so
+# it can be a chip rather than a substring search. Bare names (Kore, Puck)
+# are the Gemini voices Cloud TTS also serves, listed without a prefix.
 if [[ "${1:-}" == "--voices" ]]; then
-  langs="$(jq -r '.google.voiceLanguages // "en"' "$TTS_CONFIG" 2>/dev/null)"
-  [[ "$langs" =~ ^[A-Za-z,-]+$ ]] || langs=en
   body="$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-tts-google-voices.XXXXXX")" || exit 1
   trap 'rm -f "$body"' EXIT
   status="$(curl -sS --connect-timeout 15 --max-time 60 "$API/voices" \
@@ -25,12 +26,16 @@ if [[ "${1:-}" == "--voices" ]]; then
     3<<< "x-goog-api-key: $KEY" < /dev/null)" || status=""
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || {
     printf 'Google: could not list voices (%s)\n' "${status:-transport error}" >&2; exit 74; }
-  jq -c --arg langs "$langs" '
-    ($langs | split(",") | map(ascii_downcase)) as $want
-    | [ .voices[]?
-        | select(any(.languageCodes[]; . as $c | any($want[]; . as $w | ($c|ascii_downcase) | startswith($w))))
-        | {value: .name,
-           label: (.name + " · " + ((.ssmlGender // "") | ascii_downcase))} ]' "$body" ||
+  jq -c '
+    [ .voices[]?
+      | (.languageCodes[0] // "") as $lang
+      | (.name | if (ascii_downcase | startswith(($lang|ascii_downcase) + "-")) then .[($lang|length)+1:] else . end) as $rest
+      | ($rest | split("-")) as $parts
+      | {value: .name,
+         language: $lang,
+         gender: ((.ssmlGender // "") | ascii_downcase),
+         family: (if ($parts|length) > 1 then ($parts[:-1] | join("-")) else "Gemini" end),
+         label: ($rest + " · " + ((.ssmlGender // "") | ascii_downcase) + " · " + $lang)} ]' "$body" ||
     { printf 'Google: unreadable voice list\n' >&2; exit 74; }
   exit 0
 fi

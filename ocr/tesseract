@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# desc: local OCR, fast and deterministic (default)
+# desc: Fast and deterministic on ordinary screen text. The default.
+# title: Tesseract
 # kind: local
 # probe: command -v tesseract >/dev/null 2>&1
 # Reads a PNG on stdin, writes recognised text on stdout.

@@ -822,13 +822,11 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         self.assertEqual(self.args.read_text().count("googleapis.com"), 1,
                          "one configured host, one request")
 
-    def test_google_voice_list_is_limited_to_the_configured_languages(self):
+    def test_google_voice_list_carries_what_a_browser_filters_on(self):
         listing = self.root / "voices.json"
         listing.write_text(json.dumps({"voices": [
             {"name": "en-US-Chirp3-HD-Aoede", "languageCodes": ["en-US"], "ssmlGender": "FEMALE"},
-            {"name": "en-GB-Neural2-A", "languageCodes": ["en-GB"], "ssmlGender": "FEMALE"},
             {"name": "de-DE-Neural2-B", "languageCodes": ["de-DE"], "ssmlGender": "MALE"}]}))
-        self.config.write_text(json.dumps({"google": {"voiceLanguages": "en-GB,de"}}))
         env = {**os.environ,
                "PATH": f"{self.bin}:{os.environ['PATH']}",
                "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
@@ -841,8 +839,11 @@ class CloudProviderPrivacyTests(unittest.TestCase):
                                 text=True, capture_output=True, env=env,
                                 stdin=subprocess.DEVNULL, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([v["value"] for v in json.loads(result.stdout)],
-                         ["en-GB-Neural2-A", "de-DE-Neural2-B"])
+        voices = json.loads(result.stdout)
+        self.assertEqual(voices[0], {"value": "en-US-Chirp3-HD-Aoede", "language": "en-US",
+                                     "gender": "female", "family": "Chirp3-HD",
+                                     "label": "Chirp3-HD-Aoede · female · en-US"})
+        self.assertEqual(voices[1]["family"], "Neural2")
         self.assertNotIn("secret-key", self.args.read_text())
 
     def test_cloud_telemetry_contains_counts_and_limits_but_no_content(self):
@@ -1038,6 +1039,42 @@ class CancelledSpeechTests(unittest.TestCase):
                        text=True, env=self.env, capture_output=True)
         self.assertEqual(self.status_of("brokenlike"), "failing",
                          "an uncancelled failure must still mark the provider")
+
+
+class LargeVoiceListTests(unittest.TestCase):
+    """A cloud account can list thousands of voices; --info must still work.
+
+    Passing the list as one jq argument failed with "Argument list too long"
+    only for the accounts with the most voices - the ones that most needed
+    the browser.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        (self.home / "run").mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_info_survives_thousands_of_cached_voices(self):
+        cache = self.home / "cache" / "omarchy-tts" / "voices"
+        cache.mkdir(parents=True)
+        voices = [{"value": f"en-US-Chirp3-HD-Voice{i}", "language": "en-US", "gender": "female",
+                   "family": "Chirp3-HD", "label": f"Chirp3-HD-Voice{i} · female · en-US"}
+                  for i in range(3000)]
+        (cache / "google.json").write_text(json.dumps(voices))
+        subprocess.run([SPEAK, "--set", ".provider", "google"], env=self.env, capture_output=True)
+        result = subprocess.run([SPEAK, "--info"], env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads(result.stdout)
+        self.assertEqual(len(info["voices"]), 3000)
+        self.assertEqual(info["voices"][0]["family"], "Chirp3-HD")
 
 
 class OcrEngineTests(unittest.TestCase):
