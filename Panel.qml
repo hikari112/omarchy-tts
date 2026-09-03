@@ -48,6 +48,14 @@ Panel {
   }
   readonly property bool needsSetup: controller.infoLoaded && !controller.setup.ready
                                      && !hasReadyProvider && !setupSkipped
+  // PanelKeyCatcher's all-or-nothing `blocked` switch cannot both preserve
+  // native control keys and contain Tab inside this popup. Track any focused
+  // descendant instead: the handler below always owns Tab, then yields every
+  // other key to the focused editor, button, toggle, row or dropdown.
+  readonly property bool descendantControlActive: {
+    var item = keyCatcher.window ? keyCatcher.window.activeFocusItem : null
+    return !!item && item !== keyCatcher && root.isInsideKeyCatcher(item)
+  }
 
   function tint(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
   function keyName(event) {
@@ -87,6 +95,31 @@ Panel {
     if (!key || key === "ESCAPE") return ""
     parts.push(key)
     return parts.join(" + ")
+  }
+  function isInsideKeyCatcher(item) {
+    var current = item
+    while (current) {
+      if (current === keyCatcher) return true
+      current = current.parent
+    }
+    return false
+  }
+  function moveTabFocus(direction) {
+    var forward = direction >= 0
+    var current = keyCatcher.window ? keyCatcher.window.activeFocusItem : keyCatcher
+    if (!current || typeof current.nextItemInFocusChain !== "function") current = keyCatcher
+    var candidate = current
+    // This key layer deliberately owns Tab before its descendants. Walk the
+    // real Qt focus chain and keep focus inside this popup, including dynamic
+    // repeater delegates, instead of maintaining a brittle manual list.
+    for (var i = 0; i < 128; ++i) {
+      candidate = candidate.nextItemInFocusChain(forward)
+      if (!candidate || candidate === current) break
+      if (candidate !== keyCatcher && root.isInsideKeyCatcher(candidate)) {
+        candidate.forceActiveFocus(forward ? Qt.TabFocusReason : Qt.BacktabFocusReason)
+        return
+      }
+    }
   }
   readonly property var activeProvider: {
     var all = controller.info.providers || []
@@ -307,10 +340,16 @@ Panel {
   // last time and the panel opened on the wrong tab. Wait for real data.
   property bool restorePending: false
 
-  onOpenedChanged: if (opened) {
-    restorePending = true
-    controller.refresh(); controller.refreshBindings(); controller.refreshSetup()
-    controller.loadCatalogue()   // cached: ~30 ms, and the Voice tab needs it
+  onOpenedChanged: {
+    if (opened) {
+      restorePending = true
+      controller.refresh(); controller.refreshBindings(); controller.refreshSetup()
+      controller.loadCatalogue()   // cached: ~30 ms, and the Voice tab needs it
+    } else {
+      // Never retain a pasted credential in a hidden, persistent panel.
+      apiProvider = ""; apiVendor = ""
+      ocrApiProvider = ""; ocrApiVendor = ""
+    }
   }
 
   function restoreFromInfo() {
@@ -337,6 +376,8 @@ Panel {
       if (controller.keyResult.ok) {
         root.apiProvider = ""
         root.apiVendor = ""
+        root.ocrApiProvider = ""
+        root.ocrApiVendor = ""
       }
     }
   }
@@ -352,17 +393,32 @@ Panel {
     contentWidth: panelCard.fittedContentWidth(Style.space(420))
     contentHeight: panelCard.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Item {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: {
-        if (root.captureAction !== "") { root.captureAction = ""; root.capturedChord = "" }
-        else root.close()
-      }
+      focus: true
+      Keys.priority: Keys.BeforeItem
       Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+          root.moveTabFocus((event.modifiers & Qt.ShiftModifier)
+                            || event.key === Qt.Key_Backtab ? -1 : 1)
+          event.accepted = true
+          return
+        }
+        if (event.key === Qt.Key_Escape) {
+          if (voiceDropdown.popupOpen) voiceDropdown.close()
+          else if (remoteLanguageDropdown.popupOpen) remoteLanguageDropdown.close()
+          else if (root.captureAction !== "") {
+            root.captureAction = ""
+            root.capturedChord = ""
+          } else root.close()
+          event.accepted = true
+          return
+        }
+        if (root.descendantControlActive) return
         if (root.captureAction !== "") {
-          if (event.key === Qt.Key_Escape) { root.captureAction = ""; root.capturedChord = "" }
-          else { var chord = root.chordFromEvent(event); if (chord) root.capturedChord = chord }
+          var chord = root.chordFromEvent(event)
+          if (chord) root.capturedChord = chord
           event.accepted = true; return
         }
         if (event.key === Qt.Key_Left) root.currentTab = (root.currentTab + 5) % 6
@@ -372,10 +428,22 @@ Panel {
         event.accepted = true
       }
 
-      Column {
-        id: body
-        width: parent.width
-        spacing: Style.space(12)
+      ScrollView {
+        id: scrollArea
+        anchors.fill: parent
+        clip: true
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: body.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        Binding {
+          target: scrollArea.contentItem
+          property: "interactive"
+          value: body.implicitHeight > scrollArea.height
+        }
+
+        Column {
+          id: body
+          width: scrollArea.availableWidth
+          spacing: Style.space(12)
 
         Item {
           width: parent.width; height: Math.max(headerIcon.implicitHeight, headerTitle.implicitHeight)
@@ -465,6 +533,8 @@ Panel {
                             // Only an actual auth rejection means the key is the
                             // problem. Any other cloud failure is retestable, and
                             // demanding a new key for one would be a dead end.
+                            if (d.cloud && d.failing && d.cloudError === "auth"
+                                && d.modelData.keySource === "env") return "Fix environment"
                             if (d.cloud && d.failing && d.cloudError === "auth") return "Replace key"
                             if (d.failing || d.untested) return "Test"
                             if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
@@ -474,7 +544,11 @@ Panel {
                     font.pixelSize: Style.font.caption
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
                         var row = parent.parent.parent.parent
-                        if (row.modelData.status === "nokey"
+                        if (row.cloud && row.failing && row.cloudError === "auth"
+                            && row.modelData.keySource === "env") {
+                          controller.error = (row.modelData.keyEnv || "The environment variable")
+                            + " supplies this key and overrides the system keyring. Update or unset it, restart Omarchy Shell, then Test again."
+                        } else if (row.modelData.status === "nokey"
                             || (row.cloud && row.failing && row.cloudError === "auth")) {
                           root.apiProvider = row.modelData.name
                           root.apiVendor = row.modelData.vendor || row.modelData.name
@@ -504,14 +578,14 @@ Panel {
                             return "Usage appears after the first request" }
                   }
                   Text {
-                    id: refreshUsage; anchors.right: parent.right; text: parent.parent.parent.modelData.name === "elevenlabs" ? (controller.refreshingUsage === parent.parent.parent.modelData.name ? "Refreshing…" : "Refresh usage") : "Updates after speech"
-                    // Only ElevenLabs exposes an account endpoint to refresh; for
-                    // the rest this is a note, and a note is not painted as a link.
-                    color: parent.parent.parent.modelData.name === "elevenlabs" ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
-                    MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.name === "elevenlabs" && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
+                    id: refreshUsage; anchors.right: parent.right; text: parent.parent.parent.modelData.refreshUsage === true ? (controller.refreshingUsage === parent.parent.parent.modelData.name ? "Refreshing…" : "Refresh usage") : "Updates after speech"
+                    color: parent.parent.parent.modelData.refreshUsage === true ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; enabled: parent.parent.parent.parent.modelData.refreshUsage === true && controller.refreshingUsage === ""; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.refreshUsage(parent.parent.parent.parent.modelData.name) }
                   }
                 }
-                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? "The API key was rejected. Remove it and add a valid key, then test again." : (parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it produced no audio when tested. Press Test to try again."); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? (parent.parent.modelData.keySource === "env" ? "The environment API key was rejected. Update or unset it, restart Omarchy Shell, then test again." : "The API key was rejected. Remove it and add a valid key, then test again.") : (parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it produced no audio when tested. Press Test to try again."); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud && parent.parent.failing && parent.parent.cloudError === "auth" && parent.parent.modelData.keySource === "env"; width: parent.width; wrapMode: Text.WordWrap; text: (parent.parent.modelData.keyEnv || "The environment variable") + " is currently authoritative; a key saved here cannot override it."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.modelData.deprecated === true; width: parent.width; wrapMode: Text.WordWrap; text: "Compatibility provider retained for upgrades. Choose Piper for continued support and better speech quality."; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Text { visible: parent.parent.modelData.name === "kokoro" && !parent.parent.failing; text: "Heavy · slow first start after boot"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               }
               MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectProvider(parent.modelData.name) }
@@ -524,8 +598,8 @@ Panel {
               Text { text: "Install " + root.confirmProvider + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
               Text { width: parent.width; text: "The required packages will be installed for you. Administrator approval may appear for system packages."; wrapMode: Text.WordWrap; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               Row { spacing: 8
-                Button { text: "Cancel"; bordered: true; onClicked: { root.confirmInstall = ""; root.confirmProvider = "" } }
-                Button { text: "Install"; bordered: true; foreground: Color.accent; onClicked: { controller.installProvider(root.confirmProvider); root.confirmInstall = ""; root.confirmProvider = "" } }
+                Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { root.confirmInstall = ""; root.confirmProvider = "" } }
+                Button { text: "Install"; bordered: true; focusable: true; foreground: Color.accent; onClicked: { controller.installProvider(root.confirmProvider); root.confirmInstall = ""; root.confirmProvider = "" } }
               }
             }
           }
@@ -536,19 +610,21 @@ Panel {
             Row {
               id: keyRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
               Text { text: "Remove the " + root.confirmKeyRemove + " API key?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
-              Button { text: "Cancel"; bordered: true; onClicked: root.confirmKeyRemove = "" }
-              Button { text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.confirmKeyRemove); root.confirmKeyRemove = "" } }
+              Button { text: "Cancel"; bordered: true; focusable: true; onClicked: root.confirmKeyRemove = "" }
+              Button { text: "Remove"; bordered: true; focusable: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.confirmKeyRemove); root.confirmKeyRemove = "" } }
             }
           }
           ApiKeyDialog {
+            id: speechKeyDialog
             width: parent.width; visible: root.apiProvider !== ""
             controller: controller; provider: root.apiProvider; vendor: root.apiVendor; foreground: root.fg
+            purpose: "speech"
             onClosed: { root.apiProvider = ""; root.apiVendor = "" }
           }
           Text {
             width: parent.width
-            visible: controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
-            text: controller.setupJob.message; wrapMode: Text.WordWrap
+            visible: controller.setupStarting || controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
+            text: controller.setupStarting ? "Starting setup safely…" : controller.setupJob.message; wrapMode: Text.WordWrap
             color: controller.setupJob.status === "error" ? Color.urgent : root.dim
             font.family: root.ff; font.pixelSize: Style.font.caption
           }
@@ -558,18 +634,18 @@ Panel {
         Column {
           width: parent.width; spacing: Style.space(10); visible: !root.needsSetup && root.currentTab === 1 && !root.browsing
           PanelSectionHeader { text: "Voice"; foreground: root.fg }
-          Dropdown { width: parent.width; showLabel: false; foreground: root.fg; visible: !(root.remoteProvider && root.voiceOptions.length > 40); options: root.voiceOptions.length ? root.voiceOptions : [{ label: "No voice installed", value: "" }]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
-          Button { width: parent.width; visible: root.remoteProvider && root.voiceOptions.length > 40; text: root.activeVoiceLabel() || "Choose a voice"; iconText: "󰍉"; bordered: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
-          Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
-          Button { width: parent.width; visible: root.remoteProvider && root.remoteVoices.length > 0 && root.voiceOptions.length <= 40; text: "Browse " + root.remoteVoices.length + " voices"; iconText: "󰍉"; bordered: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
-          Button { width: parent.width; text: controller.refreshingVoices ? "Refreshing voices…" : "Refresh cloud voices"; iconText: "󰑐"; bordered: true; foreground: root.fg; visible: root.activeProvider && (root.activeProvider.name === "elevenlabs" || root.activeProvider.name === "google"); enabled: controller.refreshingVoices === ""; onClicked: controller.refreshVoices(root.activeProvider.name) }
+          Dropdown { id: voiceDropdown; width: parent.width; showLabel: false; foreground: root.fg; visible: !(root.remoteProvider && root.voiceOptions.length > 40); options: root.voiceOptions.length ? root.voiceOptions : [{ label: "No voice installed", value: "" }]; value: controller.info.voice || ""; onValueChanged: if (value && value !== controller.info.voice && value !== "No voice installed") controller.setConfig(controller.info.voicePath || ".piper.voice", value) }
+          Button { width: parent.width; visible: root.remoteProvider && root.voiceOptions.length > 40; text: root.activeVoiceLabel() || "Choose a voice"; iconText: "󰍉"; bordered: true; focusable: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
+          Button { width: parent.width; text: controller.info.voices?.length ? "Browse all voices" : "Download a voice"; iconText: "󰇚"; bordered: true; focusable: true; foreground: controller.info.voices?.length ? root.fg : Color.accent; visible: !root.activeProvider || root.activeProvider.voices === "downloadable"; onClicked: { root.browsing = true; root.voiceFilter = ""; controller.loadCatalogue() } }
+          Button { width: parent.width; visible: root.remoteProvider && root.remoteVoices.length > 0 && root.voiceOptions.length <= 40; text: "Browse " + root.remoteVoices.length + " voices"; iconText: "󰍉"; bordered: true; focusable: true; foreground: root.fg; onClicked: root.openRemoteBrowser() }
+          Button { width: parent.width; text: controller.refreshingVoices ? "Refreshing voices…" : "Refresh cloud voices"; iconText: "󰑐"; bordered: true; focusable: true; foreground: root.fg; visible: root.activeProvider && root.activeProvider.refreshVoices === true; enabled: controller.refreshingVoices === ""; onClicked: controller.refreshVoices(root.activeProvider.name) }
           Item {
             width: parent.width; height: speedHeader.implicitHeight
             PanelSectionHeader { id: speedHeader; text: "Speed"; foreground: root.fg }
             Text { anchors.right: parent.right; text: root.rateValue.toFixed(2) + "×"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: 32; text: "−"; bordered: true; onClicked: { var s = Math.max(.5, Math.round((root.rateValue - .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
+            Button { width: 32; text: "−"; bordered: true; focusable: true; onClicked: { var s = Math.max(.5, Math.round((root.rateValue - .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
             // The knob tracks the raw pointer while the label shows the snapped
             // value, so on release it drifts to the step and eases there once
             // the config round-trip returns. Snapping liveValue as we go keeps
@@ -589,7 +665,18 @@ Panel {
                 controller.setConfig(".rate", s.toFixed(2))
               }
             }
-            Button { width: 32; text: "+"; bordered: true; onClicked: { var s = Math.min(2, Math.round((root.rateValue + .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
+            Button { width: 32; text: "+"; bordered: true; focusable: true; onClicked: { var s = Math.min(2, Math.round((root.rateValue + .1) * 20) / 20); root.rateOverride = s; controller.setConfig(".rate", s.toFixed(2)) } }
+          }
+          Text {
+            width: parent.width
+            visible: root.activeProvider && Number(root.activeProvider.maxBytes || 0) > 0
+            wrapMode: Text.WordWrap
+            text: root.activeProvider
+                  ? (root.activeProvider.title || root.activeProvider.name) + " allows "
+                    + root.activeProvider.maxBytes
+                    + " UTF-8 bytes per request. Non-Latin characters can use more than one byte."
+                  : ""
+            color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
           }
           Item {
             width: parent.width; height: limitHeader.implicitHeight
@@ -597,9 +684,15 @@ Panel {
             Text { anchors.right: parent.right; text: controller.info.maxChars > 0 ? "~" + Math.max(1, Math.round(controller.info.maxChars / 900)) + " min" : "unlimited"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
           Row { width: parent.width; spacing: 8
-            Button { width: 48; text: "−500"; bordered: true; onClicked: controller.setConfig(".maxChars", Math.max(0, Number(controller.info.maxChars)-500)) }
-            TextField { width: parent.width - 112; text: String(controller.info.maxChars || 0); foreground: root.fg; onEditingFinished: controller.setConfig(".maxChars", Math.max(0, Number(text)||0)) }
-            Button { width: 48; text: "+500"; bordered: true; onClicked: controller.setConfig(".maxChars", Number(controller.info.maxChars||0)+500) }
+            Button { width: 48; text: "−500"; bordered: true; focusable: true; onClicked: controller.setConfig(".maxChars", Math.max(0, Number(controller.info.maxChars)-500)) }
+            TextField {
+              id: maxCharsField; width: parent.width - 112
+              text: String(controller.info.maxChars || 0); foreground: root.fg
+              inputMethodHints: Qt.ImhDigitsOnly
+              validator: IntValidator { bottom: 0 }
+              onEditingFinished: controller.setConfig(".maxChars", Math.max(0, Number(text) || 0))
+            }
+            Button { width: 48; text: "+500"; bordered: true; focusable: true; onClicked: controller.setConfig(".maxChars", Number(controller.info.maxChars||0)+500) }
           }
         }
         Column {
@@ -609,7 +702,7 @@ Panel {
             PanelSectionHeader { id: browseHeader; text: root.installedCount + " installed · " + ((controller.catalogue || []).length - root.installedCount) + " available"; foreground: root.fg }
             Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } }
           }
-          TextField { width: parent.width; text: root.voiceFilter; foreground: root.fg; onTextChanged: root.voiceFilter = text }
+          TextField { id: voiceFilterField; width: parent.width; placeholderText: "Search voices"; text: root.voiceFilter; foreground: root.fg; onTextChanged: root.voiceFilter = text }
 
           Row {
             width: parent.width; spacing: Style.space(12)
@@ -649,14 +742,15 @@ Panel {
             }
             delegate: Rectangle {
               required property var modelData
-              readonly property bool busy: controller.download.status === "downloading" && controller.download.voice === modelData.key
+              readonly property bool busy: (controller.downloadStarting && controller.pendingDownloadVoice === modelData.key)
+                                            || ((controller.download.status === "starting" || controller.download.status === "downloading") && controller.download.voice === modelData.key)
               width: ListView.view.width; height: 42; radius: 5; color: modelData.installed ? root.tint(.07) : "transparent"
               Text { anchors.left: parent.left; anchors.right: parent.right; anchors.rightMargin: 112; anchors.leftMargin: 8; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; text: root.titleCase(String(parent.modelData.name).replace(/_/g, " ")) + " · " + parent.modelData.lang + " · " + parent.modelData.quality; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
               Text {
                 id: voiceAction; z: 2; anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
-                text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? controller.download.percent + "% · Cancel" : "󰇚 " + parent.modelData.sizeMB + " MB")
+                text: parent.modelData.installed ? (parent.modelData.key === controller.info.voice ? "󰄬 Active" : "Remove") : (parent.busy ? (controller.downloadCancellable ? controller.download.percent + "% · Cancel" : "Starting…") : "󰇚 " + parent.modelData.sizeMB + " MB")
                 color: parent.modelData.installed || parent.busy ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
-                MouseArea { anchors.fill: parent; enabled: parent.parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: { var row = parent.parent; if (row.busy) controller.cancelDownload(); else if (row.modelData.installed) root.confirmVoiceRemove = row.modelData.key; else controller.downloadVoice(row.modelData.key) } }
+                MouseArea { anchors.fill: parent; enabled: parent.parent.modelData.key !== controller.info.voice && (!parent.parent.busy || controller.downloadCancellable); cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: { var row = parent.parent; if (row.busy) controller.cancelDownload(); else if (row.modelData.installed) root.confirmVoiceRemove = row.modelData.key; else controller.downloadVoice(row.modelData.key) } }
               }
               MouseArea { anchors.fill: parent; z: 1; enabled: parent.modelData.installed && parent.modelData.key !== controller.info.voice; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.useVoice(parent.modelData.key) }
             }
@@ -667,8 +761,8 @@ Panel {
             Row {
               id: voiceRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
               Text { width: parent.width - cancelVoice.width - removeVoice.width - 24; elide: Text.ElideMiddle; text: "Remove " + root.voiceLabel(root.confirmVoiceRemove) + "?" + (root.removeSizeMB > 0 ? "  Frees " + root.removeSizeMB + " MB." : ""); color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
-              Button { id: cancelVoice; text: "Cancel"; bordered: true; onClicked: root.confirmVoiceRemove = "" }
-              Button { id: removeVoice; text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeVoice(root.confirmVoiceRemove); root.confirmVoiceRemove = "" } }
+              Button { id: cancelVoice; text: "Cancel"; bordered: true; focusable: true; onClicked: root.confirmVoiceRemove = "" }
+              Button { id: removeVoice; text: "Remove"; bordered: true; focusable: true; foreground: Color.urgent; onClicked: { controller.removeVoice(root.confirmVoiceRemove); root.confirmVoiceRemove = "" } }
             }
           }
           Text { text: "Storage: ~/.local/share/omarchy-tts/voices/piper"; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
@@ -682,8 +776,9 @@ Panel {
             PanelSectionHeader { id: remoteHeader; text: root.filteredRemoteVoices.length + " of " + root.remoteVoices.length + " voices"; foreground: root.fg }
             Text { anchors.right: parent.right; text: "Done"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.browsing = false } }
           }
-          TextField { width: parent.width; placeholderText: "Search by name"; text: root.remoteFilter; foreground: root.fg; onTextChanged: root.remoteFilter = text }
+          TextField { id: remoteFilterField; width: parent.width; placeholderText: "Search by name"; text: root.remoteFilter; foreground: root.fg; onTextChanged: root.remoteFilter = text }
           Dropdown {
+            id: remoteLanguageDropdown
             width: parent.width; showLabel: false; foreground: root.fg; visible: root.remoteLanguages.length > 1
             options: [{ label: "All languages", value: "" }].concat(root.remoteLanguages.map(function (l) { return { label: l, value: l } }))
             value: root.remoteLanguage
@@ -739,7 +834,7 @@ Panel {
           PanelSectionHeader { text: "What gets spoken"; foreground: root.fg }
           Row {
             width: parent.width; spacing: 8
-            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; font.family: root.ff; font.pixelSize: Style.font.caption; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
+            Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: Color.background; border.width: 1; border.color: Color.popups.border; TextArea { id: previewInput; anchors.fill: parent; anchors.margins: 6; text: root.previewSource; color: root.dim; wrapMode: TextEdit.Wrap; clip: true; background: null; font.family: root.ff; font.pixelSize: Style.font.caption; onTextChanged: { root.previewSource = text; previewDelay.restart() } } }
             Rectangle { width: (parent.width - 8) / 2; height: 94; radius: 6; clip: true; color: root.tint(.06); border.width: 1; border.color: Color.popups.border; Text { anchors.fill: parent; anchors.margins: 6; text: controller.preview || "Spoken preview"; color: root.fg; wrapMode: Text.WordWrap; clip: true; elide: Text.ElideRight; maximumLineCount: 5; font.family: root.ff; font.pixelSize: Style.font.caption } }
           }
           SettingToggle { label: "Read URLs as ‘link’"; checked: controller.info.sanitizer?.urls === "link"; foreground: root.fg; onToggled: function(value) { controller.setConfig(".sanitizer.urls", value ? "link" : "domain") } }
@@ -774,6 +869,7 @@ Panel {
               readonly property bool ready: modelData.status === "ready"
               readonly property bool failing: modelData.status === "failing"
               readonly property bool untested: modelData.status === "untested"
+              readonly property string cloudError: String((((modelData.usage || {}).lastRequest || {}).errorCode) || "")
               readonly property bool usable: ready || untested
               readonly property bool cloud: modelData.kind === "cloud"
               width: parent.width; height: engineCopy.implicitHeight + Style.space(12); radius: Style.space(6)
@@ -787,7 +883,7 @@ Panel {
                   Text { anchors.left: engineName.right; anchors.leftMargin: 6; anchors.baseline: engineName.baseline; text: parent.parent.parent.modelData.kind; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                   Text { anchors.right: engineAction.left; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
                     text: { var d = parent.parent.parent
-                            if (d.failing) return "Not working"
+                            if (d.failing) return d.cloudError === "auth" ? "API key rejected" : "Not working"
                             if (d.untested) return "Untested"
                             if (d.ready) return d.cloud ? "● Key available" : "● Ready"
                             return d.modelData.status === "nokey" ? "No API key" : "Not installed" }
@@ -799,13 +895,21 @@ Panel {
                     text: { var d = parent.parent.parent
                             if (controller.verifying === "ocr:" + d.modelData.name) return "Testing…"
                             if (d.modelData.status === "nokey") return "Add key"
+                            if (d.cloud && d.failing && d.cloudError === "auth"
+                                && d.modelData.keySource === "env") return "Fix environment"
+                            if (d.cloud && d.failing && d.cloudError === "auth") return "Replace key"
                             if (d.failing || d.untested) return "Test"
                             if (d.cloud && d.modelData.keySource === "keyring") return "Remove key"
                             return "Install" }
                     color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.caption
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: {
                         var row = parent.parent.parent.parent
-                        if (row.modelData.status === "nokey") {
+                        if (row.cloud && row.failing && row.cloudError === "auth"
+                            && row.modelData.keySource === "env") {
+                          controller.error = (row.modelData.keyEnv || "The environment variable")
+                            + " supplies this key and overrides the system keyring. Update or unset it, restart Omarchy Shell, then Test again."
+                        } else if (row.modelData.status === "nokey"
+                                   || (row.cloud && row.failing && row.cloudError === "auth")) {
                           root.ocrApiProvider = row.modelData.name
                           root.ocrApiVendor = row.modelData.vendor || row.modelData.name
                           controller.keyResult = ({ ok: false, message: "" })
@@ -822,7 +926,8 @@ Panel {
                 }
                 Text { width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.modelData.desc || ""; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
                 Text { visible: parent.parent.cloud; text: "󰅟  Sends screenshots to " + (parent.parent.modelData.vendor || parent.parent.modelData.name); color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
-                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it could not read the test image. Press Test to try again."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.failing; width: parent.width; wrapMode: Text.WordWrap; text: parent.parent.cloudError === "auth" ? (parent.parent.modelData.keySource === "env" ? "The environment API key was rejected. Update or unset it, restart Omarchy Shell, then test again." : "The API key was rejected. Remove it and add a valid key, then test again.") : (parent.parent.cloud ? "The last request did not complete. Press Test to check it again." : "Installed, but it could not read the test image. Press Test to try again."); color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
+                Text { visible: parent.parent.cloud && parent.parent.failing && parent.parent.cloudError === "auth" && parent.parent.modelData.keySource === "env"; width: parent.width; wrapMode: Text.WordWrap; text: (parent.parent.modelData.keyEnv || "The environment variable") + " is currently authoritative; a key saved here cannot override it."; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
               }
               MouseArea { anchors.fill: parent; enabled: parent.usable; z: 0; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: controller.selectOcrEngine(parent.modelData.name) }
             }
@@ -834,8 +939,8 @@ Panel {
               Text { text: "Install " + root.ocrConfirmEngine + "?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
               Text { width: parent.width; text: root.ocrConfirmEngine === "easyocr" ? "About 6 GB of disk in a private Python environment, and several seconds of model loading on every capture. Worth it for stylised or low-contrast text the default cannot read." : "The required packages will be installed for you."; wrapMode: Text.WordWrap; color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
               Row { spacing: 8
-                Button { text: "Cancel"; bordered: true; onClicked: { root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
-                Button { text: "Install"; bordered: true; foreground: Color.accent; onClicked: { controller.installProvider(root.ocrConfirmEngine); root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
+                Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
+                Button { text: "Install"; bordered: true; focusable: true; foreground: Color.accent; onClicked: { controller.installProvider(root.ocrConfirmEngine); root.ocrConfirmInstall = ""; root.ocrConfirmEngine = "" } }
               }
             }
           }
@@ -846,20 +951,22 @@ Panel {
             Row {
               id: ocrKeyRemoveRow; anchors.fill: parent; anchors.margins: 8; spacing: 8
               Text { text: "Remove the " + root.ocrConfirmKeyRemove + " API key?"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
-              Button { text: "Cancel"; bordered: true; onClicked: root.ocrConfirmKeyRemove = "" }
-              Button { text: "Remove"; bordered: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.ocrConfirmKeyRemove); root.ocrConfirmKeyRemove = "" } }
+              Button { text: "Cancel"; bordered: true; focusable: true; onClicked: root.ocrConfirmKeyRemove = "" }
+              Button { text: "Remove"; bordered: true; focusable: true; foreground: Color.urgent; onClicked: { controller.removeKey(root.ocrConfirmKeyRemove); root.ocrConfirmKeyRemove = "" } }
             }
           }
           ApiKeyDialog {
+            id: ocrKeyDialog
             width: parent.width; visible: root.ocrApiProvider !== ""
             controller: controller; provider: root.ocrApiProvider; vendor: root.ocrApiVendor; foreground: root.fg
-            sends: "Screenshots of captured regions, windows or screens, and a test image,"
-            onClosed: root.ocrApiProvider = ""
+            purpose: "ocr"
+            sends: "Screenshots of captured regions, windows or screens, and a test image"
+            onClosed: { root.ocrApiProvider = ""; root.ocrApiVendor = "" }
           }
           Text {
             width: parent.width
-            visible: controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
-            text: controller.setupJob.message; wrapMode: Text.WordWrap
+            visible: controller.setupStarting || controller.setupJob.status === "running" || controller.setupJob.status === "starting" || controller.setupJob.status === "error"
+            text: controller.setupStarting ? "Starting setup safely…" : controller.setupJob.message; wrapMode: Text.WordWrap
             color: controller.setupJob.status === "error" ? Color.urgent : root.dim
             font.family: root.ff; font.pixelSize: Style.font.caption
           }
@@ -868,18 +975,23 @@ Panel {
             PanelSectionHeader { id: ocrHeader; text: "Confidence floor"; foreground: root.fg }
             Text { anchors.right: parent.right; text: root.confidenceValue > 0 ? root.confidenceValue + "%" : "keep everything"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.caption }
           }
-          PanelSlider {
-            id: confidenceSlider
-            width: parent.width; bar: root.bar
-            minimum: 0; maximum: 95; step: 5; integer: true
-            value: root.confidenceValue
-            function snap(v) { return Math.round(v / 5) * 5 }
-            onMoved: function(v) { var s = confidenceSlider.snap(v); root.confidenceOverride = s; confidenceSlider.liveValue = s }
-            onReleased: function(v) {
-              var s = confidenceSlider.snap(v)
-              root.confidenceOverride = s
-              controller.setConfig(".ocr.minConfidence", s)
+          Row {
+            width: parent.width; spacing: 8
+            Button { width: 32; text: "−"; bordered: true; focusable: true; onClicked: { var s = Math.max(0, root.confidenceValue - 5); root.confidenceOverride = s; controller.setConfig(".ocr.minConfidence", s) } }
+            PanelSlider {
+              id: confidenceSlider
+              width: parent.width - 80; bar: root.bar
+              minimum: 0; maximum: 95; step: 5; integer: true
+              value: root.confidenceValue
+              function snap(v) { return Math.round(v / 5) * 5 }
+              onMoved: function(v) { var s = confidenceSlider.snap(v); root.confidenceOverride = s; confidenceSlider.liveValue = s }
+              onReleased: function(v) {
+                var s = confidenceSlider.snap(v)
+                root.confidenceOverride = s
+                controller.setConfig(".ocr.minConfidence", s)
+              }
             }
+            Button { width: 32; text: "+"; bordered: true; focusable: true; onClicked: { var s = Math.min(95, root.confidenceValue + 5); root.confidenceOverride = s; controller.setConfig(".ocr.minConfidence", s) } }
           }
         }
 
@@ -933,6 +1045,7 @@ Panel {
             color: root.dim; font.family: root.ff; font.pixelSize: Style.font.caption
           }
           TextField {
+            id: languageFilterField
             width: parent.width; visible: root.ocrLanguages.length > 0
             placeholderText: "Search " + root.availableLanguages.length + " languages"
             text: root.languageFilter; foreground: root.fg
@@ -1000,14 +1113,14 @@ Panel {
               width: controller.bindings.installed ? (parent.width - 8)/2 : parent.width
               text: controller.bindings.installed ? "Apply changes"
                     : (root.adoptableCount > 0 ? "Take over these shortcuts" : "Set up shortcuts")
-              bordered: true; foreground: Color.accent
+              bordered: true; focusable: true; foreground: Color.accent
               enabled: controller.bindings.canInstall !== false
               onClicked: controller.installBindings()
             }
             Button {
               width: (parent.width - 8)/2
               visible: controller.bindings.installed
-              text: "Remove shortcuts"; bordered: true; foreground: Color.urgent
+              text: "Remove shortcuts"; bordered: true; focusable: true; foreground: Color.urgent
               onClicked: controller.removeBindings()
             }
           }
@@ -1027,8 +1140,8 @@ Panel {
             Text { text: "Press the new shortcut for “" + root.captureAction + "”"; color: root.fg; font.family: root.ff; font.pixelSize: Style.font.body }
             Text { text: root.capturedChord || "Waiting for keys…"; color: Color.accent; font.family: root.ff; font.pixelSize: Style.font.subtitle }
             Row { spacing: 8
-              Button { text: "Cancel"; bordered: true; onClicked: { root.captureAction = ""; root.capturedChord = "" } }
-              Button { text: "Use shortcut"; bordered: true; enabled: root.capturedChord !== ""; foreground: Color.accent; onClicked: { controller.setBinding(root.captureAction, root.capturedChord); root.captureAction = ""; root.capturedChord = "" } }
+              Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { root.captureAction = ""; root.capturedChord = "" } }
+              Button { text: "Use shortcut"; bordered: true; focusable: true; enabled: root.capturedChord !== ""; foreground: Color.accent; onClicked: { controller.setBinding(root.captureAction, root.capturedChord); root.captureAction = ""; root.capturedChord = "" } }
             }
           }
         }
@@ -1043,11 +1156,12 @@ Panel {
           }
           Row { width: parent.width; spacing: 8
             TextField { id: sampleField; width: parent.width - testButton.width - 8; text: root.sampleText; foreground: root.fg; selectByMouse: true; onTextChanged: root.sampleText = text; onEditingFinished: controller.setConfig(".ui.sampleText", text) }
-            Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
+            Button { id: testButton; width: 96; text: controller.speaking ? "Stop" : "Speak"; iconText: controller.speaking ? "󰓛" : "󰐊"; bordered: true; focusable: true; foreground: controller.speaking ? Color.urgent : root.fg; accent: controller.speaking ? Color.urgent : Color.accent; onClicked: controller.speaking ? controller.stop() : controller.speak(root.sampleText) }
           }
           Text { width: parent.width; elide: Text.ElideRight; text: (controller.speaking ? "● Speaking · " : "") + ((root.activeProvider ? (root.activeProvider.title || root.activeProvider.name) : controller.info.provider) || "") + (controller.info.voice ? " · " + root.activeVoiceLabel() : "") + " · " + Number(controller.info.rate || 1).toFixed(2) + "×" + (controller.info.maxChars > 0 ? " · ≤" + controller.info.maxChars + " chars" : ""); color: controller.speaking ? Color.accent : root.dim; font.family: root.ff; font.pixelSize: Style.font.caption }
           Text { width: parent.width; visible: controller.error !== ""; text: controller.error; wrapMode: Text.WordWrap; color: Color.urgent; font.family: root.ff; font.pixelSize: Style.font.caption }
         }
+      }
       }
     }
   }

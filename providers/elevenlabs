@@ -4,7 +4,11 @@
 # kind: cloud
 # probe: [[ -n "${ELEVENLABS_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key elevenlabs >/dev/null 2>&1
 # vendor: ElevenLabs
+# keyname: elevenlabs
+# keyenv: ELEVENLABS_API_KEY
 # voices: remote
+# refreshvoices: true
+# refreshusage: true
 # maxchars: 40000
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
@@ -13,8 +17,8 @@ source "$TTS_PLUGIN_DIR/lib/cloud.sh"
 need curl "install with: omarchy pkg add curl"
 KEY="$(get_key ELEVENLABS_API_KEY elevenlabs)" || exit 1
 
-MODEL="$(jq -r '.elevenlabs.model // "eleven_turbo_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
-[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_turbo_v2_5"
+MODEL="$(jq -r '.elevenlabs.model // "eleven_flash_v2_5"' "$TTS_CONFIG" 2>/dev/null)"
+[[ -z "$MODEL" || "$MODEL" == "null" ]] && MODEL="eleven_flash_v2_5"
 
 # List the account's voices as {value,label} pairs. ElevenLabs addresses
 # voices by opaque id, so without this the panel can only ever show the one id

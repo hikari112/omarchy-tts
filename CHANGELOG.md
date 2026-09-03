@@ -5,6 +5,37 @@ Versioning.
 
 ## Unreleased
 
+## 1.3.0 - 2026-09-03
+
+- Add selectable EasyOCR, OpenAI Vision, and Google Cloud Vision recognition
+  engines, with per-engine language state, explicit language discovery, and
+  safe Tesseract language-pack installation.
+- Add Gemini and Google Cloud Text-to-Speech providers, account-backed Google
+  and ElevenLabs voice browsing, and metadata-driven refresh/usage actions.
+- Expand the settings panel to six scrollable views, add filtered cloud voice
+  browsing, make inline controls keyboard-safe, and clearly distinguish local
+  processing, cloud disclosure, key sources, and environment-key remediation.
+- Preserve `espeak-ng` and Speech Dispatcher configurations across upgrades as
+  hidden compatibility providers while steering new configurations to Piper.
+- Bind readiness to the exact adapter, relevant configuration, and credential
+  source so stale health results cannot survive an upgrade, voice/language
+  change, or key mutation; bound provider probes that do not return.
+- Close setup and voice-download cancellation races by withholding cancellable
+  state until the worker publishes a verified PID identity, and reconcile jobs
+  that terminate unexpectedly.
+- Accept fully non-Latin selections, keep sanitizer output within its exact
+  configured limit, and enforce Google Cloud's 5,000-byte UTF-8 request limit
+  before sending text.
+- Normalize embedded Google Vision failures without echoing remote response
+  details, record HTTP-200 error envelopes accurately, and reject invalid
+  Gemini API-host settings before any network request.
+- Pin EasyOCR and the Kokoro spaCy model artifact, bound installer-log memory,
+  make cleanup failures truthful, and invalidate both speech and OCR health for
+  shared Google/OpenAI credential changes.
+- Run the complete regression suite on staging pushes as well as main, and add
+  static UI contracts for worker identity, key purpose, scrolling, focus, and
+  metadata-driven actions.
+
 ## 1.2.3 - 2026-09-02
 
 - Add a root `preview.png` for marketplace listing cards.

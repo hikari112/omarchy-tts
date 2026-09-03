@@ -7,7 +7,8 @@ get_key() { # get_key <ENV_NAME> <keyring-name>
   v="${!envname:-}"
   [[ -n "$v" && "$v" != *$'\n'* && "$v" != *$'\r'* ]] && { printf '%s' "$v"; return 0; }
   if command -v secret-tool >/dev/null 2>&1; then
-    v="$(secret-tool lookup service omarchy-tts key "$keyname" 2>/dev/null)"
+    v="$(timeout --kill-after=1s 5s secret-tool lookup \
+      service omarchy-tts key "$keyname" 2>/dev/null)"
     [[ -n "$v" && "$v" != *$'\n'* && "$v" != *$'\r'* ]] && { printf '%s' "$v"; return 0; }
   fi
   echo "speak: no API key for $keyname." >&2

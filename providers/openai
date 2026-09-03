@@ -4,6 +4,8 @@
 # kind: cloud
 # probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
 # vendor: OpenAI
+# keyname: openai
+# keyenv: OPENAI_API_KEY
 # voices: remote
 # maxchars: 4096
 set -uo pipefail

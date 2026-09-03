@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
   workflow_dispatch:
 
@@ -25,14 +25,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Sanitizer tests
-        run: python3 tests/test_sanitize.py
-
-      - name: CLI configuration tests
-        run: python3 tests/test_cli.py
+      - name: Test suite
+        run: python3 -m unittest discover -s tests -v
 
       - name: Python syntax
-        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+        run: python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py tests/*.py
 
       - name: Shell syntax
         run: |

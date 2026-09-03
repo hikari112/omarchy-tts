@@ -23,6 +23,7 @@ import time
 PLUGIN = Path(__file__).resolve().parents[1]
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 # Without a session runtime dir, fall back to an owner-only XDG state
 # directory rather than sticky /tmp.
 RUNTIME = (Path(os.environ["XDG_RUNTIME_DIR"]) / "omarchy-tts"
@@ -34,6 +35,7 @@ ENGINE = DATA / "engines"
 VOICES = DATA / "voices" / "piper"
 STATE = RUNTIME / "setup.json"
 SETUP_LOCK = RUNTIME / "setup.lock"
+HEALTH = CACHE_HOME / "omarchy-tts" / "health.json"
 VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
 BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
 DEFAULT_VOICE = "en_US-amy-medium"
@@ -42,7 +44,7 @@ KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")
 KOKORO_PYTHON = "3.12"
 JOB_PID = 0
 JOB_IDENTITY = ""
-
+HELPER_TIMEOUT = 30
 
 
 def ensure_private_runtime() -> None:
@@ -82,7 +84,11 @@ def write_state(status: str, step: str = "", progress: int = 0,
 
 def process_identity(pid: int) -> str:
     try:
-        return Path(f"/proc/{pid}/stat").read_text().split()[21]
+        # The command name in /proc/<pid>/stat is parenthesized and may itself
+        # contain spaces. Split after its final ')' so field 22 (start time)
+        # cannot shift underneath us.
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return fields[19]
     except (OSError, IndexError):
         return ""
 
@@ -91,12 +97,19 @@ def piper_binary() -> Path:
     return ENGINE / "piper" / "bin" / "piper"
 
 
+def nonempty_file(path: Path) -> bool:
+    """Treat concurrent removal or an unreadable model as not installed."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def status() -> dict:
     voice = VOICES / f"{DEFAULT_VOICE}.onnx"
     legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
     engine_ready = os.access(piper_binary(), os.X_OK) or shutil.which("piper") is not None
-    voice_ready = ((voice.is_file() and voice.stat().st_size > 0)
-                   or (legacy_voice.is_file() and legacy_voice.stat().st_size > 0))
+    voice_ready = nonempty_file(voice) or nonempty_file(legacy_voice)
     bindings = False
     try:
         result = subprocess.run([BINDINGS_TOOL, "status"], text=True,
@@ -116,10 +129,14 @@ def status() -> dict:
 
 
 def run_checked(argv: list[str], *, env: dict | None = None) -> None:
-    result = subprocess.run(argv, env=env, text=True, capture_output=True)
-    if result.returncode:
-        message = result.stderr.strip() or result.stdout.strip() or f"{argv[0]} failed"
-        raise RuntimeError(message[-800:])
+    """Run an installer without retaining an unbounded log in memory."""
+    with tempfile.TemporaryFile() as log:
+        result = subprocess.run(argv, env=env, stdout=log, stderr=subprocess.STDOUT)
+        if result.returncode:
+            length = log.tell()
+            log.seek(max(0, length - 8192))
+            message = log.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError((message or f"{argv[0]} failed")[-800:])
 
 
 def ensure_uv() -> str:
@@ -212,17 +229,16 @@ def install_language(code: str) -> None:
         subprocess.run([str(speak), "--refresh-languages"], capture_output=True, timeout=60)
 
 
-
-
 # Kokoro's English G2P needs a spaCy model that is not on PyPI. Left out, it
 # tries to fetch the model at first use through spaCy's own downloader, which
-# shells out to pip - absent from a uv-created venv - so the backend installs
-# cleanly and then cannot speak a word.
-OCR_ENGINES = {"easyocr"}
-# Every cloud key the plugin will store; the google key is OCR-only.
-CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini")
+# shells out to pip—absent from a uv-created venv—after setup has completed.
 SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
-               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl")
+               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+               "#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85")
+OCR_ENGINES = {"easyocr"}
+# Every cloud key the plugin will store. Google and OpenAI credentials are
+# shared by their speech and OCR adapters.
+CLOUD_KEYS = ("openai", "elevenlabs", "google", "gemini")
 
 
 def install_kokoro() -> None:
@@ -240,7 +256,7 @@ def install_kokoro() -> None:
     run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
 
 
-EASYOCR_PACKAGES = ("easyocr",)
+EASYOCR_PACKAGES = ("easyocr==1.7.2",)
 
 
 def install_easyocr() -> None:
@@ -332,6 +348,8 @@ def start(target: str) -> None:
         return
     try:
         current = json.loads(STATE.read_text())
+        if not isinstance(current, dict):
+            raise ValueError("invalid setup state")
         pid = int(current.get("pid", 0))
         identity = str(current.get("processIdentity", ""))
         if current.get("status") in {"starting", "running"} and pid > 1 \
@@ -350,18 +368,28 @@ def start(target: str) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             pass_fds=(lock_fd,),
         )
-    finally:
+    except OSError:
         os.close(lock_fd)
+        write_state("error", "failed", 0,
+                    "Setup worker could not be launched", retryable=True)
+        emit(ok=False, code="worker_start_failed",
+             message="Setup could not start safely")
+        return
+    os.close(lock_fd)
     # Do not tell the panel that setup is cancellable until the child has
     # published both its PID and process-start identity. Without this handoff,
     # an immediate Cancel could acknowledge success while the unregistered
     # installer continued in the background.
     registered = False
+    registered_identity = ""
     for _ in range(200):
         try:
             child_state = json.loads(STATE.read_text())
+            if not isinstance(child_state, dict):
+                raise ValueError("invalid setup state")
+            registered_identity = str(child_state.get("processIdentity", ""))
             registered = (int(child_state.get("pid", 0)) == process.pid
-                          and bool(child_state.get("processIdentity")))
+                          and bool(registered_identity))
         except (OSError, ValueError, TypeError):
             registered = False
         if registered or process.poll() is not None:
@@ -373,47 +401,163 @@ def start(target: str) -> None:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
         write_state("error", "failed", 0,
                     "Setup worker did not initialize safely", retryable=True)
         emit(ok=False, code="worker_start_failed",
              message="Setup could not start safely")
         return
-    emit(ok=True, started=True, pid=process.pid)
+    emit(ok=True, started=True, pid=process.pid,
+         processIdentity=registered_identity)
 
 
 def cancel() -> None:
     try:
         state = json.loads(STATE.read_text())
+        if not isinstance(state, dict):
+            raise ValueError("invalid setup state")
         pid = int(state.get("pid", 0))
         identity = str(state.get("processIdentity", ""))
-        if pid > 1 and identity and process_identity(pid) == identity:
-            os.killpg(pid, signal.SIGTERM)
-        write_state("cancelled", "cancelled", 0, "Cancelled")
-        emit(ok=True)
+        active = state.get("status") in {"starting", "running"}
+        if not (active and pid > 1 and identity
+                and process_identity(pid) == identity):
+            raise ValueError("no live setup worker")
+        os.killpg(pid, signal.SIGTERM)
     except (OSError, ValueError, TypeError):
         emit(ok=False, code="not_running", message="No setup job is running")
+        return
+    write_state("cancelled", "cancelled", 0, "Cancelled")
+    emit(ok=True)
+
+
+def job_status() -> None:
+    try:
+        current = json.loads(STATE.read_text())
+    except (OSError, ValueError, TypeError):
+        emit(status="idle", step="", progress=0, message="")
+        return
+    if not isinstance(current, dict):
+        emit(status="idle", step="", progress=0, message="")
+        return
+    try:
+        pid = int(current.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    identity = str(current.get("processIdentity", ""))
+    current_status = str(current.get("status", ""))
+    if current_status in {"starting", "running"} and pid > 1 \
+            and (not identity or process_identity(pid) != identity):
+        current.update(status="error", step="failed", progress=0,
+                       message="Setup stopped unexpectedly", retryable=True,
+                       pid=0, processIdentity="")
+        atomic_json(STATE, current)
+    emit(**current)
+
+
+def invalidate_health(provider: str) -> bool:
+    """Atomically forget proof affected by a credential mutation."""
+    keys = {provider}
+    if provider in {"openai", "google"}:
+        keys.add(f"ocr:{provider}")
+    if not HEALTH.exists():
+        return True
+    lock_fd: int | None = None
+    temporary: Path | None = None
+    try:
+        HEALTH.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = HEALTH.with_name(f"{HEALTH.name}.lock")
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            value = json.loads(HEALTH.read_text())
+        except (OSError, ValueError):
+            return True  # malformed cache entries are already treated as untested
+        if not isinstance(value, dict):
+            return True
+        for key in keys:
+            value.pop(key, None)
+        descriptor, name = tempfile.mkstemp(prefix=f".{HEALTH.name}.", dir=HEALTH.parent)
+        temporary = Path(name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+        temporary.chmod(0o600)
+        os.replace(temporary, HEALTH)
+        temporary = None
+        return True
+    except OSError:
+        return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
+
+
+def keyring_contains(tool: str, provider: str) -> bool:
+    """Return key presence while distinguishing absence from keyring failure."""
+    try:
+        result = subprocess.run(
+            [tool, "lookup", "service", "omarchy-tts", "key", provider],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("The system keyring did not respond") from exc
+    if result.returncode == 0:
+        return True
+    # libsecret uses status 1 with no diagnostic for an absent item. Any other
+    # result is operational trouble, not proof that no credential exists.
+    if result.returncode == 1 and not result.stderr.strip():
+        return False
+    raise RuntimeError("The system keyring did not respond")
 
 
 def key_store(provider: str) -> None:
     if provider not in CLOUD_KEYS:
         emit(ok=False, code="unknown_provider", message="Unknown cloud provider")
         return
-    key = sys.stdin.readline().rstrip("\r\n")
-    if len(key) < 8:
-        emit(ok=False, code="invalid_key", message="The API key is too short")
+    raw_key = sys.stdin.readline(4098)
+    key = raw_key.rstrip("\r\n")
+    if (len(key) < 8 or len(key) > 4096 or key != key.strip()
+            or any(ord(character) < 32 for character in key)):
+        emit(ok=False, code="invalid_key", message="Enter a valid API key without surrounding whitespace")
         return
     tool = shutil.which("secret-tool")
     if not tool:
         emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
         return
-    result = subprocess.run([tool, "store", f"--label=omarchy-tts {provider}",
-                             "service", "omarchy-tts", "key", provider],
-                            input=key, text=True, capture_output=True)
+    try:
+        result = subprocess.run(
+            [tool, "store", f"--label=omarchy-tts {provider}",
+             "service", "omarchy-tts", "key", provider],
+            input=key, text=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        key = ""
+        emit(ok=False, code="keyring_failed",
+             message="The system keyring did not respond")
+        return
     key = ""
     if result.returncode:
         emit(ok=False, code="keyring_failed", message="Could not save the API key")
     else:
-        emit(ok=True)
+        invalidated = invalidate_health(provider)
+        emit(ok=True, warning="" if invalidated else "Saved, but cached health could not be cleared")
 
 
 def key_remove(provider: str) -> None:
@@ -424,23 +568,82 @@ def key_remove(provider: str) -> None:
     if not tool:
         emit(ok=False, code="no_keyring", message="The system keyring is unavailable")
         return
-    result = subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
-                            capture_output=True)
-    emit(ok=result.returncode == 0,
-         message="API key removed" if result.returncode == 0 else "No stored key was found")
+    try:
+        present = keyring_contains(tool, provider)
+    except RuntimeError as exc:
+        emit(ok=False, code="keyring_failed", message=str(exc))
+        return
+    if not present:
+        invalidated = invalidate_health(provider)
+        emit(ok=True, code="not_found", message="No stored key was found",
+             warning="" if invalidated else "Cached health could not be cleared")
+        return
+    try:
+        result = subprocess.run(
+            [tool, "clear", "service", "omarchy-tts", "key", provider],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        emit(ok=False, code="keyring_failed",
+             message="The system keyring did not respond")
+        return
+    if result.returncode:
+        emit(ok=False, code="keyring_failed",
+             message="Could not remove the stored API key")
+        return
+    invalidated = invalidate_health(provider)
+    emit(ok=True, message="API key removed",
+         warning="" if invalidated else "Cached health could not be cleared")
 
 
-def cleanup() -> None:
-    result = {"ok": True, "removed": []}
-    subprocess.run([BINDINGS_TOOL, "remove"], capture_output=True)
-    result["removed"].append("shortcuts")
+def cleanup() -> int:
+    removed: list[str] = []
+    removed_keys: list[str] = []
+    failures: list[str] = []
+    try:
+        binding_result = subprocess.run(
+            [BINDINGS_TOOL, "remove"], capture_output=True,
+            timeout=HELPER_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        failures.append("Could not remove managed shortcuts")
+    else:
+        if binding_result.returncode == 0:
+            removed.append("shortcuts")
+        else:
+            failures.append("Could not remove managed shortcuts")
     tool = shutil.which("secret-tool")
     if tool:
         for provider in CLOUD_KEYS:
-            subprocess.run([tool, "clear", "service", "omarchy-tts", "key", provider],
-                           capture_output=True)
-        result["removed"].append("API keys")
-    emit(**result)
+            try:
+                present = keyring_contains(tool, provider)
+            except RuntimeError:
+                failures.append(f"Could not inspect the {provider} API key")
+                continue
+            if present:
+                try:
+                    cleared = subprocess.run(
+                        [tool, "clear", "service", "omarchy-tts", "key", provider],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=HELPER_TIMEOUT,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    failures.append(f"Could not remove the {provider} API key")
+                else:
+                    if cleared.returncode:
+                        failures.append(f"Could not remove the {provider} API key")
+                    else:
+                        removed_keys.append(provider)
+            if not invalidate_health(provider):
+                failures.append(f"Could not clear cached {provider} health")
+        if removed_keys:
+            removed.append("stored API keys (" + ", ".join(removed_keys) + ")")
+    else:
+        failures.append("The system keyring is unavailable")
+    ok = not failures
+    emit(ok=ok, removed=removed, failures=failures)
+    return 0 if ok else 1
 
 
 def diagnostics() -> None:
@@ -476,9 +679,7 @@ def main() -> int:
     if args.command == "status": emit(**status())
     elif args.command == "start": start(args.target)
     elif args.command == "_worker": return worker(args.target)
-    elif args.command == "job":
-        try: print(STATE.read_text(), end="")
-        except OSError: emit(status="idle", step="", progress=0, message="")
+    elif args.command == "job": job_status()
     elif args.command == "cancel": cancel()
     elif args.command == "key-store": key_store(args.provider)
     elif args.command == "key-remove": key_remove(args.provider)
@@ -487,7 +688,7 @@ def main() -> int:
             emit(ok=False, code="confirmation_required",
                  message="cleanup removes managed shortcuts and stored API keys; rerun with --yes")
             return 2
-        cleanup()
+        return cleanup()
     elif args.command == "diagnostics": diagnostics()
     return 0
 

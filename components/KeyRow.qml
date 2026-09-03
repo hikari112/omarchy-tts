@@ -10,6 +10,12 @@ Rectangle {
   signal changeRequested(string actionName, string chord)
   width: parent ? parent.width : implicitWidth
   height: 34; radius: Style.space(5); color: "transparent"
+  activeFocusOnTab: true
+  border.width: activeFocus ? 1 : 0
+  border.color: Color.accent
+  Keys.onSpacePressed: root.changeRequested(root.actionName, root.chord)
+  Keys.onReturnPressed: root.changeRequested(root.actionName, root.chord)
+  Keys.onEnterPressed: root.changeRequested(root.actionName, root.chord)
   Text {
     anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter
     text: root.label; color: root.foreground; font.family: Style.font.family

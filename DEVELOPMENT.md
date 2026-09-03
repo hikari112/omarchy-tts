@@ -1,12 +1,14 @@
 # Architecture and review guide
 
-The plugin has a five-tab settings panel: Provider, Voice, Text, Screen, and
-Keys. Its command-line boundary remains independently useful and testable.
+The plugin has a six-tab settings panel: Provider, Voice, Text, Screen,
+Languages, and Keys. Its command-line boundary remains independently useful
+and testable.
 
 ## Ownership boundaries
 
 - `bin/speak` is the public speech and settings API.
 - `lib/config.sh` owns schema migration, validation and atomic config writes.
+- `lib/health.sh` owns shared, atomic health-cache invalidation.
 - `lib/sanitize.py` is the one sanitizer used for speech and live preview.
 - provider executables declare small metadata headers consumed by `--info`.
 - `bin/speak-voice` owns Piper catalogue/download lifecycle.
@@ -24,21 +26,32 @@ the key never returns to QML or appears in a process argument.
 
 ## Configuration
 
-`config.json` schema version 2 is additive and backwards compatible. Startup
+`config.json` schema version 3 is additive and backwards compatible. Startup
 fills missing defaults without replacing existing values. ElevenLabs has no
 global default voice: the first successful account-voice refresh selects one
-only when the user has not already made a choice. Invalid JSON is preserved
+only when the user has not already made a choice. Schema 3 migrates the former
+ElevenLabs default model to `eleven_flash_v2_5`. Invalid JSON is preserved
 with an `.invalid.<timestamp>` suffix before defaults are restored. Writes are
 limited to an allowlist and use an atomic rename with mode 0600.
 
 Runtime state is stored in a private, user-owned directory. Speech and
 background jobs record both process ownership and identity; callers must only
-clear state they still own. QML settings writes are serialized, with redundant
-pending writes to the same property coalesced.
+clear state they still own, and the UI does not expose cancellation until that
+identity is confirmed. Provider/OCR health entries carry fingerprints of the
+adapter, relevant configuration, and credential source, so old proof becomes
+untested after meaningful changes. QML settings writes are serialized, with
+redundant pending writes to the same property coalesced.
+
+Provider headers are the capability boundary consumed by `speak --info`.
+Alongside descriptive fields, adapters can declare byte/character limits,
+credential names and environment variables, deprecation, account voice
+refresh, and usage refresh. The panel acts on those normalized fields instead
+of inferring behavior from a filename.
 
 ## Deliberate design changes
 
-- Screen is retained as a fifth tab.
+- Screen remains a dedicated tab, with recognition languages separated into
+  their own focused browser.
 - Keys use Omarchy's current Lua configuration, not the obsolete `.conf` file
   in the original mockup.
 - Provider installs use reviewed Omarchy/uv commands and require confirmation.
@@ -52,9 +65,10 @@ pending writes to the same property coalesced.
 
 1. `lib/config.sh` and `bin/speak --info/--set`
 2. `components/TtsController.qml`
-3. the five sections in `Panel.qml`
+3. the six sections in `Panel.qml`
 4. `bin/speak-bindings` safety/rollback behavior
 5. provider metadata and voice download behavior
 
-Run `python3 tests/test_sanitize.py`, `python3 tests/test_cli.py`, and the
-ShellCheck command from the README. A live QML review requires omarchy-shell.
+Run `python3 -m unittest discover -s tests -v` and the ShellCheck command from
+the README. The suite includes static QML interaction contracts; a full visual
+review still requires omarchy-shell.

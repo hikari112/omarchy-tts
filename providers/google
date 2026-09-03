@@ -4,8 +4,11 @@
 # kind: cloud
 # probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
 # vendor: Google
+# keyname: google
+# keyenv: GOOGLE_API_KEY
 # voices: remote
-# maxchars: 5000
+# refreshvoices: true
+# maxbytes: 5000
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 source "$TTS_PLUGIN_DIR/lib/keys.sh"

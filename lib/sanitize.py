@@ -253,7 +253,19 @@ def sanitize(text: str, announce_code=True, max_chars=0, ocr=False,
     if max_chars and len(text) > max_chars:
         cut = text[:max_chars]
         pivot = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-        text = cut[: pivot + 1] if pivot > max_chars * 0.4 else cut.rsplit(" ", 1)[0] + "."
+        if pivot > max_chars * 0.4:
+            text = cut[: pivot + 1]
+        else:
+            boundary = cut.rsplit(" ", 1)[0] if " " in cut else cut
+            boundary = boundary.rstrip(" ,;:") or cut
+            if boundary.endswith((".", "!", "?")):
+                text = boundary
+            elif len(boundary) < max_chars:
+                text = boundary + "."
+            else:
+                # An unbroken token has no safe word boundary. Replace its
+                # final character rather than exceeding the caller's limit.
+                text = boundary[:-1] + "."
 
     return text.strip()
 
@@ -286,7 +298,7 @@ def main() -> int:
         strip_markdown=opts.get("stripMarkdown", True),
         expand_units=opts.get("expandUnits", True),
     )
-    if not out or not re.search(r"[A-Za-z0-9]", out):
+    if not out or not any(char.isalnum() for char in out):
         return 1
     sys.stdout.write(out)
     return 0

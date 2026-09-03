@@ -30,7 +30,9 @@ BarWidget {
 
   // Shape the bar expects when routing summon/hide to a widget's panel.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
-  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function open() {
+    if (panelLoader.item) panelLoader.item.open()
+  }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
   readonly property bool popoutSwitchClosing: panelLoader.item

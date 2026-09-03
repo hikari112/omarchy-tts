@@ -30,13 +30,13 @@ tts_config_init_unlocked() {
     tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
     cat >"$tmp" <<'JSON'
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "provider": "piper",
   "rate": 1.0,
   "maxChars": 0,
   "piper": { "voice": "en_US-amy-medium" },
   "openai": { "voice": "alloy", "model": "gpt-4o-mini-tts" },
-  "elevenlabs": { "model": "eleven_turbo_v2_5" },
+  "elevenlabs": { "model": "eleven_flash_v2_5" },
   "kokoro": { "voice": "af_heart" },
   "gemini": { "voice": "Kore", "model": "gemini-2.5-flash-preview-tts", "api": "vertex" },
   "google": { "voice": "" },
@@ -62,7 +62,8 @@ JSON
   local tmp
   tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
   if jq '
-    .schemaVersion = 2
+    (.schemaVersion // 0) as $previousSchema
+    | .schemaVersion = 3
     | .provider //= "piper"
     | .rate //= 1.0
     | .maxChars //= 0
@@ -72,7 +73,9 @@ JSON
     | .openai.voice //= "alloy"
     | .openai.model //= "gpt-4o-mini-tts"
     | .elevenlabs //= {}
-    | .elevenlabs.model //= "eleven_turbo_v2_5"
+    | .elevenlabs.model //= "eleven_flash_v2_5"
+    | if $previousSchema < 3 and .elevenlabs.model == "eleven_turbo_v2_5"
+      then .elevenlabs.model = "eleven_flash_v2_5" else . end
     | .kokoro //= {}
     | .kokoro.voice //= "af_heart"
     | .gemini //= {}
@@ -116,13 +119,16 @@ tts_config_set() { # jq path, JSON-or-string value
 }
 
 tts_config_set_unlocked() { # jq path, JSON-or-string value
-  local path="$1" value="$2" tmp
+  local path="$1" value="$2" tmp engine=""
+  if [[ "$path" =~ ^\.ocr\.([A-Za-z0-9._-]+)\.langs$ ]]; then
+    engine="${BASH_REMATCH[1]}"
+  fi
   case "$path" in
     .provider|.rate|.maxChars|.piper.voice|.openai.voice|.elevenlabs.voiceId|.kokoro.voice|\
     .gemini.voice|.gemini.api|.google.voice|.ocr.engine|.ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs|.ocr.minConfidence|\
     .sanitizer.urls|.sanitizer.inlineCode|.sanitizer.announceCodeBlocks|\
     .sanitizer.stripMarkdown|.sanitizer.expandUnits|.ui.lastTab|.ui.sampleText) ;;
-    *) return 2 ;;
+    *) [[ -n "$engine" ]] || return 2 ;;
   esac
   case "$path" in
     .provider) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
@@ -133,14 +139,17 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
     .ocr.minConfidence) [[ "$value" =~ ^[0-9]+$ ]] && [[ "$value" -le 100 ]] || return 3 ;;
     .ocr.engine) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
     .gemini.api) [[ "$value" == vertex || "$value" == developer ]] || return 3 ;;
-    .ocr.langs|.ocr.tesseract.langs|.ocr.easyocr.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
+    .ocr.langs|*.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
     .sanitizer.urls) [[ "$value" == domain || "$value" == link ]] || return 3 ;;
     .sanitizer.inlineCode|.sanitizer.announceCodeBlocks|.sanitizer.stripMarkdown|.sanitizer.expandUnits)
       [[ "$value" == true || "$value" == false ]] || return 3 ;;
     .ui.lastTab) [[ "$value" =~ ^[0-5]$ ]] || return 3 ;;
   esac
   tmp="$(mktemp "${CONFIG}.XXXXXX")" || return 1
-  if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ || "$value" == true || "$value" == false ]]; then
+  if [[ -n "$engine" ]]; then
+    jq --arg engine "$engine" --arg value "$value" \
+      '.ocr[$engine] //= {} | .ocr[$engine].langs = $value' "$CONFIG" >"$tmp"
+  elif [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ || "$value" == true || "$value" == false ]]; then
     jq --argjson value "$value" "$path = \$value" "$CONFIG" >"$tmp"
   else
     jq --arg value "$value" "$path = \$value" "$CONFIG" >"$tmp"

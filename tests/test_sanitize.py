@@ -5,6 +5,7 @@ These encode the reasons the sanitizer exists: a selection full of terminal
 escapes, hashes and markdown must come out as something a voice can read.
 """
 import pathlib
+import subprocess
 import sys
 import unittest
 
@@ -127,8 +128,13 @@ class TestReadability(unittest.TestCase):
         text = "First sentence here. Second sentence here. Third sentence here."
         out = sanitize(text, max_chars=45)
         self.assertTrue(out.endswith("."))
-        self.assertLessEqual(len(out), 46)
+        self.assertLessEqual(len(out), 45)
         self.assertIn("First sentence", out)
+
+    def test_unbroken_token_never_exceeds_limit(self):
+        out = sanitize("supercalifragilisticexpialidocious", max_chars=10)
+        self.assertEqual(len(out), 10)
+        self.assertTrue(out.endswith("."))
 
     def test_no_truncation_by_default(self):
         text = "word " * 200
@@ -207,6 +213,17 @@ class TestEmptyResults(unittest.TestCase):
 
     def test_ansi_only_yields_nothing(self):
         self.assertEqual(sanitize("\x1b[0m\x1b[1;32m\x1b[0m"), "")
+
+    def test_non_latin_text_is_valid_cli_output(self):
+        script = pathlib.Path(__file__).resolve().parent.parent / "lib" / "sanitize.py"
+        for text in ("你好世界", "こんにちは世界", "مرحبا بالعالم", "Привет мир", "Γεια σου"):
+            with self.subTest(text=text):
+                result = subprocess.run(
+                    [sys.executable, script], input=text, text=True,
+                    capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(result.stdout)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
 # probe: [[ -n "${GOOGLE_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key google >/dev/null 2>&1
 # vendor: Google
 # keyname: google
+# keyenv: GOOGLE_API_KEY
 # Reads a PNG on stdin, writes recognised text on stdout.
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
@@ -41,12 +42,17 @@ status="$(jq -n --rawfile b64 "$b64" '
     3<<< "x-goog-api-key: $KEY"$'\nContent-Type: application/json')" || curl_rc=$?
 if [[ $curl_rc -ne 0 ]]; then cloud_transport_fail Google "$curl_rc"; exit $?; fi
 [[ "$status" =~ ^[0-9]{3}$ ]] || { printf 'Google: invalid HTTP response\n' >&2; exit 74; }
-cloud_record google-ocr document-text-detection 0 "$status" "$headers" "$body"
+embedded_error=""
+if [[ "$status" =~ ^2[0-9][0-9]$ ]] &&
+    jq -e '.responses[0].error? != null' "$body" >/dev/null 2>&1; then
+  embedded_error="$(cloud_error_code "$status" "$body")"
+fi
+cloud_record google-ocr document-text-detection 0 "$status" "$headers" "$body" 0 "$embedded_error"
 if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then cloud_fail Google "$status" "$body" "$headers"; exit $?; fi
 
 # Vision can answer 200 with a per-image error inside the envelope.
-if err="$(jq -er '.responses[0].error.message // empty' "$body" 2>/dev/null)" && [[ -n "$err" ]]; then
-  printf 'Google: %s\n' "$err" >&2; exit 74
+if [[ -n "$embedded_error" ]]; then
+  cloud_fail Google "$status" "$body" "$headers"; exit $?
 fi
 
 # Rebuild the text from words so the confidence floor applies per word, as it

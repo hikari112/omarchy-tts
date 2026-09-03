@@ -10,6 +10,18 @@ Item {
   signal toggled(bool value)
   width: parent ? parent.width : implicitWidth
   height: Math.max(copy.implicitHeight, 24)
+  activeFocusOnTab: true
+  Keys.onSpacePressed: root.toggled(!root.checked)
+  Keys.onReturnPressed: root.toggled(!root.checked)
+  Keys.onEnterPressed: root.toggled(!root.checked)
+
+  Rectangle {
+    anchors.fill: parent
+    color: "transparent"
+    radius: Style.space(4)
+    border.width: root.activeFocus ? 1 : 0
+    border.color: Color.accent
+  }
 
   Column {
     id: copy

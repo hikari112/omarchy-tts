@@ -19,12 +19,15 @@ STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tts/run}"
 PID_FILE="$STATE_DIR/pgid"
 STATUS_FILE="$STATE_DIR/status"
+ACTIVE_PROVIDER_FILE="$STATE_DIR/provider"
 SPEECH_LOCK="$STATE_DIR/speech.lock"
 SANITIZER="$PLUGIN_DIR/lib/sanitize.py"
 
 # Resolved from the installed plugin directory.
 # shellcheck disable=SC1091
 source "$PLUGIN_DIR/lib/config.sh"
+# shellcheck disable=SC1091
+source "$PLUGIN_DIR/lib/health.sh"
 
 die() { printf 'speak: %s\n' "$*" >&2; exit 1; }
 
@@ -44,6 +47,19 @@ atomic_state_write() { # path, one-line value
   return 1
 }
 
+process_identity() { # process_identity <pid> -> Linux start-time field
+  local pid="$1" stat_line rest
+  local -a fields
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  IFS= read -r stat_line 2>/dev/null < "/proc/$pid/stat" || return 1
+  # comm is parenthesized and may contain spaces or ')'; remove through the
+  # final ") " before indexing the stable fields that follow it.
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${fields[19]}"
+}
+
 set_status() {
   atomic_state_write "$STATUS_FILE" "$1"
 }
@@ -58,8 +74,14 @@ provider_path() { # first match wins: user overrides bundled
 }
 
 provider_names() {
+  local current
+  current="$(cfg .provider piper)"
   { ls -1 "$USER_DIR/providers" 2>/dev/null; ls -1 "$PLUGIN_DIR/providers" 2>/dev/null; } |
-    sort -u | while read -r n; do provider_path "$n" >/dev/null && printf '%s\n' "$n"; done
+    sort -u | while read -r n; do
+      local bin
+      bin="$(provider_path "$n")" || continue
+      [[ "$(meta_of "$bin" deprecated)" != true || "$n" == "$current" ]] && printf '%s\n' "$n"
+    done
 }
 
 cycle_provider() {
@@ -124,20 +146,15 @@ capture() {
 }
 
 list_providers() {
-  local seen=""
-  for d in "$USER_DIR/providers" "$PLUGIN_DIR/providers"; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-      [[ -x "$f" && -f "$f" ]] || continue
-      local n; n="$(basename "$f")"
-      [[ " $seen " == *" $n "* ]] && continue
-      seen="$seen $n"
-      local origin="bundled"; [[ "$d" == "$USER_DIR/providers" ]] && origin="user"
-      local mark="  "; [[ "$n" == "$(cfg .provider piper)" ]] && mark="* "
-      printf '%s%-14s %-8s %s\n' "$mark" "$n" "$origin" \
-        "$(sed -n 's/^# desc: //p' "$f" | head -1)"
-    done
-  done
+  local current n f origin mark
+  current="$(cfg .provider piper)"
+  while read -r n; do
+    f="$(provider_path "$n")" || continue
+    origin="bundled"
+    [[ "$f" == "$USER_DIR/providers/"* ]] && origin="user"
+    mark="  "; [[ "$n" == "$current" ]] && mark="* "
+    printf '%s%-14s %-8s %s\n' "$mark" "$n" "$origin" "$(meta_of "$f" desc)"
+  done < <(provider_names)
 }
 
 meta_of() { # meta_of <file> <field>
@@ -156,16 +173,90 @@ cloud_metrics_of() { # cloud_metrics_of <provider>
   [[ -s "$file" ]] && jq -c 'if type == "object" then . else {} end' "$file" 2>/dev/null || printf '{}'
 }
 
-health_of() { # health_of <provider> -> ok | failed | untested
-  [[ -s "$HEALTH" ]] || { printf 'untested'; return; }
-  local v; v="$(jq -r --arg p "$1" '.[$p].status // "untested"' "$HEALTH" 2>/dev/null)"
-  printf '%s' "${v:-untested}"
+key_name_of() { # logical-name executable -> keyring account name or empty
+  local name="$1" bin="${2:-}" key_name=""
+  [[ -n "$bin" ]] && key_name="$(meta_of "$bin" keyname)"
+  if [[ -z "$key_name" ]]; then
+    case "$name" in openai|elevenlabs|google|gemini) key_name="$name" ;; esac
+  fi
+  printf '%s' "$key_name"
 }
 
-health_set() { # health_set <provider> <ok|failed> [note]
+key_env_of() { # logical-name executable -> environment variable or empty
+  local name="$1" bin="${2:-}" env_name="" key_name
+  [[ -n "$bin" ]] && env_name="$(meta_of "$bin" keyenv)"
+  if [[ -z "$env_name" ]]; then
+    key_name="$(key_name_of "$name" "$bin")"
+    case "$key_name" in
+      openai) env_name=OPENAI_API_KEY ;;
+      elevenlabs) env_name=ELEVENLABS_API_KEY ;;
+      google) env_name=GOOGLE_API_KEY ;;
+      gemini) env_name=GEMINI_API_KEY ;;
+    esac
+  fi
+  [[ "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && printf '%s' "$env_name"
+}
+
+key_source() { # logical-name [executable] -> env | keyring | none
+  local name="$1" bin="${2:-}" env_name key_name value=""
+  key_name="$(key_name_of "$name" "$bin")"
+  [[ -n "$key_name" ]] || { printf none; return; }
+  env_name="$(key_env_of "$name" "$bin")"
+  if [[ -n "$env_name" ]]; then
+    value="${!env_name:-}"
+    if [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]]; then
+      printf env; return
+    fi
+  fi
+  if command -v secret-tool >/dev/null 2>&1; then
+    value="$(timeout --kill-after=1s 2s secret-tool lookup \
+      service omarchy-tts key "$key_name" 2>/dev/null)" || value=""
+    if [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]]; then
+      printf keyring; return
+    fi
+  fi
+  printf none
+}
+
+health_fingerprint() { # health-key [executable] [credential-source]
+  local key="$1" bin="${2:-}" source="${3:-}" name config_part exec_stamp
+  if [[ "$key" == ocr:* ]]; then
+    name="${key#ocr:}"
+    [[ -n "$bin" ]] || bin="$(ocr_engine_path "$name")" || return 1
+    config_part="$(jq -c --arg name "$name" '.ocr[$name] // {}' "$CONFIG" 2>/dev/null)" || return 1
+  else
+    name="$key"
+    [[ -n "$bin" ]] || bin="$(provider_path "$name")" || return 1
+    config_part="$(jq -c --arg name "$name" '.[$name] // {}' "$CONFIG" 2>/dev/null)" || return 1
+  fi
+  [[ -n "$source" ]] || source="$(key_source "$name" "$bin")"
+  exec_stamp="$(stat -Lc '%d:%i:%s:%y' "$bin" 2>/dev/null)" || return 1
+  printf '%s\n%s\n%s\n%s\n' "$key" "$exec_stamp" "$config_part" "$source" |
+    sha256sum | awk '{print $1}'
+}
+
+health_of() { # health_of <key> [executable] [credential-source]
+  [[ -s "$HEALTH" ]] || { printf 'untested'; return; }
+  local key="$1" expected status stored
+  expected="$(health_fingerprint "$@")" || { printf 'untested'; return; }
+  IFS=$'\t' read -r status stored < <(
+    jq -r --arg key "$key" '[.[$key].status // "untested", .[$key].fingerprint // ""] | @tsv' \
+      "$HEALTH" 2>/dev/null
+  )
+  if [[ -n "$stored" && "$stored" == "$expected" ]]; then
+    case "$status" in ok|failed) printf '%s' "$status"; return ;; esac
+  fi
+  printf 'untested'
+}
+
+health_set() { # health_set <provider> <ok|failed> [note] [fingerprint]
   mkdir -p "$CACHE_DIR"
   chmod 700 "$CACHE_DIR" 2>/dev/null || true
-  local lock_fd tmp initial
+  local lock_fd tmp initial fingerprint="${4:-}" rc=0
+  if [[ $# -lt 4 ]]; then
+    fingerprint="$(health_fingerprint "$1")" || return 1
+  fi
+  [[ "$fingerprint" =~ ^[0-9a-f]{64}$ ]] || return 1
   exec {lock_fd}>"${HEALTH}.lock" || return 1
   flock "$lock_fd" || { exec {lock_fd}>&-; return 1; }
   if ! jq -e 'type == "object"' "$HEALTH" >/dev/null 2>&1; then
@@ -187,27 +278,32 @@ health_set() { # health_set <provider> <ok|failed> [note]
     return 1
   fi
   if jq --arg p "$1" --arg s "$2" --arg n "${3:-}" --arg t "$(date -Is)" \
-        '.[$p] = {status:$s, note:$n, at:$t}' "$HEALTH" > "$tmp" 2>/dev/null; then
-    chmod 600 "$tmp"
-    mv "$tmp" "$HEALTH"
+        --arg fingerprint "$fingerprint" \
+        '.[$p] = {status:$s, note:$n, at:$t, fingerprint:$fingerprint}' \
+        "$HEALTH" > "$tmp" 2>/dev/null && chmod 600 "$tmp" && mv "$tmp" "$HEALTH"; then
+    :
   else
     rm -f "$tmp"
+    rc=1
   fi
   flock -u "$lock_fd"
   exec {lock_fd}>&-
+  return "$rc"
 }
 
 provider_installed() { # 0 if the probe passes
   local probe; probe="$(meta_of "$1" probe)"
   [[ -z "$probe" ]] && return 0
-  TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" bash -c "$probe" >/dev/null 2>&1
+  timeout --kill-after=1s 3s env TTS_PLUGIN_DIR="$PLUGIN_DIR" \
+    TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" bash -c "$probe" >/dev/null 2>&1
 }
 
-provider_status() { # provider executable, pre-read health -> display status
-  local bin="$1" health="$2" kind
+provider_status() { # provider executable, pre-read health, credential source
+  local bin="$1" health="$2" credential_source="${3:-none}" kind
   kind="$(meta_of "$bin" kind)"
-  if ! provider_installed "$bin"; then
-    [[ "$kind" == "cloud" ]] && { printf 'nokey'; return; }
+  if [[ "$kind" == "cloud" ]]; then
+    [[ "$credential_source" != none ]] || { printf 'nokey'; return; }
+  elif ! provider_installed "$bin"; then
     printf 'missing'; return
   fi
   case "$health" in
@@ -221,7 +317,7 @@ provider_status() { # provider executable, pre-read health -> display status
 # signal: a backend that cannot synthesise exits non-zero or hangs.
 # 0 = proved working, 1 = installed but broken, 2 = not installed to test
 verify_provider() { # verify_provider <name>
-  local name="$1" bin verify_voice
+  local name="$1" bin verify_voice fingerprint=""
   bin="$(provider_path "$name")" || return 2
   # Absent is not the same as broken; do not record health for it.
   provider_installed "$bin" || return 2
@@ -234,6 +330,10 @@ verify_provider() { # verify_provider <name>
     refresh_remote_voices "$name" >/dev/null || return 1
     verify_voice="$(voice_for_provider "$name")"
   fi
+  # Associate the result with what was actually tested. If configuration or
+  # the adapter changes while a slow provider runs, this proof must be stale
+  # immediately rather than blessing the replacement configuration.
+  fingerprint="$(health_fingerprint "$name" "$bin" || true)"
   local rc=0
   # shellcheck disable=SC2016  # $0 must expand in the inner shell, not here
   timeout --kill-after=5s 90s env TTS_VOICE="$verify_voice" TTS_RATE=1.0 TTS_SILENT=1 \
@@ -241,25 +341,14 @@ verify_provider() { # verify_provider <name>
       TTS_METRICS_FILE="$CLOUD_DIR/$name.json" TTS_INPUT_CHARS=5 \
       bash -c 'exec "$0"' "$bin" <<< "Test." >/dev/null 2>&1 || rc=$?
   if [[ $rc -eq 0 ]]; then
-    health_set "$name" ok ""
+    [[ -z "$fingerprint" ]] || health_set "$name" ok "" "$fingerprint"
     return 0
   fi
   # A valid paid provider can be temporarily unavailable without becoming a
   # broken installation. Keep its last proven health for quota/rate outages.
   [[ $rc -eq 69 || $rc -eq 74 || $rc -eq 75 ]] && return 1
-  health_set "$name" failed "exit $rc"
+  [[ -z "$fingerprint" ]] || health_set "$name" failed "exit $rc" "$fingerprint"
   return 1
-}
-
-key_source() { # env | keyring | config | none
-  local name="$1" env_name=""
-  case "$name" in openai) env_name=OPENAI_API_KEY ;; elevenlabs) env_name=ELEVENLABS_API_KEY ;; google) env_name=GOOGLE_API_KEY ;; gemini) env_name=GEMINI_API_KEY ;; *) return ;; esac
-  [[ -n "${!env_name:-}" ]] && { printf env; return; }
-  if command -v secret-tool >/dev/null 2>&1 &&
-      secret-tool lookup service omarchy-tts key "$name" >/dev/null 2>&1; then
-    printf keyring; return
-  fi
-  printf none
 }
 
 # One JSON blob so the settings panel makes a single call instead of a dozen.
@@ -382,11 +471,12 @@ ocr_engine_names() {
     sort -u | while read -r n; do ocr_engine_path "$n" >/dev/null && printf '%s\n' "$n"; done
 }
 
-ocr_engine_status() { # engine executable, pre-read health -> display status
-  local bin="$1" health="$2" kind
+ocr_engine_status() { # engine executable, pre-read health, credential source
+  local bin="$1" health="$2" credential_source="${3:-none}" kind
   kind="$(meta_of "$bin" kind)"
-  if ! provider_installed "$bin"; then
-    [[ "$kind" == "cloud" ]] && { printf 'nokey'; return; }
+  if [[ "$kind" == "cloud" ]]; then
+    [[ "$credential_source" != none ]] || { printf 'nokey'; return; }
+  elif ! provider_installed "$bin"; then
     printf 'missing'; return
   fi
   case "$health" in
@@ -400,30 +490,32 @@ ocr_engine_status() { # engine executable, pre-read health -> display status
 # plugin so proof never depends on a screenshot or on ImageMagick.
 # 0 = proved, 1 = installed but cannot read, 2 = not installed to test
 verify_ocr_engine() { # verify_ocr_engine <name>
-  local name="$1" bin out rc=0
+  local name="$1" bin out fingerprint="" rc=0
   bin="$(ocr_engine_path "$name")" || return 2
   provider_installed "$bin" || return 2
+  fingerprint="$(health_fingerprint "ocr:$name" "$bin" || true)"
   out="$(timeout --kill-after=5s 120s env TTS_OCR_LANGS=eng TTS_OCR_MINCONF=0 \
       TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
       TTS_METRICS_FILE="$CLOUD_DIR/ocr-$name.json" \
       "$bin" < "$PLUGIN_DIR/lib/ocr-probe.png" 2>/dev/null)" || rc=$?
   if [[ $rc -eq 0 ]] && grep -qiE 'probe|123' <<< "$out"; then
-    health_set "ocr:$name" ok ""
+    [[ -z "$fingerprint" ]] || health_set "ocr:$name" ok "" "$fingerprint"
     return 0
   fi
   [[ $rc -eq 69 || $rc -eq 74 || $rc -eq 75 ]] && return 1   # transient cloud trouble
-  health_set "ocr:$name" failed "${rc:+exit $rc}"
+  [[ -z "$fingerprint" ]] || health_set "ocr:$name" failed "${rc:+exit $rc}" "$fingerprint"
   return 1
 }
 
 # Real use is evidence for engines too. 78 is "language data missing" - a
 # configuration gap, not a broken engine - and cancellation never reaches here.
-record_ocr_outcome() { # record_ocr_outcome <engine> <rc> <text>
-  local engine="$1" rc="$2" text="$3"
+record_ocr_outcome() { # record_ocr_outcome <engine> <rc> <text> <fingerprint>
+  local engine="$1" rc="$2" text="$3" fingerprint="${4:-}"
+  [[ -n "$fingerprint" ]] || return 0
   if [[ $rc -eq 0 && -n "${text//[[:space:]]/}" ]]; then
-    health_set "ocr:$engine" ok ""
+    health_set "ocr:$engine" ok "" "$fingerprint"
   elif [[ $rc -ne 0 && $rc -ne 78 && $rc -ne 127 && $rc -ne 69 && $rc -ne 74 && $rc -ne 75 ]]; then
-    health_set "ocr:$engine" failed "exit $rc"
+    health_set "ocr:$engine" failed "exit $rc" "$fingerprint"
   fi
 }
 
@@ -434,9 +526,12 @@ emit_info() {
   config="$(jq -c '.' "$CONFIG")" || return 1
   provs="$(
     provider_names | while read -r n; do
-      local b health status; b="$(provider_path "$n")" || continue
-      health="$(health_of "$n")"
-      status="$(provider_status "$b" "$health")"
+      local b health status credential_source credential_env
+      b="$(provider_path "$n")" || continue
+      credential_source="$(key_source "$n" "$b")"
+      credential_env="$(key_env_of "$n" "$b")"
+      health="$(health_of "$n" "$b" "$credential_source")"
+      status="$(provider_status "$b" "$health" "$credential_source")"
       jq -nc --arg name "$n" \
              --arg title "$(meta_of "$b" title)" \
              --arg kind "$(meta_of "$b" kind)" \
@@ -447,27 +542,38 @@ emit_info() {
              --arg vendor "$(meta_of "$b" vendor)" \
              --arg voices "$(meta_of "$b" voices)" \
              --arg maxChars "$(meta_of "$b" maxchars)" \
-             --arg keySource "$(key_source "$n")" \
+             --arg maxBytes "$(meta_of "$b" maxbytes)" \
+             --arg deprecated "$(meta_of "$b" deprecated)" \
+             --arg refreshVoices "$(meta_of "$b" refreshvoices)" \
+             --arg refreshUsage "$(meta_of "$b" refreshusage)" \
+             --arg keySource "$credential_source" \
+             --arg keyEnv "$credential_env" \
              --argjson config "$config" \
              --argjson usage "$(cloud_metrics_of "$n")" \
              '{name:$name, title:(if $title=="" then $name else $title end), health:$health, kind:(if $kind=="" then "local" else $kind end),
                desc:$desc, status:$status, install:$install, vendor:$vendor,
-               keySource:$keySource,
+               keySource:$keySource, keyEnv:(if $keyEnv=="" then null else $keyEnv end),
+               deprecated:($deprecated=="true"),
+               refreshVoices:($refreshVoices=="true"), refreshUsage:($refreshUsage=="true"),
                model:(if $name=="openai" then ($config.openai.model // "gpt-4o-mini-tts")
-                      elif $name=="elevenlabs" then ($config.elevenlabs.model // "eleven_turbo_v2_5")
+                      elif $name=="elevenlabs" then ($config.elevenlabs.model // "eleven_flash_v2_5")
                       elif $name=="gemini" then ($config.gemini.model // "gemini-2.5-flash-preview-tts")
                       elif $name=="google" then "Cloud Text-to-Speech"
                       else null end), usage:$usage,
-               maxChars:(if $maxChars=="" then null else ($maxChars|tonumber) end),
+               maxChars:(if $maxChars=="" then null else (try ($maxChars|tonumber) catch null) end),
+               maxBytes:(if $maxBytes=="" then null else (try ($maxBytes|tonumber) catch null) end),
                voices:(if $voices=="" then "fixed" else $voices end)}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
   local engines="[]"
   engines="$(
     ocr_engine_names | while read -r n; do
-      local b health status; b="$(ocr_engine_path "$n")" || continue
-      health="$(health_of "ocr:$n")"
-      status="$(ocr_engine_status "$b" "$health")"
+      local b health status credential_source credential_env
+      b="$(ocr_engine_path "$n")" || continue
+      credential_source="$(key_source "$n" "$b")"
+      credential_env="$(key_env_of "$n" "$b")"
+      health="$(health_of "ocr:$n" "$b" "$credential_source")"
+      status="$(ocr_engine_status "$b" "$health" "$credential_source")"
       jq -nc --arg name "$n" \
              --arg title "$(meta_of "$b" title)" \
              --arg kind "$(meta_of "$b" kind)" \
@@ -476,9 +582,12 @@ emit_info() {
              --arg health "$health" \
              --arg install "$(meta_of "$b" install)" \
              --arg vendor "$(meta_of "$b" vendor)" \
-             --arg keySource "$(key_source "$(meta_of "$b" keyname)")" \
+             --arg keySource "$credential_source" \
+             --arg keyEnv "$credential_env" \
+             --argjson usage "$(cloud_metrics_of "ocr-$n")" \
              '{name:$name, title:(if $title=="" then $name else $title end), health:$health, kind:(if $kind=="" then "local" else $kind end),
-               desc:$desc, status:$status, install:$install, vendor:$vendor, keySource:$keySource}'
+               desc:$desc, status:$status, install:$install, vendor:$vendor,
+               keySource:$keySource, keyEnv:(if $keyEnv=="" then null else $keyEnv end), usage:$usage}'
     done | jq -sc 'sort_by(.kind == "cloud", .status != "ready", .name)'
   )"
   active="$(jq -r '.provider // "piper"' <<< "$config")"
@@ -551,20 +660,44 @@ emit_info() {
         sampleText:($config.ui.sampleText // "Highlight any text and press the key. This is how it sounds right now.")}}'
 }
 
-set_config() { tts_config_set "$1" "$2"; }
+set_config() { # validated path value; forget proof tied to the old setting
+  local path="$1" value="$2" health_key=""
+  tts_config_set "$path" "$value" || return
+  case "$path" in
+    .piper.*) health_key=piper ;;
+    .openai.*) health_key=openai ;;
+    .elevenlabs.*) health_key=elevenlabs ;;
+    .kokoro.*) health_key=kokoro ;;
+    .gemini.*) health_key=gemini ;;
+    .google.*) health_key=google ;;
+    .ocr.langs) health_key=ocr:tesseract ;;
+    .ocr.*.langs)
+      if [[ "$path" =~ ^\.ocr\.([A-Za-z0-9._-]+)\.langs$ ]]; then
+        health_key="ocr:${BASH_REMATCH[1]}"
+      fi ;;
+  esac
+  [[ -z "$health_key" ]] || tts_health_invalidate "$HEALTH" "$health_key" || true
+}
 
 stop_speaking_unlocked() {
   local pgid="" identity="" current_identity=""
   [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
   [[ "$pgid" =~ ^[0-9]+$ ]] &&
-    current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+    current_identity="$(process_identity "$pgid" || true)"
   if [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
       kill -0 -- "-$pgid" 2>/dev/null; then
     kill -TERM -- "-$pgid" 2>/dev/null
     sleep 0.15
-    kill -KILL -- "-$pgid" 2>/dev/null
+    # The leader may have exited during the grace period. A new process group
+    # can reuse this numeric id only by creating a new leader with that PID, so
+    # kill stubborn members only when the original leader still matches or no
+    # leader exists at all. Never signal a newly reused PID/PGID.
+    current_identity="$(process_identity "$pgid" || true)"
+    if [[ -z "$current_identity" || "$current_identity" == "$identity" ]]; then
+      kill -KILL -- "-$pgid" 2>/dev/null
+    fi
   fi
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$ACTIVE_PROVIDER_FILE"
   set_status idle
 }
 
@@ -581,7 +714,7 @@ is_speaking() {
   local pgid="" identity="" current_identity=""
   [[ -r "$PID_FILE" ]] && read -r pgid identity < "$PID_FILE"
   [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
-  current_identity="$(awk '{print $22}' "/proc/$pgid/stat" 2>/dev/null || true)"
+  current_identity="$(process_identity "$pgid" || true)"
   [[ -n "$identity" && "$identity" == "$current_identity" ]] &&
     kill -0 -- "-$pgid" 2>/dev/null
 }
@@ -678,14 +811,20 @@ while [[ $# -gt 0 ]]; do
         sleep 0.4
       done ;;
     --watch-state)
-      last_status="" last_provider="" stamp="" cur_provider="$(cfg .provider piper)"
+      last_status="" last_provider="" stamp="" configured_provider="$(cfg .provider piper)"
       while :; do
         cur_status="$(cat "$STATUS_FILE" 2>/dev/null || echo idle)"
-        is_speaking || cur_status=idle
         current_stamp="$(stat -c '%y:%s' "$CONFIG" 2>/dev/null || true)"
         if [[ "$current_stamp" != "$stamp" ]]; then
-          cur_provider="$(cfg .provider piper)"
+          configured_provider="$(cfg .provider piper)"
           stamp="$current_stamp"
+        fi
+        if is_speaking; then
+          cur_provider="$(cat "$ACTIVE_PROVIDER_FILE" 2>/dev/null || printf '%s' "$configured_provider")"
+          [[ "$cur_provider" =~ ^[A-Za-z0-9._-]+$ ]] || cur_provider="$configured_provider"
+        else
+          cur_status=idle
+          cur_provider="$configured_provider"
         fi
         if [[ "$cur_status" != "$last_status" || "$cur_provider" != "$last_provider" ]]; then
           jq -nc --arg status "$cur_status" --arg provider "$cur_provider" \
@@ -816,13 +955,15 @@ else
           OCR_ENGINE="${OCR_ENGINE:-$(cfg .ocr.engine tesseract)}"
           OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
             die "no such OCR engine: $OCR_ENGINE"
+          export TTS_METRICS_FILE="$CLOUD_DIR/ocr-$OCR_ENGINE.json"
+          ocr_fingerprint="$(health_fingerprint "ocr:$OCR_ENGINE" "$OCR_BIN" || true)"
           PNG="$(mktemp -t speak-clipboard-XXXXXX.img)" ||
             die "could not create temporary clipboard image"
           trap 'rm -f "$PNG"' EXIT
           capture clipboard-image "$image_mime" > "$PNG" || die "could not read clipboard image"
           [[ -s "$PNG" ]] || die "clipboard image is empty"
           ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
-          record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT"
+          record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT" "$ocr_fingerprint"
           # The engine has already said why it refused; do not relabel its
           # reason as "no text found".
           [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
@@ -840,13 +981,15 @@ else
       OCR_ENGINE="${OCR_ENGINE:-$(cfg .ocr.engine tesseract)}"
       OCR_BIN="$(ocr_engine_path "$OCR_ENGINE")" ||
         die "no such OCR engine: $OCR_ENGINE"
+      export TTS_METRICS_FILE="$CLOUD_DIR/ocr-$OCR_ENGINE.json"
+      ocr_fingerprint="$(health_fingerprint "ocr:$OCR_ENGINE" "$OCR_BIN" || true)"
       PNG="$(mktemp -t speak-XXXXXX.png)" || die "could not create temporary capture"
       trap 'rm -f "$PNG"' EXIT
       capture "$SOURCE" > "$PNG"; rc=$?
       [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
       [[ $rc -ne 0 || ! -s "$PNG" ]] && die "screen capture failed"
       ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
-      record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT"
+      record_ocr_outcome "$OCR_ENGINE" "$ocr_rc" "$TEXT" "$ocr_fingerprint"
       [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
       OCRMODE=1
       if [[ -z "${TEXT//[[:space:]]/}" ]]; then
@@ -887,10 +1030,17 @@ export TTS_CONFIG="$CONFIG"
 export TTS_DATA_DIR="$DATA_DIR"
 export TTS_METRICS_FILE="$CLOUD_DIR/$PROVIDER.json"
 export TTS_INPUT_CHARS="${#SPOKEN}"
+TTS_INPUT_BYTES="$(LC_ALL=C printf '%s' "$SPOKEN" | wc -c)"
+TTS_INPUT_BYTES="${TTS_INPUT_BYTES//[[:space:]]/}"
+export TTS_INPUT_BYTES
 
 provider_max="$(meta_of "$PROV_BIN" maxchars)"
 if [[ "$provider_max" =~ ^[0-9]+$ && ${#SPOKEN} -gt $provider_max ]]; then
   die "$PROVIDER accepts at most $provider_max characters per request; shorten the selection or set a length limit"
+fi
+provider_max_bytes="$(meta_of "$PROV_BIN" maxbytes)"
+if [[ "$provider_max_bytes" =~ ^[0-9]+$ && "$TTS_INPUT_BYTES" -gt "$provider_max_bytes" ]]; then
+  die "$PROVIDER accepts at most $provider_max_bytes UTF-8 bytes per request; shorten the selection or set a length limit"
 fi
 
 if [[ -z "$TTS_VOICE" ]]; then
@@ -902,12 +1052,14 @@ if [[ ( "$PROVIDER" == elevenlabs || "$PROVIDER" == google ) && -z "$TTS_VOICE" 
 fi
 [[ -z "$TTS_VOICE" || "$TTS_VOICE" =~ ^[A-Za-z0-9._+-]+$ ]] ||
   die "invalid configured voice name"
+provider_health_fingerprint="$(health_fingerprint "$PROVIDER" "$PROV_BIN" || true)"
 
 # --- speak ----------------------------------------------------------------
 exec {speech_lock_fd}>"$SPEECH_LOCK"
 flock "$speech_lock_fd"
 stop_speaking_unlocked   # never let two voices overlap
-if ! set_status speaking; then
+if ! atomic_state_write "$ACTIVE_PROVIDER_FILE" "$PROVIDER" || ! set_status speaking; then
+  rm -f "$ACTIVE_PROVIDER_FILE"
   flock -u "$speech_lock_fd"
   exec {speech_lock_fd}>&-
   die "could not write speech state"
@@ -919,12 +1071,14 @@ setsid bash -c 'exec "$0"' "$PROV_BIN" <<< "$SPOKEN" &
 child=$!
 pgid="$(ps -o pgid= -p "$child" 2>/dev/null | tr -d ' ')"
 speech_pgid="${pgid:-$child}"
-speech_identity="$(awk '{print $22}' "/proc/$speech_pgid/stat" 2>/dev/null || true)"
+speech_identity="$(process_identity "$speech_pgid" || true)"
 speech_owner=""
 if [[ -n "$speech_identity" ]]; then
   speech_owner="$speech_pgid $speech_identity"
   if ! atomic_state_write "$PID_FILE" "$speech_owner"; then
     kill -KILL -- "-$speech_pgid" 2>/dev/null || true
+    rm -f "$ACTIVE_PROVIDER_FILE"
+    set_status idle
     flock -u "$speech_lock_fd"
     exec {speech_lock_fd}>&-
     wait "$child" 2>/dev/null || true
@@ -950,7 +1104,7 @@ if [[ -n "$speech_owner" && "$current_owner" != "$speech_owner" ]]; then
   # Someone stopped us or replaced us; the state is already theirs to own.
   speech_cancelled=1
 else
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$ACTIVE_PROVIDER_FILE"
   set_status idle
 fi
 flock -u "$speech_lock_fd"
@@ -962,9 +1116,11 @@ fi
 
 # Real use is the best evidence there is.
 if [[ $rc -eq 0 ]]; then
-  health_set "$PROVIDER" ok ""
+  [[ -z "$provider_health_fingerprint" ]] ||
+    health_set "$PROVIDER" ok "" "$provider_health_fingerprint"
 elif [[ $rc -ne 143 && $rc -ne 137 && $rc -ne 75 && $rc -ne 74 && $rc -ne 69 ]]; then
-  health_set "$PROVIDER" failed "exit $rc"
+  [[ -z "$provider_health_fingerprint" ]] ||
+    health_set "$PROVIDER" failed "exit $rc" "$provider_health_fingerprint"
   notify-send -a "Speak" "$PROVIDER could not speak" \
     "Marked as failing. Pick another provider in the panel." 2>/dev/null
 fi

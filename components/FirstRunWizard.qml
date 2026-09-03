@@ -14,7 +14,8 @@ Rectangle {
   border.width: 1
   border.color: Color.popups.border
 
-  readonly property bool busy: controller.setupJob.status === "starting"
+  readonly property bool busy: controller.setupStarting
+                               || controller.setupJob.status === "starting"
                                || controller.setupJob.status === "running"
 
   Column {
@@ -55,7 +56,9 @@ Rectangle {
     Text {
       width: parent.width
       visible: root.busy || root.controller.setupJob.status === "error"
-      text: root.controller.setupJob.message || "Preparing setup"
+      text: root.controller.setupStarting
+            ? "Starting setup safely…"
+            : (root.controller.setupJob.message || "Preparing setup")
       color: root.controller.setupJob.status === "error" ? Color.urgent : Color.muted
       wrapMode: Text.WordWrap
       font.family: Style.font.family
@@ -66,21 +69,21 @@ Rectangle {
       Button {
         text: root.controller.setup.ready ? "Continue" : (root.controller.setupJob.status === "error" ? "Try again" : "Set up local voice")
         iconText: root.controller.setup.ready ? "󰄬" : "󰐊"
-        bordered: true
+        bordered: true; focusable: true
         foreground: Color.accent
         enabled: !root.busy
         onClicked: root.controller.setup.ready ? root.skipped() : root.controller.startSetup("recommended")
       }
       Button {
-        visible: root.busy
+        visible: root.controller.setupCancellable
         text: "Cancel"
-        bordered: true
+        bordered: true; focusable: true
         onClicked: root.controller.cancelSetup()
       }
       Button {
         visible: !root.busy && !root.controller.setup.ready
         text: "Choose another provider"
-        bordered: true
+        bordered: true; focusable: true
         onClicked: root.skipped()
       }
     }

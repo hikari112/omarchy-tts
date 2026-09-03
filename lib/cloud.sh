@@ -25,28 +25,37 @@ cloud_ensure_metrics() { # caller holds the metrics lock
 
 cloud_error_code() { # cloud_error_code <http-status> <response-file>
   local code
-  code="$(jq -r '.error.code // .error.type // .detail.status // .detail.code // empty' "$2" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  code="$(jq -r '
+    .error.status // .error.code // .error.type
+    // .responses[0].error.status // .responses[0].error.code
+    // .detail.status // .detail.code // empty
+  ' "$2" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   # Persist only our fixed vocabulary. Remote strings are response content and
   # do not belong in a long-lived cache even when a vendor calls them a code.
   case "$code" in
     *concurrent*) printf concurrency_limit; return ;;
     *rate_limit*) printf rate_limit; return ;;
-    *quota*|*credit*|*payment*) printf quota; return ;;
+    *quota*|*credit*|*payment*|*resource_exhausted*) printf quota; return ;;
     *auth*|*api_key*|*permission*) printf auth; return ;;
+    *unavailable*|*internal*|*server*) printf service; return ;;
   esac
   case "$1" in 401) printf auth ;; 402) printf quota ;; 403) printf forbidden ;;
     429) printf rate_limit ;; 5??) printf service ;; *) printf http_error ;; esac
 }
 
-cloud_record() { # provider model chars http-status headers response [units]
+cloud_record() { # provider model chars http-status headers response [units] [forced-error]
   [[ -n "${TTS_METRICS_FILE:-}" ]] || return 0
-  local provider="$1" model="$2" chars="$3" status="$4" headers="$5" body="$6" units="${7:-0}"
+  local provider="$1" model="$2" chars="$3" status="$4" headers="$5" body="$6" units="${7:-0}" forced_error="${8:-}"
   local request_id retry_after error_code="" outcome=ok now tmp lock_fd
   request_id="$(cloud_header "$headers" x-request-id)"
   [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" request-id)"
   [[ -n "$request_id" ]] || request_id="$(cloud_header "$headers" x-trace-id)"
   retry_after="$(cloud_header "$headers" retry-after)"
-  [[ "$status" =~ ^2[0-9][0-9]$ ]] || { outcome=error; error_code="$(cloud_error_code "$status" "$body")"; }
+  if [[ -n "$forced_error" ]]; then
+    outcome=error; error_code="$forced_error"
+  elif [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+    outcome=error; error_code="$(cloud_error_code "$status" "$body")"
+  fi
   now="$(date -Is)"
   mkdir -p "$(dirname "$TTS_METRICS_FILE")" || return 0
   exec {lock_fd}>"${TTS_METRICS_FILE}.lock" || return 0
@@ -110,11 +119,11 @@ cloud_transport_fail() { # provider curl-exit
 cloud_fail() { # provider http-status response headers
   local provider="$1" status="$2" body="$3" headers="$4" code retry
   code="$(cloud_error_code "$status" "$body")"; retry="$(cloud_header "$headers" retry-after)"
-  case "$status:$code" in
-    401:*|403:*) printf '%s: API key was rejected (%s)\n' "$provider" "$code" >&2; return 77 ;;
-    402:*|*:quota) printf '%s: credits or billing limit exhausted\n' "$provider" >&2; return 69 ;;
-    429:*) printf '%s: rate or concurrency limit reached%s\n' "$provider" "${retry:+; retry after $retry}" >&2; return 75 ;;
-    408:*|425:*|5??:*) printf '%s: service temporarily unavailable (HTTP %s)\n' "$provider" "$status" >&2; return 74 ;;
+  case "$code:$status" in
+    auth:*|forbidden:*|*:401|*:403) printf '%s: API key was rejected (%s)\n' "$provider" "$code" >&2; return 77 ;;
+    quota:*|*:402) printf '%s: quota, credits, or billing limit exhausted\n' "$provider" >&2; return 69 ;;
+    rate_limit:*|concurrency_limit:*|*:429) printf '%s: rate or concurrency limit reached%s\n' "$provider" "${retry:+; retry after $retry}" >&2; return 75 ;;
+    service:*|*:408|*:425|*:5??) printf '%s: service temporarily unavailable (HTTP %s)\n' "$provider" "$status" >&2; return 74 ;;
     *) printf '%s: request failed (HTTP %s, %s)\n' "$provider" "${status:-unknown}" "$code" >&2; return 1 ;;
   esac
 }

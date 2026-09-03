@@ -58,6 +58,35 @@ tts_config_init || { printf 'speak-voice: could not initialize %s\n' "$CONFIG" >
 
 die() { printf 'speak-voice: %s\n' "$*" >&2; exit 1; }
 
+process_identity() { # process_identity <pid> -> Linux start-time field
+  local pid="$1" stat_line rest
+  local -a fields
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  IFS= read -r stat_line 2>/dev/null < "/proc/$pid/stat" || return 1
+  rest="${stat_line##*) }"
+  read -r -a fields <<< "$rest"
+  [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${fields[19]}"
+}
+
+terminate_download_worker() { # terminate_download_worker <pid> <identity>
+  local pid="$1" identity="$2" current=""
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  # This is a child of the launcher, so wait for its trap to finish cleanup.
+  # Recheck the start identity before escalating in case the numeric PID was
+  # somehow reused after the child exited.
+  for _ in {1..100}; do
+    current="$(process_identity "$pid" || true)"
+    [[ -z "$current" || "$current" != "$identity" ]] && break
+    sleep 0.01
+  done
+  current="$(process_identity "$pid" || true)"
+  if [[ -n "$identity" && "$current" == "$identity" ]]; then
+    kill -KILL -- "-$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 usage() {
   cat <<'USAGE'
 Usage: speak-voice <command>
@@ -104,7 +133,7 @@ ensure_catalogue() {
 
 write_state() { # write_state <status> <voice> <got> <total> [message]
   local pid="${OWNER_PID:-0}" identity="" tmp
-  [[ "$pid" -gt 1 ]] && identity="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  [[ "$pid" -gt 1 ]] && identity="$(process_identity "$pid" || true)"
   tmp="$(mktemp "${DL_STATE}.XXXXXX")" || return 1
   jq -nc --arg s "$1" --arg v "$2" --argjson g "${3:-0}" --argjson t "${4:-0}" \
         --arg m "${5:-}" \
@@ -243,8 +272,27 @@ case "${1:-}" in
     if [[ "${3:-}" == "--async" ]]; then
       exec {download_lock_fd}>"$DL_LOCK"
       flock -n "$download_lock_fd" || die "a voice download is already running"
+      write_state starting "$2" 0 0 "Preparing download" || die "could not write download state"
       setsid "$0" _download "$2" >/dev/null 2>&1 &
+      download_pid=$!
+      download_identity="$(process_identity "$download_pid" || true)"
       exec {download_lock_fd}>&-
+      download_registered=0
+      for _ in {1..200}; do
+        state_pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
+        state_identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
+        if [[ "$state_pid" == "$download_pid" && -n "$state_identity" ]]; then
+          download_registered=1
+          break
+        fi
+        kill -0 "$download_pid" 2>/dev/null || break
+        sleep 0.01
+      done
+      if [[ $download_registered -ne 1 ]]; then
+        terminate_download_worker "$download_pid" "$download_identity"
+        write_state error "$2" 0 0 "Download worker did not initialize safely"
+        die "download could not start safely"
+      fi
       echo "started"
     else
       exec {download_lock_fd}>"$DL_LOCK"
@@ -256,25 +304,85 @@ case "${1:-}" in
     fi
     ;;
   _download)
+    download_voice="${2:-}"
+    [[ "$download_voice" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid voice name"
     OWNER_PID=$BASHPID
     export OWNER_PID
-    trap 'rm -f "$VOICES_DIR/${2:-}".onnx.part "$VOICES_DIR/${2:-}".onnx.json.part; write_state cancelled "${2:-}" 0 0 "Cancelled"; exit 143' TERM INT
-    do_add "${2:-}" yes ;;
+    download_was_installed=0
+    is_installed "$download_voice" && download_was_installed=1
+    # Invoked indirectly by the TERM/INT trap below.
+    # shellcheck disable=SC2329
+    cancel_download_worker() {
+      rm -f "$VOICES_DIR/$download_voice.onnx.part" \
+        "$VOICES_DIR/$download_voice.onnx.json.part"
+      # A model and its sidecar are one installation. Preserve an existing
+      # model being repaired, but roll back every final file created for a new
+      # install if cancellation lands between the two atomic downloads.
+      if [[ $download_was_installed -eq 0 ]]; then
+        rm -f "$VOICES_DIR/$download_voice.onnx" \
+          "$VOICES_DIR/$download_voice.onnx.json"
+      fi
+      write_state cancelled "$download_voice" 0 0 "Cancelled"
+      exit 143
+    }
+    trap cancel_download_worker TERM INT
+    write_state starting "$download_voice" 0 0 "Preparing download" || exit 1
+    do_add "$download_voice" yes
+    download_rc=$?
+    trap - TERM INT
+    exit "$download_rc" ;;
   status)
-    if [[ -s "$DL_STATE" ]]; then cat "$DL_STATE"
+    if [[ -s "$DL_STATE" ]]; then
+      if ! jq -e 'type == "object"' "$DL_STATE" >/dev/null 2>&1; then
+        write_state error "" 0 0 "Download state was unreadable; try again"
+        cat "$DL_STATE"
+      else
+        state_status="$(jq -r '.status // "idle"' "$DL_STATE")"
+        state_pid="$(jq -r '.pid // 0' "$DL_STATE")"
+        state_identity="$(jq -r '.processIdentity // ""' "$DL_STATE")"
+        if [[ "$state_status" == starting || "$state_status" == downloading ]]; then
+          current_identity="$(process_identity "$state_pid" || true)"
+          if [[ -z "$state_identity" || "$state_identity" != "$current_identity" ]]; then
+            state_voice="$(jq -r '.voice // ""' "$DL_STATE")"
+            write_state error "$state_voice" 0 0 "Download stopped unexpectedly"
+            cat "$DL_STATE"
+          else
+            cat "$DL_STATE"
+          fi
+        else
+          cat "$DL_STATE"
+        fi
+      fi
     else echo '{"status":"idle","voice":"","bytes":0,"total":0,"percent":0,"message":""}'; fi
     ;;
   cancel)
+    state_status="$(jq -r '.status // "idle"' "$DL_STATE" 2>/dev/null)"
     pid="$(jq -r '.pid // 0' "$DL_STATE" 2>/dev/null)"
     identity="$(jq -r '.processIdentity // ""' "$DL_STATE" 2>/dev/null)"
-    current="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" && "$identity" == "$current" ]]; then
-      kill -TERM -- "-$pid" 2>/dev/null || true
+    current="$(process_identity "$pid" || true)"
+    if [[ "$state_status" == starting || "$state_status" == downloading ]] &&
+        [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 && -n "$identity" && "$identity" == "$current" ]] &&
+        kill -TERM -- "-$pid" 2>/dev/null; then
+      for _ in {1..200}; do
+        current="$(process_identity "$pid" || true)"
+        [[ -z "$current" || "$current" != "$identity" ]] && break
+        sleep 0.01
+      done
+    else
+      die "no active voice download"
     fi
+    current="$(process_identity "$pid" || true)"
+    final_status="$(jq -r '.status // "idle"' "$DL_STATE" 2>/dev/null)"
+    # Completion can win the race with Cancel after the state was inspected.
+    # Keep the truthful terminal result and the fully verified installation.
+    [[ "$final_status" == "done" ]] && exit 0
+    [[ -z "$current" || "$current" != "$identity" || "$final_status" == cancelled ]] ||
+      die "voice download did not stop; try again"
     cancelled_voice="$(jq -r '.voice // ""' "$DL_STATE" 2>/dev/null)"
     [[ "$cancelled_voice" =~ ^[A-Za-z0-9._-]+$ ]] &&
       rm -f "$VOICES_DIR/$cancelled_voice.onnx.part" "$VOICES_DIR/$cancelled_voice.onnx.json.part"
-    write_state cancelled "$cancelled_voice" 0 0 "Cancelled"
+    [[ "$final_status" == cancelled ]] ||
+      write_state cancelled "$cancelled_voice" 0 0 "Cancelled"
     ;;
   remove)
     [[ -n "${2:-}" ]] || die "need a voice name"

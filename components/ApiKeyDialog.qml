@@ -8,10 +8,12 @@ Rectangle {
   required property var controller
   property string provider: ""
   property string vendor: provider
+  property string purpose: "speech"
   // What this key lets the plugin send. A speech key sends text; an OCR key
   // sends pictures of the screen, and the dialog must say which.
   property string sends: "Highlighted text and test samples"
   property color foreground: Color.popups.text
+  readonly property bool editing: visible && keyField.activeFocus
   signal closed
   width: parent ? parent.width : implicitWidth
   height: content.implicitHeight + Style.space(24)
@@ -19,6 +21,17 @@ Rectangle {
   color: Color.background
   border.width: 1
   border.color: Color.accent
+
+  function saveKey() {
+    if (keyField.text.length < 8 || controller.keySaving) return
+    controller.storeKey(provider, keyField.text, purpose)
+    keyField.text = ""
+  }
+
+  onVisibleChanged: {
+    if (visible) Qt.callLater(function() { keyField.forceActiveFocus() })
+    else keyField.text = ""
+  }
 
   Column {
     id: content
@@ -38,6 +51,8 @@ Rectangle {
       placeholderText: "Paste API key"
       foreground: root.foreground
       selectByMouse: true
+      maximumLength: 4096
+      onAccepted: root.saveKey()
     }
     Text {
       width: parent.width; visible: root.controller.keyResult.message !== ""
@@ -47,11 +62,11 @@ Rectangle {
     }
     Row {
       spacing: Style.space(8)
-      Button { text: "Cancel"; bordered: true; onClicked: { keyField.text = ""; root.closed() } }
+      Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { keyField.text = ""; root.closed() } }
       Button {
-        text: "Save key"; bordered: true; foreground: Color.accent
+        text: "Save key"; bordered: true; focusable: true; foreground: Color.accent
         enabled: keyField.text.length >= 8 && !root.controller.keySaving
-        onClicked: { root.controller.storeKey(root.provider, keyField.text); keyField.text = "" }
+        onClicked: root.saveKey()
       }
     }
   }

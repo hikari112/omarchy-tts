@@ -5,6 +5,7 @@
 # probe: [[ -n "${OPENAI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key openai >/dev/null 2>&1
 # vendor: OpenAI
 # keyname: openai
+# keyenv: OPENAI_API_KEY
 # Reads a PNG on stdin, writes recognised text on stdout.
 set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"

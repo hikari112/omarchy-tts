@@ -27,6 +27,8 @@ class CliConfigTests(unittest.TestCase):
         self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
         self.env.pop("OPENAI_API_KEY", None)
         self.env.pop("ELEVENLABS_API_KEY", None)
+        self.env.pop("GOOGLE_API_KEY", None)
+        self.env.pop("GEMINI_API_KEY", None)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -53,8 +55,18 @@ class CliConfigTests(unittest.TestCase):
         settings = json.loads(config.read_text())
         self.assertEqual(settings["openai"]["voice"], "nova")
         self.assertEqual(settings["openai"]["model"], "gpt-4o-mini-tts")
-        self.assertEqual(settings["elevenlabs"]["model"], "eleven_turbo_v2_5")
+        self.assertEqual(settings["elevenlabs"]["model"], "eleven_flash_v2_5")
         self.assertNotIn("voiceId", settings["elevenlabs"])
+
+    def test_previous_default_elevenlabs_model_migrates_once(self):
+        config = Path(self.temp.name, "omarchy-tts", "config.json")
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"schemaVersion": 2,
+                                      "elevenlabs": {"model": "eleven_turbo_v2_5"}}))
+        self.run_speak("--info")
+        settings = json.loads(config.read_text())
+        self.assertEqual(settings["schemaVersion"], 3)
+        self.assertEqual(settings["elevenlabs"]["model"], "eleven_flash_v2_5")
 
     def test_help_does_not_require_or_create_writable_state(self):
         blocked = Path(self.temp.name, "blocked")
@@ -229,6 +241,86 @@ class CliConfigTests(unittest.TestCase):
                      ("--provider", "../bad", "hello")):
             self.assertNotEqual(self.run_speak(*args, check=False).returncode, 0)
 
+    def test_google_limit_is_measured_in_utf8_bytes(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True)
+        marker = Path(self.temp.name, "provider-ran")
+        provider = providers / "bytetest"
+        provider.write_text(
+            "#!/usr/bin/env bash\n# desc: byte limit test\n# kind: local\n"
+            "# probe: true\n# maxbytes: 5\ncat >/dev/null\nprintf ran > \"$BYTE_MARKER\"\n"
+        )
+        provider.chmod(0o755)
+        self.env["BYTE_MARKER"] = str(marker)
+        result = self.run_speak("--raw", "--provider", "bytetest", "你好", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("5 UTF-8 bytes", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_deprecated_compatibility_providers_only_appear_when_configured(self):
+        names = {item["name"] for item in json.loads(self.run_speak("--info").stdout)["providers"]}
+        self.assertNotIn("espeak-ng", names)
+        self.assertNotIn("spd", names)
+        self.run_speak("--set", ".provider", "espeak-ng")
+        providers = json.loads(self.run_speak("--info").stdout)["providers"]
+        compatibility = next(item for item in providers if item["name"] == "espeak-ng")
+        self.assertTrue(compatibility["deprecated"])
+
+    def test_invalid_optional_provider_metadata_cannot_break_info(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True)
+        provider = providers / "custommeta"
+        provider.write_text(
+            "#!/usr/bin/env bash\n# kind: cloud\n# keyname: custom\n"
+            "# keyenv: NOT-A-VALID-NAME\n# maxchars: many\n# maxbytes: lots\n"
+            "cat >/dev/null\n"
+        )
+        provider.chmod(0o755)
+        info = json.loads(self.run_speak("--info").stdout)
+        custom = next(item for item in info["providers"]
+                      if item["name"] == "custommeta")
+        self.assertIsNone(custom["keyEnv"])
+        self.assertIsNone(custom["maxChars"])
+        self.assertIsNone(custom["maxBytes"])
+
+    def test_state_watch_reports_the_provider_actually_speaking(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True)
+        provider = providers / "override"
+        provider.write_text("#!/usr/bin/env bash\n# kind: local\n# probe: true\ncat >/dev/null\nsleep 30\n")
+        provider.chmod(0o755)
+        watcher = subprocess.Popen(
+            [SPEAK, "--watch-state"], env=self.env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        speaking = None
+        speech = None
+        try:
+            self.assertTrue(select.select([watcher.stdout], [], [], 3)[0])
+            watcher.stdout.readline()
+            speech = subprocess.Popen(
+                [SPEAK, "--provider", "override", "hello"], env=self.env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                if select.select([watcher.stdout], [], [], 0.25)[0]:
+                    candidate = json.loads(watcher.stdout.readline())
+                    if candidate["status"] == "speaking":
+                        speaking = candidate
+                        break
+            self.assertEqual(speaking, {"status": "speaking", "provider": "override"})
+            self.run_speak("--stop")
+            speech.wait(timeout=3)
+        finally:
+            if speech is not None and speech.poll() is None:
+                self.run_speak("--stop", check=False)
+                speech.wait(timeout=3)
+            watcher.terminate()
+            watcher.wait(timeout=3)
+            watcher.stdout.close()
+            watcher.stderr.close()
+
     def test_concurrent_config_updates_do_not_overwrite_each_other(self):
         self.run_speak("--info")
         for _ in range(5):
@@ -266,6 +358,26 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn(openai["keySource"], ("none", "keyring", "env"))
         if openai["keySource"] == "none":
             self.assertEqual(openai["status"], "nokey")
+
+    def test_invalid_multiline_environment_key_is_not_reported_as_usable(self):
+        providers = Path(self.temp.name, "omarchy-tts", "providers")
+        providers.mkdir(parents=True, exist_ok=True)
+        provider = providers / "invalid-env"
+        provider.write_text(
+            "#!/usr/bin/env bash\n"
+            "# kind: cloud\n"
+            "# keyname: invalid-env\n"
+            "# keyenv: INVALID_ENV_API_KEY\n"
+            "# probe: true\n"
+            "cat >/dev/null\n"
+        )
+        provider.chmod(0o755)
+        self.env["INVALID_ENV_API_KEY"] = "first-line\nsecond-line"
+        info = json.loads(self.run_speak("--info").stdout)
+        entry = next(item for item in info["providers"]
+                     if item["name"] == "invalid-env")
+        self.assertEqual(entry["keySource"], "none")
+        self.assertEqual(entry["status"], "nokey")
 
     def test_preview_uses_persisted_sanitizer_options(self):
         self.run_speak("--set", ".sanitizer.urls", "link")
@@ -425,6 +537,182 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn("existing cache was kept", result.stderr)
         self.assertEqual(catalogue.read_text(), original)
 
+    def test_async_voice_download_registers_identity_before_acknowledging_start(self):
+        env = {**self.env, "HOME": self.temp.name}
+        base = Path(self.temp.name, "omarchy-tts")
+        voices = base / "voices" / "piper"
+        voices.mkdir(parents=True)
+        voice = "en_US-test-medium"
+        (voices / f"{voice}.onnx").write_bytes(b"model")
+        (voices / f"{voice}.onnx.json").write_text("{}")
+        catalogue = base / "voices.json"
+        catalogue.write_text(json.dumps({voice: {"files": {}}}))
+
+        result = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "started")
+        state_path = base / "download.json"
+        for _ in range(100):
+            state = json.loads(state_path.read_text())
+            if state["status"] == "done":
+                break
+            time.sleep(0.01)
+        self.assertEqual(state["status"], "done", state)
+        self.assertGreater(state["pid"], 1)
+        self.assertTrue(state["processIdentity"])
+
+    def test_async_voice_worker_holds_the_download_lock(self):
+        env = {**self.env, "HOME": self.temp.name}
+        base = Path(self.temp.name, "omarchy-tts")
+        base.mkdir(parents=True, exist_ok=True)
+        voice = "en_US-lock-medium"
+        (base / "voices.json").write_text(json.dumps({
+            voice: {
+                "name": "lock", "quality": "medium",
+                "language": {"name_english": "English",
+                             "country_english": "United States", "code": "en_US"},
+                "files": {"voices/test.onnx": {"size_bytes": 4,
+                                                 "md5_digest": None}},
+            }
+        }))
+        tools = Path(self.temp.name, "voice-tools")
+        tools.mkdir()
+        curl = tools / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "out=\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == -o || $1 == --output ]]; then out=$2; shift; fi\n"
+            "  shift\n"
+            "done\n"
+            "sleep 10\n"
+            "printf data > \"$out\"\n"
+        )
+        curl.chmod(0o755)
+        env["PATH"] = f"{tools}:{env['PATH']}"
+
+        first = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("already running", second.stderr)
+        cancelled = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "cancel"], env=env,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+
+    def test_cancelling_new_voice_rolls_back_model_and_sidecar_together(self):
+        env = {**self.env, "HOME": self.temp.name}
+        base = Path(self.temp.name, "omarchy-tts")
+        base.mkdir(parents=True, exist_ok=True)
+        voice = "en_US-atomic-medium"
+        (base / "voices.json").write_text(json.dumps({
+            voice: {
+                "files": {
+                    "voices/test.onnx": {"size_bytes": 4, "md5_digest": None},
+                    "voices/test.onnx.json": {"size_bytes": 2, "md5_digest": None},
+                },
+            },
+        }))
+        marker = Path(self.temp.name, "metadata-started")
+        tools = Path(self.temp.name, "atomic-voice-tools")
+        tools.mkdir()
+        curl = tools / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "out=\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == -o || $1 == --output ]]; then out=$2; shift; fi\n"
+            "  shift\n"
+            "done\n"
+            "if [[ $out == *.onnx.part ]]; then printf data > \"$out\"; exit 0; fi\n"
+            "printf started > \"$VOICE_METADATA_MARKER\"\n"
+            "sleep 30\n"
+            "printf '{}' > \"$out\"\n"
+        )
+        curl.chmod(0o755)
+        env["PATH"] = f"{tools}:{env['PATH']}"
+        env["VOICE_METADATA_MARKER"] = str(marker)
+
+        started = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            env=env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(started.returncode, 0, started.stderr)
+        for _ in range(300):
+            if marker.exists():
+                break
+            time.sleep(0.01)
+        self.assertTrue(marker.exists(), "metadata download never started")
+        cancelled = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "cancel"], env=env,
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+        voices = base / "voices" / "piper"
+        self.assertFalse((voices / f"{voice}.onnx").exists())
+        self.assertFalse((voices / f"{voice}.onnx.json").exists())
+
+    def test_voice_cancel_refuses_when_no_registered_job_exists(self):
+        env = {**self.env, "HOME": self.temp.name}
+        result = subprocess.run(
+            [ROOT / "bin" / "speak-voice", "cancel"],
+            env=env, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no active voice download", result.stderr)
+
+    def test_voice_cancel_never_signals_a_completed_job_identity(self):
+        env = {**self.env, "HOME": self.temp.name}
+        sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            stat = Path(f"/proc/{sleeper.pid}/stat").read_text()
+            identity = stat.rsplit(")", 1)[1].split()[19]
+            state = Path(self.temp.name, "omarchy-tts", "download.json")
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(json.dumps({
+                "status": "done", "voice": "test", "pid": sleeper.pid,
+                "processIdentity": identity,
+            }))
+            result = subprocess.run(
+                [ROOT / "bin" / "speak-voice", "cancel"], env=env,
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIsNone(sleeper.poll())
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=3)
+
+    def test_voice_status_repairs_corrupt_or_unowned_active_state(self):
+        state = Path(self.temp.name, "omarchy-tts", "download.json")
+        state.parent.mkdir(parents=True, exist_ok=True)
+        for value, message in (
+                ('{"status":', "unreadable"),
+                (json.dumps({"status": "downloading", "voice": "test",
+                             "pid": 0, "processIdentity": ""}),
+                 "stopped unexpectedly")):
+            state.write_text(value)
+            result = subprocess.run(
+                [ROOT / "bin" / "speak-voice", "status"],
+                env={**self.env, "HOME": self.temp.name},
+                check=True, capture_output=True, text=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "error")
+            self.assertIn(message, payload["message"])
+            self.assertEqual(json.loads(state.read_text()), payload)
+
     def test_setup_backend_status_and_allowlist(self):
         self.env["XDG_DATA_HOME"] = str(Path(self.temp.name, "data"))
         status = subprocess.run([SETUP, "status"], env=self.env, check=True,
@@ -435,6 +723,25 @@ class CliConfigTests(unittest.TestCase):
         rejected = subprocess.run([SETUP, "start", "anything-else"], env=self.env,
                                   check=True, capture_output=True, text=True)
         self.assertEqual(json.loads(rejected.stdout)["code"], "unknown_target")
+
+    def test_setup_job_tolerates_corrupt_json_shapes(self):
+        state = Path(self.temp.name, "omarchy-tts", "setup.json")
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("[]")
+        result = subprocess.run([SETUP, "job"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout)["status"], "idle")
+
+    def test_setup_cancel_refuses_a_completed_or_unowned_job(self):
+        state = Path(self.temp.name, "omarchy-tts", "setup.json")
+        state.parent.mkdir(parents=True, exist_ok=True)
+        original = {"status": "done", "pid": os.getpid(),
+                    "processIdentity": "not-the-owner"}
+        state.write_text(json.dumps(original))
+        result = subprocess.run([SETUP, "cancel"], env=self.env, check=True,
+                                capture_output=True, text=True)
+        self.assertFalse(json.loads(result.stdout)["ok"])
+        self.assertEqual(json.loads(state.read_text()), original)
 
     def test_setup_rejects_short_or_unknown_keys_without_storing(self):
         for provider, value, code in (("openai", "short", "invalid_key"),
@@ -456,6 +763,9 @@ class CliConfigTests(unittest.TestCase):
         self.assertIn('KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")',
                       source)
         self.assertIn('KOKORO_PYTHON = "3.12"', source)
+        self.assertIn('EASYOCR_PACKAGES = ("easyocr==1.7.2",)', source)
+        self.assertIn('#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85',
+                      source)
 
     def test_runtime_directory_symlinks_are_rejected(self):
         runtime = Path(self.temp.name, "omarchy-tts")
@@ -535,6 +845,104 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(current["status"], "done", current)
 
 
+class CredentialLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.tools = self.home / "tools"
+        self.tools.mkdir()
+        self.env = {**os.environ,
+                    "PATH": f"{self.tools}:{os.environ['PATH']}",
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_DATA_HOME": str(self.home / "data"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run"),
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent"}
+        (self.home / "run").mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_secret_tool(self, source):
+        tool = self.tools / "secret-tool"
+        tool.write_text("#!/usr/bin/env bash\n" + source)
+        tool.chmod(0o755)
+
+    def test_saving_shared_key_invalidates_speech_and_ocr_health(self):
+        self.write_secret_tool(
+            "case ${1:-} in\n"
+            "  store) cat >/dev/null; exit 0 ;;\n"
+            "  lookup) exit 1 ;;\n"
+            "  clear) exit 0 ;;\n"
+            "esac\n"
+        )
+        health = self.home / "cache" / "omarchy-tts" / "health.json"
+        health.parent.mkdir(parents=True)
+        health.write_text(json.dumps({
+            "google": {"status": "ok", "fingerprint": "old"},
+            "ocr:google": {"status": "failed", "fingerprint": "old"},
+            "piper": {"status": "ok", "fingerprint": "keep"},
+        }))
+        result = subprocess.run(
+            [SETUP, "key-store", "google"], input="valid-test-key\n",
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+        updated = json.loads(health.read_text())
+        self.assertNotIn("google", updated)
+        self.assertNotIn("ocr:google", updated)
+        self.assertIn("piper", updated)
+
+    def test_cleanup_reports_keyring_failures_and_returns_nonzero(self):
+        self.write_secret_tool(
+            "case ${1:-} in\n"
+            "  lookup) exit 0 ;;\n"
+            "  clear) exit 7 ;;\n"
+            "  store) cat >/dev/null; exit 0 ;;\n"
+            "esac\n"
+        )
+        result = subprocess.run(
+            [SETUP, "cleanup", "--yes"], env=self.env,
+            text=True, capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(any("API key" in failure for failure in payload["failures"]))
+
+    def test_key_lookup_failure_is_not_misreported_as_absence(self):
+        self.write_secret_tool(
+            "case ${1:-} in\n"
+            "  lookup) printf 'keyring unavailable\\n' >&2; exit 1 ;;\n"
+            "  clear) exit 0 ;;\n"
+            "esac\n"
+        )
+        result = subprocess.run(
+            [SETUP, "key-remove", "openai"], env=self.env,
+            text=True, capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "keyring_failed")
+
+    def test_cleanup_does_not_claim_absent_keys_were_removed(self):
+        self.write_secret_tool(
+            "case ${1:-} in\n"
+            "  lookup) exit 1 ;;\n"
+            "  clear) exit 0 ;;\n"
+            "esac\n"
+        )
+        result = subprocess.run(
+            [SETUP, "cleanup", "--yes"], env=self.env,
+            text=True, capture_output=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(any("API key" in item for item in payload["removed"]))
+
+
 class ProviderHealthTests(unittest.TestCase):
     """A provider that is installed but cannot speak must never read "ready".
 
@@ -593,6 +1001,38 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.status_of("worktest"), "ready")
 
+    def test_health_proof_expires_when_the_adapter_changes(self):
+        provider = self.write_provider("changing", "cat > /dev/null")
+        self.assertEqual(self.speak("--verify", "changing").returncode, 0)
+        self.assertEqual(self.status_of("changing"), "ready")
+        provider.write_text(provider.read_text() + "# release changed\n")
+        self.assertEqual(self.status_of("changing"), "untested")
+
+    def test_proof_cannot_bless_config_changed_while_provider_runs(self):
+        self.write_provider(
+            "movingconfig",
+            "cat >/dev/null\n"
+            "tmp=${TTS_CONFIG}.provider-test\n"
+            "jq '.movingconfig = {changed: true}' \"$TTS_CONFIG\" > \"$tmp\"\n"
+            "mv \"$tmp\" \"$TTS_CONFIG\"",
+        )
+        result = self.speak("--verify", "movingconfig")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.status_of("movingconfig"), "untested")
+
+    def test_legacy_health_without_a_fingerprint_is_untrusted(self):
+        self.write_provider("legacy", "cat > /dev/null")
+        health = self.home / "cache" / "omarchy-tts" / "health.json"
+        health.parent.mkdir(parents=True)
+        health.write_text(json.dumps({"legacy": {"status": "ok"}}))
+        self.assertEqual(self.status_of("legacy"), "untested")
+
+    def test_provider_probe_has_a_deadline(self):
+        self.write_provider("hangingprobe", "cat > /dev/null", probe="sleep 30")
+        started = time.monotonic()
+        self.assertEqual(self.status_of("hangingprobe"), "missing")
+        self.assertLess(time.monotonic() - started, 5)
+
     def test_health_writer_recovers_a_truncated_cache_atomically(self):
         health = self.home / "cache" / "omarchy-tts" / "health.json"
         health.parent.mkdir(parents=True)
@@ -602,6 +1042,19 @@ class ProviderHealthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(health.read_text())["worktest"]["status"], "ok")
         self.assertEqual(health.stat().st_mode & 0o777, 0o600)
+
+    def test_provider_setting_change_invalidates_cached_proof(self):
+        health = self.home / "cache" / "omarchy-tts" / "health.json"
+        health.parent.mkdir(parents=True)
+        health.write_text(json.dumps({
+            "piper": {"status": "ok", "fingerprint": "old"},
+            "unrelated": {"status": "ok", "fingerprint": "keep"},
+        }))
+        result = self.speak("--set", ".piper.voice", "en_US-test-medium")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        updated = json.loads(health.read_text())
+        self.assertNotIn("piper", updated)
+        self.assertIn("unrelated", updated)
 
     def test_absent_provider_reports_missing_not_failing(self):
         # Absence and breakage are different problems with different fixes.
@@ -766,6 +1219,35 @@ class CloudProviderPrivacyTests(unittest.TestCase):
             with self.subTest(engine=engine):
                 self.cloud_ocr_check(engine, variable)
 
+    def test_google_embedded_error_is_normalized_and_recorded_as_failure(self):
+        response = self.root / "vision-error.json"
+        remote_detail = "credential details that must not be echoed"
+        response.write_text(json.dumps({"responses": [{"error": {
+            "code": 401, "status": "UNAUTHENTICATED", "message": remote_detail,
+        }}]}))
+        metrics = self.root / "vision-error-metrics.json"
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "FAKE_OUTPUT_FILE": str(response),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "GOOGLE_API_KEY": "safe-test-key",
+               "TTS_METRICS_FILE": str(metrics)}
+        result = subprocess.run(
+            [ROOT / "ocr" / "google"], input=(ROOT / "lib" / "ocr-probe.png").read_bytes(),
+            capture_output=True, env=env,
+        )
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertIn(b"API key was rejected", result.stderr)
+        self.assertNotIn(remote_detail.encode(), result.stderr)
+        telemetry = json.loads(metrics.read_text())
+        self.assertEqual(telemetry["lastRequest"]["httpStatus"], "200")
+        self.assertEqual(telemetry["lastRequest"]["outcome"], "error")
+        self.assertEqual(telemetry["lastRequest"]["errorCode"], "auth")
+        self.assertNotIn(remote_detail, metrics.read_text())
+
     def cloud_ocr_check(self, engine, variable):
         secret = "secret-key-that-must-not-leak"
         image = (ROOT / "lib" / "ocr-probe.png").read_bytes()
@@ -821,6 +1303,24 @@ class CloudProviderPrivacyTests(unittest.TestCase):
         self.assertIn("generativelanguage.googleapis.com", self.args.read_text())
         self.assertEqual(self.args.read_text().count("googleapis.com"), 1,
                          "one configured host, one request")
+
+    def test_invalid_gemini_api_selection_is_rejected_before_network(self):
+        self.config.write_text(json.dumps({"gemini": {"api": "typo"}}))
+        env = {**os.environ,
+               "PATH": f"{self.bin}:{os.environ['PATH']}",
+               "FAKE_CURL_ARGS": str(self.args), "FAKE_CURL_BODY": str(self.body),
+               "FAKE_CURL_HEADERS": str(self.headers),
+               "FAKE_RESPONSE_HEADERS": str(self.response_headers),
+               "XDG_RUNTIME_DIR": str(self.root), "TTS_PLUGIN_DIR": str(ROOT),
+               "TTS_CONFIG": str(self.config), "TTS_SILENT": "1",
+               "TTS_VOICE": "Kore", "GEMINI_API_KEY": "safe-test-key"}
+        result = subprocess.run(
+            [ROOT / "providers" / "gemini"], input="Probe.",
+            text=True, capture_output=True, env=env,
+        )
+        self.assertEqual(result.returncode, 65)
+        self.assertIn("invalid API host selection", result.stderr)
+        self.assertFalse(self.args.exists(), "invalid config reached curl")
 
     def test_google_voice_list_carries_what_a_browser_filters_on(self):
         listing = self.root / "voices.json"
@@ -1143,6 +1643,18 @@ class OcrEngineTests(unittest.TestCase):
         self.assertEqual(json.loads(self.speak("--info").stdout)["ocr"]["langs"], "eng+deu")
         self.assertNotEqual(self.speak("--set", ".ocr.easyocr.langs", "eng;rm").returncode, 0)
         self.assertEqual(json.loads(self.speak("--info").stdout)["ocr"]["langs"], "eng+deu")
+
+    def test_custom_engine_languages_are_persisted_without_jq_injection(self):
+        self.write_engine("custom-engine", "printf 'text\\n'\n")
+        self.assertEqual(
+            self.speak("--set", ".ocr.custom-engine.langs", "eng+jpn").returncode, 0
+        )
+        self.speak("--set", ".ocr.engine", "custom-engine")
+        info = json.loads(self.speak("--info").stdout)
+        self.assertEqual(info["ocr"]["langs"], "eng+jpn")
+        self.assertNotEqual(
+            self.speak("--set", ".ocr.bad] | .provider.langs", "eng").returncode, 0
+        )
 
     def test_legacy_shared_languages_migrate_to_tesseract_only(self):
         config = self.home / "config" / "omarchy-tts" / "config.json"

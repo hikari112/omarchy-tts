@@ -64,9 +64,9 @@ approval through `pkexec` to install `uv`, then uses `uv` to create an isolated 
 `~/.local/share/omarchy-tts/`. The release pins its direct engine packages to
 known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses `kokoro==0.9.4` and
 `soundfile==0.14.0` in a supported Python 3.12 environment, plus its pinned
-language model. Voice models are downloaded only after confirmation and
-verified before installation. No installer runs merely because the plugin is
-added or enabled.
+language-model artifact; EasyOCR uses `easyocr==1.7.2`. Voice models are
+downloaded only after confirmation and verified before installation. No
+installer runs merely because the plugin is added or enabled.
 
 ## Keys
 
@@ -115,7 +115,7 @@ speak-voice browse                # listen to samples in a browser
 Click the speaker in the bar. Right-click it to speak the selection without
 opening anything, or to stop the current speech.
 
-Five tabs, and a Test dock that stays visible on all of them so you can hear
+Six tabs, and a Test dock that stays visible on all of them so you can hear
 a change straight after making it:
 
 - **Provider** — all six at once, each showing whether it actually works on
@@ -138,7 +138,7 @@ comes from `speak --info`, and everything it changes goes through
 implementation of it.
 
 <details>
-<summary>See all five settings tabs</summary>
+<summary>See the settings panel</summary>
 
 | Provider | Voice |
 |---|---|
@@ -151,6 +151,9 @@ implementation of it.
 | Keys |
 |---|
 | ![Managed on-demand reading shortcuts](docs/screenshots/keys.png) |
+
+The Languages view is separate from Screen so recognition-engine selection
+and language-pack browsing remain focused tasks.
 
 </details>
 
@@ -181,7 +184,8 @@ not an option for you.
 ### Recognition engines
 
 Engines are chosen on the Screen tab the same way voices are: listed, proven,
-then selected. One is bundled; the others are opt-in.
+then selected. Tesseract is the local default; heavier or cloud-backed engines
+are explicit opt-ins.
 
 | Engine | Kind | When to use it |
 |---|---|---|
@@ -232,6 +236,13 @@ Bundled, all optional except piper:
 
 Google lists well over a thousand voices. The Voice tab browses them with
 search, language, gender and family filters rather than a dropdown.
+Google requests are rejected locally above the service's 5,000-byte UTF-8
+limit, which matters for text whose characters occupy multiple bytes.
+
+Existing `espeak-ng` and Speech Dispatcher selections remain functional after
+an upgrade. They appear only while configured, are marked as compatibility
+providers, and can be replaced with Piper from the panel; new users are not
+offered these legacy choices.
 
 ### Bring your own
 
@@ -248,7 +259,8 @@ exec my-tts-engine --voice "${TTS_VOICE:-default}" --speed "${TTS_RATE:-1.0}"
 ```
 
 Speech providers receive `TTS_VOICE`, `TTS_RATE`, `TTS_PLUGIN_DIR`,
-`TTS_CONFIG`, `TTS_DATA_DIR`, `TTS_METRICS_FILE`, and `TTS_INPUT_CHARS`.
+`TTS_CONFIG`, `TTS_DATA_DIR`, `TTS_METRICS_FILE`, `TTS_INPUT_CHARS`, and
+`TTS_INPUT_BYTES`.
 Verification also sets `TTS_SILENT=1`: the provider must perform its strongest
 non-audible readiness check, produce no sound, and exit zero only on success.
 Providers that generate an audio stream can discard it; providers without a
@@ -257,8 +269,9 @@ speech.
 
 ### Cloud API keys
 
-Add or remove keys from the **Provider** tab. They are entered in a masked
-field and stored in the system keyring, never in the plugin settings or logs.
+Add or remove speech keys from **Provider** and OCR keys from **Screen**. They
+are entered in a masked field and stored in the system keyring, never in the
+plugin settings or logs.
 The panel clearly marks providers that send text off the machine. Paid
 providers also show the configured model, locally observed request/character
 counts, last request status, and rate-limit headers. **Refresh usage** reads
@@ -276,6 +289,10 @@ Cloud telemetry and voice metadata are stored mode 0600 under
 `~/.cache/omarchy-tts/`. Telemetry contains counts, timestamps, request IDs,
 limits, and normalized error codes. Neither cache contains API keys, selected
 text, or provider response bodies.
+
+Environment variables take precedence over keyring entries. If an environment
+key is rejected, the panel names the authoritative variable and asks you to
+update or unset it; saving another key cannot silently pretend to override it.
 
 ## Remove
 
@@ -313,9 +330,8 @@ cat something.md | python3 ~/.config/omarchy/plugins/io.github.hikari112.tts/lib
 ## Development
 
 ```bash
-python3 tests/test_sanitize.py
-python3 tests/test_cli.py
-python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py
+python3 -m unittest discover -s tests -v
+python3 -m py_compile bin/speak-bindings bin/speak-setup lib/sanitize.py tests/*.py
 shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
 ```
 

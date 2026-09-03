@@ -4,6 +4,8 @@
 # kind: cloud
 # probe: [[ -n "${GEMINI_API_KEY:-}" ]] || secret-tool lookup service omarchy-tts key gemini >/dev/null 2>&1
 # vendor: Google
+# keyname: gemini
+# keyenv: GEMINI_API_KEY
 # voices: remote
 # maxchars: 8000
 set -uo pipefail
@@ -27,7 +29,8 @@ MODEL="$(jq -r '.gemini.model // "gemini-2.5-flash-preview-tts"' "$TTS_CONFIG" 2
 API="$(jq -r '.gemini.api // "vertex"' "$TTS_CONFIG" 2>/dev/null)"
 case "$API" in
   developer) URL="https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent" ;;
-  *)         URL="https://aiplatform.googleapis.com/v1/publishers/google/models/$MODEL:generateContent" ;;
+  vertex)    URL="https://aiplatform.googleapis.com/v1/publishers/google/models/$MODEL:generateContent" ;;
+  *) printf 'Gemini: invalid API host selection\n' >&2; exit 65 ;;
 esac
 
 # Gemini's prebuilt voices are fixed and named; the character notes are
