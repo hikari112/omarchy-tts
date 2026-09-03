@@ -101,6 +101,9 @@ Item {
   // panel say so rather than appearing to have ignored the click.
   function verifyProvider(name) { verifying = name; verifyProc.command = [speakBin, "--verify", name]; restart(verifyProc) }
   function refreshUsage(name) { refreshingUsage = name; usageProc.command = [speakBin, "--usage", name]; restart(usageProc) }
+  property string refreshingLanguages: ""
+  function refreshLanguages(engine) { refreshingLanguages = engine; languageRefreshProc.command = [speakBin, "--refresh-languages", engine]; restart(languageRefreshProc) }
+  function installLanguage(code) { startSetup("lang:" + code) }
   function refreshVoices(name) { refreshingVoices = name; voiceRefreshProc.command = [speakBin, "--refresh-voices", name]; restart(voiceRefreshProc) }
   function previewText(text) { previewProc.command = [speakBin, "--preview-text", text]; restart(previewProc) }
   function downloadVoice(key) { if (action([voiceBin, "add", key, "--async"])) { download = { status: "downloading", voice: key, percent: 0 }; downloadPoll.running = true } }
@@ -167,6 +170,11 @@ Item {
     id: usageProc; command: []
     stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
     onRunningChanged: if (!running) { root.refreshingUsage = ""; root.refresh() }
+  }
+  Process {
+    id: languageRefreshProc; command: []
+    stderr: StdioCollector { waitForEnd: true; onStreamFinished: if (text.trim()) root.error = text.trim() }
+    onRunningChanged: if (!running) { root.refreshingLanguages = ""; root.refresh() }
   }
   Process {
     id: voiceRefreshProc; command: []

@@ -959,5 +959,102 @@ class CancelledSpeechTests(unittest.TestCase):
                          "an uncancelled failure must still mark the provider")
 
 
+class OcrLanguageTests(unittest.TestCase):
+    """Recognition languages are discovered, not typed into a free-text box.
+
+    A configured language whose data was missing produced an empty result and
+    exit 0: reading nothing, forever, without ever saying why.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name)
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(self.home / "config"),
+                    "XDG_CACHE_HOME": str(self.home / "cache"),
+                    "XDG_RUNTIME_DIR": str(self.home / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        (self.home / "run").mkdir(parents=True)
+        self.engines = self.home / "config" / "omarchy-tts" / "ocr"
+        self.engines.mkdir(parents=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_engine(self, name, languages_json):
+        path = self.engines / name
+        path.write_text("#!/usr/bin/env bash\n"
+                        f"# desc: test engine {name}\n"
+                        "# kind: local\n"
+                        "# probe: true\n"
+                        'if [[ "${1:-}" == "--languages" ]]; then\n'
+                        f"  printf '%s' '{languages_json}'\n"
+                        "  exit 0\n"
+                        "fi\n"
+                        "cat > /dev/null\n")
+        path.chmod(0o755)
+
+    def speak(self, *args):
+        return subprocess.run([SPEAK, *args], text=True, capture_output=True, env=self.env)
+
+    def test_languages_are_absent_until_explicitly_refreshed(self):
+        self.write_engine("faketess", '[{"value":"eng","label":"eng","installed":true}]')
+        self.speak("--set", ".ocr.engine", "faketess")
+        info = json.loads(self.speak("--info").stdout)
+        self.assertEqual(info["ocr"]["languages"], [],
+                         "opening settings should not shell out to a package database")
+        result = self.speak("--refresh-languages", "faketess")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads(self.speak("--info").stdout)
+        self.assertEqual([l["value"] for l in info["ocr"]["languages"]], ["eng"])
+        self.assertTrue(info["ocr"]["languages"][0]["installed"])
+
+    def test_available_and_installed_are_distinguished(self):
+        self.write_engine("faketess",
+                          '[{"value":"eng","label":"eng","installed":true},'
+                          '{"value":"jpn","label":"jpn","installed":false}]')
+        self.speak("--set", ".ocr.engine", "faketess")
+        self.speak("--refresh-languages", "faketess")
+        langs = json.loads(self.speak("--info").stdout)["ocr"]["languages"]
+        installed = [l["value"] for l in langs if l["installed"]]
+        available = [l["value"] for l in langs if not l["installed"]]
+        self.assertEqual(installed, ["eng"])
+        self.assertEqual(available, ["jpn"])
+
+    def test_unknown_engine_is_refused(self):
+        self.assertNotEqual(self.speak("--refresh-languages", "nope").returncode, 0)
+
+
+class LanguageInstallTargetTests(unittest.TestCase):
+    """QML may name a language; it may never name a command or a package."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.env = {**os.environ,
+                    "XDG_CONFIG_HOME": str(Path(self.temp.name) / "config"),
+                    "XDG_RUNTIME_DIR": str(Path(self.temp.name) / "run")}
+        self.env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def start(self, target):
+        result = subprocess.run([SETUP, "start", target], text=True,
+                                capture_output=True, env=self.env)
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            return {"ok": False, "message": result.stdout + result.stderr}
+
+    def test_malformed_language_codes_are_refused_by_shape(self):
+        for target in ("lang:../../etc/passwd", "lang:jpn; rm -rf /", "lang:JPN",
+                       "lang:", "lang:toolongcode"):
+            with self.subTest(target=target):
+                answer = self.start(target)
+                self.assertFalse(answer.get("ok", False),
+                                 f"{target} was accepted as an install target")
+                self.assertNotIn("started", answer)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

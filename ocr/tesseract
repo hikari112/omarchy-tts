@@ -7,9 +7,44 @@ set -uo pipefail
 source "$TTS_PLUGIN_DIR/lib/play.sh"
 need tesseract "install with: omarchy pkg add tesseract tesseract-data-eng"
 
+# Report the recognition languages this engine can offer, as {value,label,
+# installed} triples. Mirrors `--voices` on a speech provider: only the engine
+# knows what it has, and only the system knows what could be added.
+if [[ "${1:-}" == "--languages" ]]; then
+  installed="$(tesseract --list-langs 2>/dev/null | tail -n +2 |
+    grep -Ev '^(osd|equ)$' | sort -u | jq -Rsc 'split("\n") | map(select(length>0))')"
+  available="$( { pacman -Ssq '^tesseract-data-' 2>/dev/null || true; } |
+    sed 's/^tesseract-data-//' | grep -Ev '^(osd|equ)$' | sort -u |
+    jq -Rsc 'split("\n") | map(select(length>0))')"
+  jq -nc --argjson installed "${installed:-[]}" --argjson available "${available:-[]}" '
+    ($installed + $available | unique) as $all
+    | $all | map({value: ., label: ., installed: (. as $c | $installed | index($c) != null)})
+    | sort_by((.installed | not), .value)'
+  exit 0
+fi
+
 LANGS="${TTS_OCR_LANGS:-}"
 [[ -z "$LANGS" ]] && LANGS="$(jq -r '.ocr.langs // "eng"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$LANGS" || "$LANGS" == "null" ]] && LANGS="eng"
+
+# A language that is configured but not installed produced an empty result and
+# exit 0 - reading nothing, forever, without ever saying why. Name it instead.
+missing=""
+have="$(tesseract --list-langs 2>/dev/null | tail -n +2)"
+IFS='+' read -ra requested <<< "$LANGS"
+for code in "${requested[@]}"; do
+  [[ -z "$code" ]] && continue
+  grep -qx "$code" <<< "$have" || missing+="${missing:+, }$code"
+done
+if [[ -n "$missing" ]]; then
+  printf 'speak: OCR language data not installed: %s\n' "$missing" >&2
+  printf 'speak: install it from the Screen tab, or: omarchy pkg add tesseract-data-%s\n' \
+    "${missing%%,*}" >&2
+  command -v notify-send >/dev/null 2>&1 &&
+    notify-send -a "Speak" "OCR language missing" \
+      "$missing is not installed. Add it from the Screen tab." 2>/dev/null
+  exit 78
+fi
 
 MINCONF="$(jq -r '.ocr.minConfidence // 60' "$TTS_CONFIG" 2>/dev/null)"
 [[ "$MINCONF" =~ ^[0-9]+$ ]] || MINCONF=60

@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -181,6 +182,40 @@ def install_voice() -> None:
     run_checked([VOICE_TOOL, "use", DEFAULT_VOICE], env=env)
 
 
+# Tesseract language data is one package per language, so a fixed list would
+# be 129 entries that go stale. The code is instead constrained by shape and
+# then confirmed against the real package database before anything is
+# installed: QML can name a language, never a command or an arbitrary package.
+LANGUAGE_PREFIX = "lang:"
+LANGUAGE_CODE = re.compile(r"^[a-z]{3,4}(_[a-z]+)?$")
+
+
+def language_package(code: str) -> str:
+    if not LANGUAGE_CODE.fullmatch(code):
+        raise RuntimeError("Unsupported language code")
+    package = f"tesseract-data-{code}"
+    pacman = shutil.which("pacman")
+    if not pacman:
+        raise RuntimeError("Package management is unavailable")
+    known = subprocess.run([pacman, "-Si", package], capture_output=True, text=True)
+    if known.returncode:
+        raise RuntimeError(f"No language package named {package}")
+    return package
+
+
+def install_language(code: str) -> None:
+    package = language_package(code)
+    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
+    if not pkexec or not pacman:
+        raise RuntimeError("Graphical package installation is unavailable")
+    write_state("running", "permission", 10, "Waiting for administrator approval")
+    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", package])
+    write_state("running", "verify", 85, "Checking the language is available")
+    speak = Path(__file__).resolve().parent / "speak"
+    if speak.exists():
+        subprocess.run([str(speak), "--refresh-languages"], capture_output=True, timeout=60)
+
+
 def install_system_provider(provider: str) -> None:
     packages = SYSTEM_PACKAGES[provider]
     pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
@@ -220,6 +255,8 @@ def prove(target: str) -> None:
     Kokoro installed cleanly and could not synthesise a sample, was reported
     ready, and silently disabled every shortcut.
     """
+    if target.startswith(LANGUAGE_PREFIX):
+        return          # a language pack has no speech of its own to prove
     provider = {"recommended": "piper"}.get(target, target)
     speak = Path(__file__).resolve().parent / "speak"
     if not speak.exists():
@@ -247,6 +284,8 @@ def worker(target: str) -> int:
             install_voice()
         elif target == "kokoro":
             install_kokoro()
+        elif target.startswith(LANGUAGE_PREFIX):
+            install_language(target[len(LANGUAGE_PREFIX):])
         elif target in SYSTEM_PACKAGES:
             install_system_provider(target)
         else:
@@ -260,7 +299,13 @@ def worker(target: str) -> int:
 
 
 def start(target: str) -> None:
-    if target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
+    if target.startswith(LANGUAGE_PREFIX):
+        try:
+            language_package(target[len(LANGUAGE_PREFIX):])
+        except RuntimeError as exc:
+            emit(ok=False, code="unknown_target", message=str(exc))
+            return
+    elif target not in {"recommended", "piper", "kokoro", *SYSTEM_PACKAGES}:
         emit(ok=False, code="unknown_target", message="Unknown installation target")
         return
     lock_fd = os.open(SETUP_LOCK, os.O_CREAT | os.O_WRONLY, 0o600)

@@ -330,6 +330,34 @@ refresh_remote_voices() { # refresh_remote_voices <name>
     '{provider:$provider,count:$count}'
 }
 
+# Recognition languages the active OCR engine offers. Cached like cloud voice
+# lists: building it reads the package database, and opening the panel should
+# not pay for that.
+ocr_languages() { # ocr_languages <engine>
+  local cache="$CACHE_DIR/ocr/$1.json"
+  if [[ -s "$cache" ]] && jq -e 'type == "array"' "$cache" >/dev/null 2>&1; then cat "$cache"; return 0; fi
+  printf '[]'
+}
+
+refresh_ocr_languages() { # refresh_ocr_languages <engine>
+  local engine="$1" bin out cache tmp
+  bin="$(ocr_engine_path "$engine")" || return 2
+  out="$(TTS_PLUGIN_DIR="$PLUGIN_DIR" TTS_CONFIG="$CONFIG" TTS_DATA_DIR="$DATA_DIR" \
+         timeout --kill-after=2s 60s "$bin" --languages 2>/dev/null)" || return 1
+  jq -e 'type == "array"' <<< "$out" >/dev/null 2>&1 || return 1
+  cache="$CACHE_DIR/ocr/$engine.json"
+  mkdir -p "$(dirname "$cache")" || return 1
+  chmod 700 "$(dirname "$cache")" || return 1
+  tmp="$(mktemp "${cache}.XXXXXX")" || return 1
+  if printf '%s' "$out" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$cache"; then
+    jq -nc --argjson n "$(jq 'length' "$cache")" \
+           --argjson i "$(jq '[.[]|select(.installed)]|length' "$cache")" \
+           '{languages:$n, installed:$i}'
+    return 0
+  fi
+  rm -f "$tmp"; return 1
+}
+
 emit_info() {
   local voices_dir="${PIPER_VOICES_DIR:-$DATA_DIR/voices/piper}"
   local legacy_voices_dir="$HOME/.local/share/piper-voices"
@@ -405,12 +433,13 @@ emit_info() {
     --argjson config "$config" \
     --arg voice "$voice" \
     --arg voicePath "$voice_path" \
+    --argjson ocrLanguages "$(ocr_languages "$(jq -r '.ocr.engine // "tesseract"' <<< "$config")")" \
     --argjson speaking "$speaking" \
     '{provider:($config.provider // "piper"), voice:$voice, voicePath:$voicePath,
       rate:($config.rate // 1.0), maxChars:($config.maxChars // 0),
       speaking:$speaking, providers:$providers, voices:$voices,
       ocr:{engine:($config.ocr.engine // "tesseract"), langs:($config.ocr.langs // "eng"),
-        minConfidence:($config.ocr.minConfidence // 60)},
+        minConfidence:($config.ocr.minConfidence // 60), languages:$ocrLanguages},
       sanitizer:{urls:($config.sanitizer.urls // "domain"),
         inlineCode:($config.sanitizer.inlineCode // true),
         announceCodeBlocks:($config.sanitizer.announceCodeBlocks // true),
@@ -485,6 +514,7 @@ Voice
   -l, --list           list available providers
       --verify [NAME]  prove a provider can actually speak (silent)
       --refresh-voices [NAME] safely re-fetch cloud voice lists
+      --refresh-languages [ENGINE] re-read OCR language availability
       --cycle-provider       switch to the next provider
       --current-provider  print the active provider
       --watch-provider    stream provider changes (used by the bar widget)
@@ -615,6 +645,11 @@ while [[ $# -gt 0 ]]; do
         esac
       done
       exit $vrc ;;
+    --refresh-languages)
+      lang_engine="${2:-$(cfg .ocr.engine tesseract)}"
+      [[ "$lang_engine" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid OCR engine name"
+      refresh_ocr_languages "$lang_engine" || die "could not list languages for $lang_engine"
+      exit 0 ;;
     --refresh-voices)
       voice_target="${2:-$(cfg .provider piper)}"
       [[ "$voice_target" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid provider name"
@@ -670,7 +705,10 @@ else
           trap 'rm -f "$PNG"' EXIT
           capture clipboard-image "$image_mime" > "$PNG" || die "could not read clipboard image"
           [[ -s "$PNG" ]] || die "clipboard image is empty"
-          TEXT="$("$OCR_BIN" < "$PNG")"
+          ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
+          # The engine has already said why it refused; do not relabel its
+          # reason as "no text found".
+          [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
           OCRMODE=1
           if [[ -z "${TEXT//[[:space:]]/}" ]]; then
             notify-send -a "Speak" "No text found" \
@@ -690,7 +728,8 @@ else
       capture "$SOURCE" > "$PNG"; rc=$?
       [[ $rc -eq 2 ]] && exit 0                     # cancelled the region select
       [[ $rc -ne 0 || ! -s "$PNG" ]] && die "screen capture failed"
-      TEXT="$("$OCR_BIN" < "$PNG")"
+      ocr_rc=0; TEXT="$("$OCR_BIN" < "$PNG")" || ocr_rc=$?
+      [[ $ocr_rc -ne 0 ]] && exit $ocr_rc
       OCRMODE=1
       if [[ -z "${TEXT//[[:space:]]/}" ]]; then
         notify-send -a "Speak" "No text found" "OCR found nothing in that region." 2>/dev/null
