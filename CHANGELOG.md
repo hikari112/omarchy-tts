@@ -15,8 +15,8 @@ Versioning.
 - Expand the settings panel to six scrollable views, add filtered cloud voice
   browsing, make inline controls keyboard-safe, and clearly distinguish local
   processing, cloud disclosure, key sources, and environment-key remediation.
-- Preserve `espeak-ng` and Speech Dispatcher configurations across upgrades as
-  hidden compatibility providers while steering new configurations to Piper.
+- Remove the `espeak-ng` and Speech Dispatcher providers; a configuration that
+  still names one is moved to Piper on first run.
 - Bind readiness to the exact adapter, relevant configuration, and credential
   source so stale health results cannot survive an upgrade, voice/language
   change, or key mutation; bound provider probes that do not return.

@@ -60,7 +60,7 @@ tts_config_init_unlocked() {
   "openai": { "voice": "alloy", "model": "gpt-4o-mini-tts" },
   "elevenlabs": { "model": "eleven_flash_v2_5" },
   "kokoro": { "voice": "af_heart" },
-  "gemini": { "voice": "Kore", "model": "gemini-2.5-flash-preview-tts", "api": "developer" },
+  "gemini": { "voice": "Kore", "model": "gemini-2.5-flash-preview-tts", "api": "vertex" },
   "google": { "voice": "" },
   "ocr": { "engine": "tesseract", "langs": "eng", "minConfidence": 60 },
   "sanitizer": {
@@ -112,6 +112,7 @@ JSON
     (if (.schemaVersion|type) == "number" then .schemaVersion else 0 end) as $previousSchema
     | .schemaVersion = 4
     | .provider = (if (.provider|type) == "string" and (.provider|test("^[A-Za-z0-9._-]+$")) then .provider else "piper" end)
+    | .provider = (if .provider == "espeak-ng" or .provider == "spd" then "piper" else .provider end)
     | .piper = (if (.piper|type) == "object" then .piper else {} end)
     | .openai = (if (.openai|type) == "object" then .openai else {} end)
     | .elevenlabs = (if (.elevenlabs|type) == "object" then .elevenlabs else {} end)
@@ -132,7 +133,7 @@ JSON
     | .kokoro.voice = (if (.kokoro.voice|type) == "string" and (.kokoro.voice|test("^[A-Za-z0-9._+-]+$")) then .kokoro.voice else "af_heart" end)
     | .gemini.voice = (if (.gemini.voice|type) == "string" and (.gemini.voice|test("^[A-Za-z]+$")) then .gemini.voice else "Kore" end)
     | .gemini.model = (if (.gemini.model|type) == "string" and (.gemini.model|test("^[A-Za-z0-9._-]+$")) then .gemini.model else "gemini-2.5-flash-preview-tts" end)
-    | .gemini.api = "developer"
+    | .gemini.api = (if .gemini.api == "developer" or .gemini.api == "vertex" then .gemini.api else "vertex" end)
     | .google.voice = (if (.google.voice|type) == "string" and (.google.voice|test("^[A-Za-z0-9._+-]*$")) then .google.voice else "" end)
     | .ocr.engine = (if (.ocr.engine|type) == "string" and (.ocr.engine|test("^[A-Za-z0-9._-]+$")) then .ocr.engine else "tesseract" end)
     | .ocr.engine as $ocrEngine
@@ -203,7 +204,7 @@ tts_config_set_unlocked() { # jq path, JSON-or-string value
       [[ "$value" =~ ^[0-9]+$ ]] &&
         awk -v value="$value" 'BEGIN { exit !(value <= 100) }' || return 3 ;;
     .ocr.engine) [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] || return 3 ;;
-    .gemini.api) [[ "$value" == developer ]] || return 3 ;;
+    .gemini.api) [[ "$value" == vertex || "$value" == developer ]] || return 3 ;;
     .ocr.langs|*.langs) [[ "$value" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 3 ;;
     .sanitizer.urls) [[ "$value" == domain || "$value" == link ]] || return 3 ;;
     .sanitizer.inlineCode|.sanitizer.announceCodeBlocks|.sanitizer.stripMarkdown|.sanitizer.expandUnits)
