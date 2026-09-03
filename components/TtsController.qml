@@ -238,7 +238,11 @@ Item {
     id: infoProc; command: [root.speakBin, "--info"]
     stdout: StdioCollector { id: infoStdout; waitForEnd: true }
     stderr: StdioCollector { id: infoStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var queued = root.infoQueued
       root.infoQueued = false
       if (root.readEpoch !== root.writeEpoch) {
@@ -279,7 +283,11 @@ Item {
     id: verifyProc; command: []
     stdout: StdioCollector { id: verifyStdout; waitForEnd: true }
     stderr: StdioCollector { id: verifyStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       if (exitCode !== 0) root.error = String(verifyStderr.text || verifyStdout.text || "Test failed").trim()
       root.verifying = ""; root.refresh()
     }
@@ -303,7 +311,11 @@ Item {
     id: actionProc; command: []
     stdout: StdioCollector { id: actionStdout; waitForEnd: true }
     stderr: StdioCollector { id: actionStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var stdout = String(actionStdout.text || "").trim()
       var stderr = String(actionStderr.text || "").trim()
       if (exitCode !== 0) root.error = stderr || stdout || "The TTS action failed."
@@ -326,7 +338,11 @@ Item {
     }
     stdout: StdioCollector { id: previewStdout; waitForEnd: true }
     stderr: StdioCollector { id: previewStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       if (!root.previewQueued) {
         if (exitCode === 0) root.preview = String(previewStdout.text || "").trim()
         else if (exitCode === 1) root.preview = ""
@@ -342,7 +358,11 @@ Item {
     id: catalogueProc; command: [root.voiceBin, "available", "--json"]
     stdout: StdioCollector { id: catalogueStdout; waitForEnd: true }
     stderr: StdioCollector { id: catalogueStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       if (root.catalogueQueued) {
         root.catalogueQueued = false
         Qt.callLater(root.loadCatalogue)
@@ -361,7 +381,11 @@ Item {
     id: downloadStatusProc; command: [root.voiceBin, "status"]
     stdout: StdioCollector { id: downloadStatusStdout; waitForEnd: true }
     stderr: StdioCollector { id: downloadStatusStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var result = null
       try { result = JSON.parse(String(downloadStatusStdout.text || "")) } catch (e) {}
       if (exitCode !== 0 || !result || typeof result.status !== "string") {
@@ -390,7 +414,11 @@ Item {
     id: downloadStartProc; command: []
     stdout: StdioCollector { id: downloadStartStdout; waitForEnd: true }
     stderr: StdioCollector { id: downloadStartStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       root.downloadStarting = false
       var stdout = String(downloadStartStdout.text || "").trim()
       var stderr = String(downloadStartStderr.text || "").trim()
@@ -415,7 +443,11 @@ Item {
     id: bindingsProc; command: [root.bindingsBin, "status"]
     stdout: StdioCollector { id: bindingsStdout; waitForEnd: true }
     stderr: StdioCollector { id: bindingsStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       try {
         if (exitCode !== 0) throw new Error("shortcut status failed")
         root.bindings = JSON.parse(String(bindingsStdout.text || ""))
@@ -429,7 +461,11 @@ Item {
     id: setupStatusProc; command: [root.setupBin, "status"]
     stdout: StdioCollector { id: setupStatusStdout; waitForEnd: true }
     stderr: StdioCollector { id: setupStatusStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var result = null
       try { result = JSON.parse(String(setupStatusStdout.text || "")) } catch (e) {}
       if (exitCode === 0 && result && result.ok === true) {
@@ -445,7 +481,11 @@ Item {
     id: setupStartProc; command: []
     stdout: StdioCollector { id: setupStartStdout; waitForEnd: true }
     stderr: StdioCollector { id: setupStartStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       root.setupStarting = false
       var result = null
       try { result = JSON.parse(String(setupStartStdout.text || "")) } catch (e) {}
@@ -470,7 +510,11 @@ Item {
     id: setupJobProc; command: [root.setupBin, "job"]
     stdout: StdioCollector { id: setupJobStdout; waitForEnd: true }
     stderr: StdioCollector { id: setupJobStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var result = null
       try { result = JSON.parse(String(setupJobStdout.text || "")) } catch (e) {}
       if (exitCode !== 0 || !result || typeof result.status !== "string") {
@@ -495,7 +539,11 @@ Item {
     onStarted: { write(root.pendingKey + "\n"); root.pendingKey = "" }
     stdout: StdioCollector { id: keyStdout; waitForEnd: true }
     stderr: StdioCollector { id: keyStderr; waitForEnd: true }
-    onExited: function(exitCode) {
+    onExited: function(exitCode, exitStatus) {
+      // A run this controller killed with restart() is not a result; the
+      // replacement run reports. Treating the kill as a failure painted
+      // "Could not read TTS setup status" over a working install.
+      if (exitStatus !== 0) return
       var result = null
       try { result = JSON.parse(String(keyStdout.text || "")) } catch (e) {}
       var ok = exitCode === 0 && result && result.ok === true

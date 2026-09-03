@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static contracts for UI races that do not require a running compositor."""
+import re
 from pathlib import Path
 import unittest
 
@@ -126,7 +127,7 @@ class QmlContractTests(unittest.TestCase):
         start = self.controller.index("id: setupStatusProc")
         block = self.controller[start:self.controller.index("id: setupStartProc", start)]
         self.assertIn("id: setupStatusStderr", block)
-        self.assertIn("onExited: function(exitCode)", block)
+        self.assertIn("onExited: function(exitCode, exitStatus)", block)
         self.assertIn("exitCode === 0 && result && result.ok === true", block)
         self.assertNotIn("onStreamFinished", block)
 
@@ -152,7 +153,7 @@ class QmlContractTests(unittest.TestCase):
         start = self.controller.index("id: infoProc")
         block = self.controller[start:self.controller.index("id: speechProc", start)]
         self.assertIn("id: infoStderr", block)
-        self.assertIn("onExited: function(exitCode)", block)
+        self.assertIn("onExited: function(exitCode, exitStatus)", block)
         self.assertNotIn("root.infoQueued = true", block)
 
     def test_cloud_backend_operations_are_not_killed_and_restarted(self):
@@ -176,5 +177,19 @@ class QmlContractTests(unittest.TestCase):
         self.assertIn("textFormat: TextEdit.PlainText", self.panel)
 
 
+
+
+class ProcessExitContractTests(unittest.TestCase):
+    def test_every_controller_exit_handler_ignores_killed_runs(self):
+        """restart() kills an in-flight process; its non-zero exit is not a
+        failure of anything and must not surface as an error."""
+        source = (ROOT / "components" / "TtsController.qml").read_text()
+        handlers = re.findall(r"onExited: function\(([^)]*)\) \{\n((?:.*\n){1,5})", source)
+        self.assertTrue(handlers, "no onExited handlers found")
+        for params, body in handlers:
+            self.assertIn("exitStatus", params)
+            self.assertIn("if (exitStatus !== 0) return", body)
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()
