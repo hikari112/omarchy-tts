@@ -1627,6 +1627,12 @@ class CliConfigTests(unittest.TestCase):
         for name, body in {
             "pkexec": "exit 0",
             "pacman": "exit 0",
+            "tesseract": (
+                "if [[ ${1:-} == --list-langs ]]; then\n"
+                "  printf 'List of available languages (1):\\neng\\n'\n"
+                "fi\n"
+                "exit 0"
+            ),
         }.items():
             tool = tools / name
             tool.write_text(f"#!/usr/bin/env bash\n{body}\n")
@@ -1717,6 +1723,22 @@ class CredentialLifecycleTests(unittest.TestCase):
         tool = self.tools / "secret-tool"
         tool.write_text("#!/usr/bin/env bash\n" + source)
         tool.chmod(0o755)
+
+    def test_missing_keyring_helper_is_reported_as_unavailable(self):
+        script = (
+            'source "$1"\n'
+            'PATH=/path-that-does-not-exist\n'
+            'get_key TEST_API_KEY test-provider\n'
+        )
+        env = {**self.env}
+        env.pop("TEST_API_KEY", None)
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "bash", str(ROOT / "lib" / "keys.sh")],
+            env=env, text=True, capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("secret-tool) is unavailable", result.stderr)
+        self.assertNotIn("no API key", result.stderr)
 
     def test_saving_shared_key_invalidates_speech_and_ocr_health(self):
         self.write_secret_tool(

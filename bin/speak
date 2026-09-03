@@ -259,6 +259,12 @@ key_state() { # logical-name [executable] -> source<TAB>non-secret identity
       rm -f "$error_file"; printf 'keyerror\t'; return
     fi
     rm -f "$error_file"
+  else
+    # Without the keyring client we cannot distinguish an absent credential
+    # from one that is safely stored but temporarily inaccessible. Reporting
+    # `none` here invites the UI to tell the user to save a duplicate key and
+    # masks an incomplete installation; surface the operational error instead.
+    printf 'keyerror\t'; return
   fi
   printf 'none\t'
 }
