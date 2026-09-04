@@ -55,7 +55,7 @@ jobs:
           done
 
       - name: ShellCheck
-        run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh
+        run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh tools/*
 
       - name: Manifest is valid
         run: |

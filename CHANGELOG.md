@@ -5,6 +5,15 @@ Versioning.
 
 ## Unreleased
 
+## 1.3.1 - 2026-09-04
+
+- Pin Piper voice downloads to one immutable revision of `rhasspy/piper-voices`
+  and verify every model and sidecar against SHA-256 digests shipped in the
+  plugin (`lib/piper-voices.sha256`); the catalogue ships too. A file without a
+  shipped digest is refused, MD5 is no longer used, and a change to the
+  upstream branch can no longer alter what is downloaded or trusted.
+  `tools/pin-piper-voices` regenerates the pinned data for a new revision.
+
 ## 1.3.0 - 2026-09-03
 
 - Add selectable EasyOCR, OpenAI Vision, and Google Cloud Vision recognition

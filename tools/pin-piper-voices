@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Pin the Piper voice catalogue to one immutable revision of
+# rhasspy/piper-voices and record a SHA-256 for every model and sidecar.
+#
+#   tools/pin-piper-voices <revision-sha>
+#
+# Writes lib/piper-voices.json (the catalogue at that revision) and
+# lib/piper-voices.sha256 (digests). Model digests come from the LFS object
+# ids the hub reports for that exact revision; sidecars are small, so they
+# are downloaded and hashed here. Both files are reviewed with the plugin,
+# so a later change to the upstream branch cannot change what is trusted.
+set -euo pipefail
+rev="${1:-}"
+[[ "$rev" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <40-hex revision>" >&2; exit 64; }
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+api="https://huggingface.co/api/models/rhasspy/piper-voices"
+files="https://huggingface.co/rhasspy/piper-voices/resolve/$rev"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+
+curl -sSf --proto '=https' -L "$files/voices.json?download=true" -o "$work/voices.json"
+jq -e 'type == "object" and length > 0' "$work/voices.json" >/dev/null
+
+url="$api/tree/$rev?recursive=true&expand=false"; : > "$work/tree.jsonl"
+while [[ -n "$url" ]]; do
+  curl -sSf --proto '=https' -D "$work/hdr" "$url" | jq -c '.[]' >> "$work/tree.jsonl"
+  url="$(grep -i '^link:' "$work/hdr" | grep -o '<[^>]*>; rel="next"' | sed 's/<\(.*\)>.*/\1/' || true)"
+done
+
+: > "$work/sums"
+jq -r '.[].files | keys[]' "$work/voices.json" | grep -E '\.onnx(\.json)?$' | sort -u | while read -r path; do
+  if [[ "$path" == *.onnx ]]; then
+    oid="$(jq -r --arg p "$path" 'select(.path == $p) | .lfs.oid // empty' "$work/tree.jsonl")"
+    [[ "$oid" =~ ^[0-9a-f]{64}$ ]] || { echo "no LFS digest for $path at $rev" >&2; exit 1; }
+    printf '%s  %s\n' "$oid" "$path" >> "$work/sums"
+  else
+    curl -sSf --proto '=https' -L "$files/$path?download=true" -o "$work/sidecar"
+    printf '%s  %s\n' "$(sha256sum "$work/sidecar" | cut -d' ' -f1)" "$path" >> "$work/sums"
+  fi
+done
+
+jq -S . "$work/voices.json" > "$root/lib/piper-voices.json"
+{ printf '# rhasspy/piper-voices@%s\n' "$rev"
+  printf '# sha256 of every model and sidecar in lib/piper-voices.json; regenerate with tools/pin-piper-voices\n'
+  sort -k2 "$work/sums"; } > "$root/lib/piper-voices.sha256"
+sed -i "s/^PIPER_VOICES_REV=.*/PIPER_VOICES_REV=$rev/" "$root/bin/speak-voice"
+echo "pinned $(jq length "$root/lib/piper-voices.json") voices, $(grep -vc '^#' "$root/lib/piper-voices.sha256") digests at $rev"
