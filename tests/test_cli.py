@@ -3,8 +3,12 @@
 import base64
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
+import uuid
+import shutil
 import os
+import re
 from pathlib import Path
 import select
 import subprocess
@@ -991,34 +995,117 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(target.read_text(), before_target)
         self.assertFalse(choices.exists())
 
-    def test_failed_voice_catalogue_refresh_preserves_the_cache(self):
+    def piper_plugin(self, catalogue, files=None):
+        """A plugin tree whose shipped catalogue and digest manifest are the
+        test's own. The trust root is repository-owned, so a test cannot inject
+        it through the cache; it ships it the way a release does."""
+        plugin = Path(self.temp.name, "plugin-" + uuid.uuid4().hex[:8])
+        (plugin / "bin").mkdir(parents=True)
+        (plugin / "lib").mkdir()
+        shutil.copy(ROOT / "bin" / "speak-voice", plugin / "bin" / "speak-voice")
+        for item in (ROOT / "lib").iterdir():
+            if item.name not in ("piper-voices.json", "piper-voices.sha256"):
+                (plugin / "lib" / item.name).symlink_to(item)
+        (plugin / "lib" / "piper-voices.json").write_text(json.dumps(catalogue))
+        lines = ["# test manifest", "0" * 64 + "  placeholder/none.onnx"]
+        for path, content in (files or {}).items():
+            lines.append(f"{hashlib.sha256(content).hexdigest()}  {path}")
+        (plugin / "lib" / "piper-voices.sha256").write_text("\n".join(lines) + "\n")
+        return plugin / "bin" / "speak-voice"
+
+    def test_voice_catalogue_is_shipped_pinned_and_refresh_is_offline(self):
+        """Every model and sidecar the plugin can install has a SHA-256 in the
+        reviewed tree, the catalogue ships alongside, and refresh never
+        contacts the network. A mutable upstream branch cannot change what
+        is downloaded or what it must hash to."""
+        catalogue = json.loads((ROOT / "lib" / "piper-voices.json").read_text())
+        manifest = {}
+        header = None
+        for line in (ROOT / "lib" / "piper-voices.sha256").read_text().splitlines():
+            if line.startswith("#"):
+                header = header or line
+                continue
+            digest, path = line.split("  ", 1)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$", path)
+            manifest[path] = digest
+        revision = re.search(r"@([0-9a-f]{40})$", header).group(1)
+        self.assertIn(f"PIPER_VOICES_REV={revision}",
+                      (ROOT / "bin" / "speak-voice").read_text(),
+                      "the download revision and the digest manifest must move together")
+        for voice, entry in catalogue.items():
+            for path in entry["files"]:
+                if path.endswith(".onnx") or path.endswith(".onnx.json"):
+                    self.assertIn(path, manifest, f"{voice}: {path} has no shipped digest")
         tools = Path(self.temp.name, "catalogue-tools")
         tools.mkdir()
+        marker = Path(self.temp.name, "refresh-curl-ran")
         curl = tools / "curl"
-        curl.write_text("#!/usr/bin/env bash\nexit 22\n")
+        curl.write_text("#!/usr/bin/env bash\nprintf ran > \"$REFRESH_MARKER\"\nexit 22\n")
         curl.chmod(0o755)
-        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
-        catalogue = Path(self.temp.name, "omarchy-tts", "voices.json")
-        catalogue.parent.mkdir(parents=True, exist_ok=True)
-        original = '{"preserved": {}}\n'
-        catalogue.write_text(original)
-
+        env = {**self.env, "PATH": f"{tools}:{self.env['PATH']}", "REFRESH_MARKER": str(marker)}
         result = subprocess.run([ROOT / "bin" / "speak-voice", "refresh"],
-                                env=self.env, capture_output=True, text=True)
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pinned", result.stdout)
+        self.assertFalse(marker.exists(), "refresh must not touch the network")
+
+    def test_download_is_refused_when_the_shipped_digest_does_not_match(self):
+        voice = "en_US-tampered-medium"
+        model_path = "en/en_US/tampered/medium/en_US-tampered-medium.onnx"
+        catalogue = {voice: {"files": {
+            model_path: {"size_bytes": 4},
+            model_path + ".json": {"size_bytes": 2}}}}
+        speak_voice = self.piper_plugin(catalogue, files={
+            model_path: b"good", model_path + ".json": b"{}"})
+        tools = Path(self.temp.name, "tamper-voice-tools")
+        tools.mkdir()
+        curl = tools / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "out=\nurl=\n"
+            "while [[ $# -gt 0 ]]; do\n"
+            "  if [[ $1 == -o ]]; then out=$2; shift; elif [[ $1 == https:* ]]; then url=$1; fi\n"
+            "  shift\n"
+            "done\n"
+            "if [[ $url == *.onnx.json* ]]; then printf '{}' > \"$out\"; else printf evil > \"$out\"; fi\n"
+        )
+        curl.chmod(0o755)
+        env = {**self.env, "HOME": self.temp.name, "PATH": f"{tools}:{self.env['PATH']}"}
+        result = subprocess.run([speak_voice, "add", voice], env=env,
+                                capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("existing cache was kept", result.stderr)
-        self.assertEqual(catalogue.read_text(), original)
+        self.assertIn("verification failed", result.stderr)
+        voices = Path(self.temp.name, "omarchy-tts", "voices", "piper")
+        self.assertFalse((voices / f"{voice}.onnx").exists())
+        self.assertEqual(list(voices.glob("*.part")) if voices.exists() else [], [])
+
+    def test_download_is_refused_for_a_file_without_a_shipped_digest(self):
+        voice = "en_US-unlisted-medium"
+        model_path = "en/en_US/unlisted/medium/en_US-unlisted-medium.onnx"
+        speak_voice = self.piper_plugin({voice: {"files": {
+            model_path: {"size_bytes": 4}, model_path + ".json": {"size_bytes": 2}}}})
+        tools = Path(self.temp.name, "unlisted-voice-tools")
+        tools.mkdir()
+        marker = Path(self.temp.name, "unlisted-curl-ran")
+        curl = tools / "curl"
+        curl.write_text("#!/usr/bin/env bash\nprintf ran > \"$VOICE_CURL_MARKER\"\nexit 1\n")
+        curl.chmod(0o755)
+        env = {**self.env, "HOME": self.temp.name, "PATH": f"{tools}:{self.env['PATH']}",
+               "VOICE_CURL_MARKER": str(marker)}
+        result = subprocess.run([speak_voice, "add", voice], env=env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("verified manifest", result.stderr)
+        self.assertFalse(marker.exists(), "an unlisted file must never be requested")
 
     def test_voice_metadata_limits_are_rejected_before_download(self):
         base = Path(self.temp.name, "omarchy-tts")
         base.mkdir(parents=True, exist_ok=True)
         voice = "en_US-too-large-medium"
-        (base / "voices.json").write_text(json.dumps({voice: {"files": {
-            "voices/large.onnx": {"size_bytes": 1_073_741_825,
-                                   "md5_digest": None},
-            "voices/large.onnx.json": {"size_bytes": 2,
-                                        "md5_digest": None},
-        }}}))
+        speak_voice = self.piper_plugin({voice: {"files": {
+            "voices/large.onnx": {"size_bytes": 1_073_741_825},
+            "voices/large.onnx.json": {"size_bytes": 2},
+        }}}, files={})
         tools = Path(self.temp.name, "limit-voice-tools")
         tools.mkdir()
         marker = Path(self.temp.name, "voice-curl-ran")
@@ -1029,12 +1116,12 @@ class CliConfigTests(unittest.TestCase):
                "PATH": f"{tools}:{self.env['PATH']}",
                "VOICE_CURL_MARKER": str(marker)}
         available = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "available", "--json"], env=env,
+            [speak_voice, "available", "--json"], env=env,
             capture_output=True, text=True, check=True,
         )
         self.assertNotIn(voice, {item["key"] for item in json.loads(available.stdout)})
         result = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice], env=env,
+            [speak_voice, "add", voice], env=env,
             capture_output=True, text=True,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -1046,10 +1133,10 @@ class CliConfigTests(unittest.TestCase):
         voice = "en_US-layout-medium"
         model_path = "en/en_US/layout/medium/en_US-layout-medium.onnx"
         sidecar_path = model_path + ".json"
-        (base / "voices.json").write_text(json.dumps({voice: {"files": {
-            model_path: {"size_bytes": 4, "md5_digest": None},
-            sidecar_path: {"size_bytes": 2, "md5_digest": None},
-        }}}))
+        speak_voice = self.piper_plugin({voice: {"files": {
+            model_path: {"size_bytes": 4},
+            sidecar_path: {"size_bytes": 2},
+        }}}, files={model_path: b"data", sidecar_path: b"{}"})
         tools = Path(self.temp.name, "layout-voice-tools")
         tools.mkdir()
         curl = tools / "curl"
@@ -1068,11 +1155,13 @@ class CliConfigTests(unittest.TestCase):
         env = {**self.env, "HOME": self.temp.name,
                "PATH": f"{tools}:{self.env['PATH']}", "VOICE_URLS": str(urls)}
         result = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice], env=env,
+            [speak_voice, "add", voice], env=env,
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(model_path, urls.read_text())
+        self.assertIn("/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/", urls.read_text())
+        self.assertNotIn("/resolve/main/", urls.read_text())
         voices = base / "voices" / "piper"
         self.assertEqual((voices / f"{voice}.onnx").read_bytes(), b"data")
         self.assertEqual((voices / f"{voice}.onnx.json").read_text(), "{}")
@@ -1081,11 +1170,11 @@ class CliConfigTests(unittest.TestCase):
         base = Path(self.temp.name, "omarchy-tts")
         base.mkdir(parents=True, exist_ok=True)
         voice = "en_US-ambiguous-medium"
-        (base / "voices.json").write_text(json.dumps({voice: {"files": {
-            "voices/first.onnx": {"size_bytes": 2, "md5_digest": None},
-            "voices/second.onnx": {"size_bytes": 2, "md5_digest": None},
-            "voices/first.onnx.json": {"size_bytes": 2, "md5_digest": None},
-        }}}))
+        speak_voice = self.piper_plugin({voice: {"files": {
+            "voices/first.onnx": {"size_bytes": 2},
+            "voices/second.onnx": {"size_bytes": 2},
+            "voices/first.onnx.json": {"size_bytes": 2},
+        }}}, files={})
         tools = Path(self.temp.name, "ambiguous-voice-tools")
         tools.mkdir()
         marker = Path(self.temp.name, "voice-curl-ran")
@@ -1096,7 +1185,7 @@ class CliConfigTests(unittest.TestCase):
                "PATH": f"{tools}:{self.env['PATH']}",
                "VOICE_CURL_MARKER": str(marker)}
         result = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice], env=env,
+            [speak_voice, "add", voice], env=env,
             capture_output=True, text=True,
         )
         self.assertNotEqual(result.returncode, 0)
@@ -1108,10 +1197,10 @@ class CliConfigTests(unittest.TestCase):
         voices = base / "voices" / "piper"
         voices.mkdir(parents=True)
         voice = "en_US-recover-medium"
-        (base / "voices.json").write_text(json.dumps({voice: {"files": {
-            "voices/recover.onnx": {"size_bytes": 3, "md5_digest": None},
-            "voices/recover.onnx.json": {"size_bytes": 2, "md5_digest": None},
-        }}}))
+        speak_voice = self.piper_plugin({voice: {"files": {
+            "voices/recover.onnx": {"size_bytes": 3},
+            "voices/recover.onnx.json": {"size_bytes": 2},
+        }}}, files={"voices/recover.onnx": b"old", "voices/recover.onnx.json": b"{}"})
         (voices / f"{voice}.onnx").write_bytes(b"x")
         (voices / f"{voice}.onnx.json").write_text("partial")
         (voices / f".{voice}.onnx.previous.4242").write_bytes(b"old")
@@ -1119,7 +1208,7 @@ class CliConfigTests(unittest.TestCase):
         (voices / f".{voice}.onnx.stage.4242").write_bytes(b"new")
 
         result = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice],
+            [speak_voice, "add", voice],
             env={**self.env, "HOME": self.temp.name},
             capture_output=True, text=True,
         )
@@ -1195,14 +1284,13 @@ class CliConfigTests(unittest.TestCase):
         voice = "en_US-test-medium"
         (voices / f"{voice}.onnx").write_bytes(b"model")
         (voices / f"{voice}.onnx.json").write_text("{}")
-        catalogue = base / "voices.json"
-        catalogue.write_text(json.dumps({voice: {"files": {
-            "voices/test.onnx": {"size_bytes": 5, "md5_digest": None},
-            "voices/test.onnx.json": {"size_bytes": 2, "md5_digest": None},
-        }}}))
+        speak_voice = self.piper_plugin({voice: {"files": {
+            "voices/test.onnx": {"size_bytes": 5},
+            "voices/test.onnx.json": {"size_bytes": 2},
+        }}}, files={"voices/test.onnx": b"model", "voices/test.onnx.json": b"{}"})
 
         result = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            [speak_voice, "add", voice, "--async"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1222,17 +1310,17 @@ class CliConfigTests(unittest.TestCase):
         base = Path(self.temp.name, "omarchy-tts")
         base.mkdir(parents=True, exist_ok=True)
         voice = "en_US-lock-medium"
-        (base / "voices.json").write_text(json.dumps({
+        speak_voice = self.piper_plugin({
             voice: {
                 "name": "lock", "quality": "medium",
                 "language": {"name_english": "English",
                              "country_english": "United States", "code": "en_US"},
                 "files": {
-                    "voices/test.onnx": {"size_bytes": 4, "md5_digest": None},
-                    "voices/test.onnx.json": {"size_bytes": 2, "md5_digest": None},
+                    "voices/test.onnx": {"size_bytes": 4},
+                    "voices/test.onnx.json": {"size_bytes": 2},
                 },
             }
-        }))
+        }, files={"voices/test.onnx": b"data", "voices/test.onnx.json": b"{}"})
         tools = Path(self.temp.name, "voice-tools")
         tools.mkdir()
         curl = tools / "curl"
@@ -1250,7 +1338,7 @@ class CliConfigTests(unittest.TestCase):
         env["PATH"] = f"{tools}:{env['PATH']}"
 
         first = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            [speak_voice, "add", voice, "--async"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -1260,13 +1348,13 @@ class CliConfigTests(unittest.TestCase):
         self.assertTrue(state["processIdentity"])
         self.assertEqual(os.getpgid(state["pid"]), state["pid"], state)
         second = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            [speak_voice, "add", voice, "--async"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         self.assertNotEqual(second.returncode, 0)
         self.assertIn("already running", second.stderr)
         cancelled = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "cancel"], env=env,
+            [speak_voice, "cancel"], env=env,
             capture_output=True, text=True,
         )
         self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
@@ -1276,14 +1364,14 @@ class CliConfigTests(unittest.TestCase):
         base = Path(self.temp.name, "omarchy-tts")
         base.mkdir(parents=True, exist_ok=True)
         voice = "en_US-atomic-medium"
-        (base / "voices.json").write_text(json.dumps({
+        speak_voice = self.piper_plugin({
             voice: {
                 "files": {
-                    "voices/test.onnx": {"size_bytes": 4, "md5_digest": None},
-                    "voices/test.onnx.json": {"size_bytes": 2, "md5_digest": None},
+                    "voices/test.onnx": {"size_bytes": 4},
+                    "voices/test.onnx.json": {"size_bytes": 2},
                 },
             },
-        }))
+        }, files={"voices/test.onnx": b"data", "voices/test.onnx.json": b"{}"})
         marker = Path(self.temp.name, "metadata-started")
         tools = Path(self.temp.name, "atomic-voice-tools")
         tools.mkdir()
@@ -1305,7 +1393,7 @@ class CliConfigTests(unittest.TestCase):
         env["VOICE_METADATA_MARKER"] = str(marker)
 
         started = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "add", voice, "--async"],
+            [speak_voice, "add", voice, "--async"],
             env=env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(started.returncode, 0, started.stderr)
@@ -1315,7 +1403,7 @@ class CliConfigTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(marker.exists(), "metadata download never started")
         cancelled = subprocess.run(
-            [ROOT / "bin" / "speak-voice", "cancel"], env=env,
+            [speak_voice, "cancel"], env=env,
             capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(cancelled.returncode, 0, cancelled.stderr)

@@ -89,3 +89,17 @@ invocation repairs artifacts left by abrupt process death or power loss.
 Run `python3 -m unittest discover -s tests -v` and the ShellCheck command from
 the README. The suite includes static QML interaction contracts; a full visual
 review still requires omarchy-shell.
+
+## Re-pinning Piper voices
+
+Voices download from one immutable revision of `rhasspy/piper-voices`, and
+every model and sidecar is verified against `lib/piper-voices.sha256`. To move
+to a newer upstream revision:
+
+```bash
+tools/pin-piper-voices <40-hex revision>
+```
+
+It rewrites `lib/piper-voices.json`, `lib/piper-voices.sha256`, and the
+`PIPER_VOICES_REV` constant in `bin/speak-voice`. Review the diff like any
+other dependency bump; the digests are the trust root for every download.
