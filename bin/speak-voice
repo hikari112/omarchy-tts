@@ -6,7 +6,6 @@ umask 077
 VOICES_DIR="${PIPER_VOICES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-tts/voices/piper}"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-tts/config.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-tts"
-CATALOGUE="$CACHE_DIR/voices.json"
 STATE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/omarchy-tts}"
 # Without a session runtime dir, fall back to an owner-only XDG state
 # directory rather than sticky /tmp, so runtime PID state is never in a
@@ -17,9 +16,14 @@ DL_LOCK="$STATE_DIR/download.lock"
 FILES_LOCK="$STATE_DIR/voice-files.lock"
 OWNER_PID=""
 
-CATALOGUE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
-FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main"
-CACHE_MAX_AGE_DAYS=7
+# Voices are fetched from one immutable revision of rhasspy/piper-voices, and
+# every model and sidecar is checked against a SHA-256 shipped in this plugin
+# (lib/piper-voices.sha256). The catalogue is shipped too. A change to the
+# upstream branch therefore cannot change what is downloaded or what is
+# trusted; both move only with a reviewed plugin commit. tools/pin-piper-voices
+# regenerates the three together.
+PIPER_VOICES_REV=1162a9173d0ce503555aed757976b7a9912eae4c
+FILE_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/$PIPER_VOICES_REV"
 CATALOGUE_MAX_BYTES=16777216
 MODEL_MAX_BYTES=1073741824
 SIDECAR_MAX_BYTES=16777216
@@ -37,7 +41,7 @@ Usage: speak-voice <command>
   use <voice>             make a voice the default
   status [--json]         progress of a download in flight
   cancel                  cancel the active download
-  refresh                 re-fetch the voice catalogue
+  refresh                 check the shipped, pinned voice catalogue
   browse                  open the sample page in a browser
 
 Voice names look like <lang>-<name>-<quality>, e.g. en_US-amy-medium.
@@ -97,6 +101,8 @@ case "$1" in
 esac
 
 PLUGIN_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CATALOGUE="$PLUGIN_DIR/lib/piper-voices.json"
+DIGESTS="$PLUGIN_DIR/lib/piper-voices.sha256"
 # Resolved from the installed plugin directory.
 # shellcheck disable=SC1091
 source "$PLUGIN_DIR/lib/config.sh"
@@ -180,39 +186,24 @@ catalogue_valid() {
         (.key | type == "string" and length > 0 and length <= 512)
         and (.value | type == "object")
         and (.value.size_bytes
-             | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .)
-        and (.value.md5_digest == null
-             or (.value.md5_digest
-                 | type == "string" and length <= 128))))
+             | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .)))
   ' "$1" >/dev/null 2>&1
 }
 
-# The catalogue is 240K and changes rarely; refetch only when stale or absent.
+# The catalogue ships with the plugin; there is nothing to fetch.
 ensure_catalogue() {
-  local force="${1:-no}" stale=1
-  if [[ "$force" != yes && ! -L "$CATALOGUE" && -s "$CATALOGUE" ]] && catalogue_valid "$CATALOGUE"; then
-    chmod 600 "$CATALOGUE" || return 1
-    if [[ -z "$(find "$CATALOGUE" -mtime +$CACHE_MAX_AGE_DAYS 2>/dev/null)" ]]; then stale=0; fi
-  fi
-  [[ $stale -eq 0 ]] && return 0
-  if ! command -v curl >/dev/null 2>&1; then
-    [[ ! -L "$CATALOGUE" && -s "$CATALOGUE" && "$force" != yes ]] && catalogue_valid "$CATALOGUE"
-    return
-  fi
-  local tmp; tmp="$(mktemp "${CATALOGUE}.XXXXXX")" || return 1
-  if curl -sL --fail --proto '=https' --proto-redir '=https' \
-      --connect-timeout 15 --max-time 30 --max-filesize "$CATALOGUE_MAX_BYTES" \
-      "$CATALOGUE_URL" -o "$tmp" &&
-      catalogue_valid "$tmp"; then
-    if chmod 600 "$tmp" && mv -T -- "$tmp" "$CATALOGUE"; then return 0; fi
-  fi
-  rm -f "$tmp"
-  # A stale catalogue still beats none at all.
-  if [[ ! -L "$CATALOGUE" && -s "$CATALOGUE" && "$force" != yes ]] && catalogue_valid "$CATALOGUE"; then
-    chmod 600 "$CATALOGUE" || return 1
-    return 0
-  fi
-  return 1
+  [[ ! -L "$CATALOGUE" && ! -L "$DIGESTS" ]] || return 1
+  catalogue_valid "$CATALOGUE" || return 1
+  [[ -s "$DIGESTS" ]] && grep -Eq '^[0-9a-f]{64}  [A-Za-z0-9._/-]+$' "$DIGESTS"
+}
+
+# digest_for <repo-path> -> the SHA-256 this plugin ships for that file.
+# Empty means the file is not in the reviewed manifest and must not be used.
+digest_for() {
+  local path="$1" digest
+  digest="$(awk -v p="$path" '$1 !~ /^#/ && $2 == p { print tolower($1); exit }' "$DIGESTS" 2>/dev/null)"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$digest"
 }
 
 write_state() { # write_state <status> <voice> <got> <total> [message]
@@ -272,14 +263,11 @@ emit_available() {
       and (contains("//") | not)
       and (test("(^|/)\\.\\.?(/|$)") | not)
       and test("^[A-Za-z0-9._/-]+$");
-    def digest_ok:
-      . == null or (type == "string" and test("^[0-9A-Fa-f]{32}$"));
     def file_ok($suffix; $maximum):
       (.key | safe_path($suffix))
       and (.value | type == "object")
       and (.value.size_bytes
-           | type == "number" and . >= 1 and . <= $maximum and floor == .)
-      and (.value.md5_digest | digest_ok);
+           | type == "number" and . >= 1 and . <= $maximum and floor == .);
     to_entries
     | map(select(.key | test("^[A-Za-z0-9._-]+$")))
     | map(([.value.files | to_entries[] | select(.key | endswith(".onnx"))]) as $models
@@ -306,11 +294,11 @@ emit_available() {
   ' "$CATALOGUE"
 }
 
-file_meta() { # file_meta <voice> <suffix> -> "path<TAB>size<TAB>md5"
+file_meta() { # file_meta <voice> <suffix> -> "path<TAB>size"
   jq -r --arg k "$1" --arg sfx "$2" '
     [ .[$k].files | to_entries[] | select(.key | endswith($sfx)) ]
     | select(length == 1) | .[0]
-    | "\(.key)\t\(.value.size_bytes)\t\(.value.md5_digest)"
+    | "\(.key)\t\(.value.size_bytes)"
   ' "$CATALOGUE" 2>/dev/null
 }
 
@@ -335,7 +323,8 @@ valid_repo_file() { # relative-path required-suffix
 installed_file_valid() { # voice suffix
   local voice="$1" suffix="$2" meta path expected_size expected_digest file got maximum
   meta="$(file_meta "$voice" "$suffix")"
-  IFS=$'\t' read -r path expected_size expected_digest <<< "$meta"
+  IFS=$'\t' read -r path expected_size <<< "$meta"
+  expected_digest="$(digest_for "$path")" || return 1
   file="$VOICES_DIR/$voice$suffix"
   [[ -n "$path" && -s "$file" ]] || return 1
   maximum="$MODEL_MAX_BYTES"
@@ -345,11 +334,9 @@ installed_file_valid() { # voice suffix
   else
     return 1
   fi
-  if [[ -n "$expected_digest" && "$expected_digest" != null ]]; then
-    command -v md5sum >/dev/null 2>&1 || return 1
-    got="$(md5sum "$file" | cut -d' ' -f1)"
-    [[ "$got" == "$expected_digest" ]] || return 1
-  fi
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  got="$(sha256sum "$file" | cut -d' ' -f1)"
+  [[ "$got" == "$expected_digest" ]]
 }
 
 voice_size_valid() { # cheap catalogue rendering check
@@ -485,8 +472,11 @@ publish_voice_pair() ( # voice model-stage sidecar-stage model-backup sidecar-ba
   return 0
 )
 
-fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <report>
-  local path="$1" dest="$2" size="$3" md5="$4" voice="$5" report="$6"
+fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <sha256> <voice> <report>
+  local path="$1" dest="$2" size="$3" sha="$4" voice="$5" report="$6"
+  # No digest, no download: the manifest is the only authority on what a
+  # model may contain, and a file it does not list is not a voice we ship.
+  [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 3
   local part="$dest.part" poller=""
   rm -f "$part"
   if [[ "$report" == "yes" ]]; then
@@ -509,11 +499,9 @@ fetch_file() { # fetch_file <repo-path> <dest> <expected-size> <md5> <voice> <re
     local got_size; got_size="$(stat -c%s "$part" 2>/dev/null || echo 0)"
     [[ "$got_size" == "$size" ]] || { rm -f "$part"; return 2; }
   fi
-  if [[ -n "$md5" && "$md5" != "null" ]]; then
-    command -v md5sum >/dev/null 2>&1 || { rm -f "$part"; return 3; }
-    local got_md5; got_md5="$(md5sum "$part" | cut -d' ' -f1)"
-    [[ "$got_md5" == "$md5" ]] || { rm -f "$part"; return 2; }
-  fi
+  command -v sha256sum >/dev/null 2>&1 || { rm -f "$part"; return 3; }
+  local got_sha; got_sha="$(sha256sum "$part" | cut -d' ' -f1)"
+  [[ "$got_sha" == "$sha" ]] || { rm -f "$part"; return 2; }
   mv -T -- "$part" "$dest"
 }
 
@@ -549,24 +537,26 @@ do_add() { # do_add <voice> <report> <force-repair>
 
   local m p s d mj pj sj dj model_stage sidecar_stage model_backup sidecar_backup
   m="$(file_meta "$voice" ".onnx")"
-  IFS=$'\t' read -r p s d <<< "$m"
-  if ! valid_repo_file "$p" .onnx ||
-      ! valid_size "$s" "$MODEL_MAX_BYTES" ||
-      ! [[ -z "$d" || "$d" == null || "$d" =~ ^[0-9a-fA-F]{32}$ ]]; then
+  IFS=$'\t' read -r p s <<< "$m"
+  if ! valid_repo_file "$p" .onnx || ! valid_size "$s" "$MODEL_MAX_BYTES"; then
     add_failure "$report" "$voice" "invalid model metadata"
     return 1
   fi
-  d="${d,,}"
+  d="$(digest_for "$p")" || {
+    add_failure "$report" "$voice" "model is not in this release's verified manifest"
+    return 1
+  }
 
   mj="$(file_meta "$voice" ".onnx.json")"
-  IFS=$'\t' read -r pj sj dj <<< "$mj"
-  if ! valid_repo_file "$pj" .onnx.json ||
-      ! valid_size "$sj" "$SIDECAR_MAX_BYTES" ||
-      ! [[ -z "$dj" || "$dj" == null || "$dj" =~ ^[0-9a-fA-F]{32}$ ]]; then
+  IFS=$'\t' read -r pj sj <<< "$mj"
+  if ! valid_repo_file "$pj" .onnx.json || ! valid_size "$sj" "$SIDECAR_MAX_BYTES"; then
     add_failure "$report" "$voice" "invalid voice config metadata"
     return 1
   fi
-  dj="${dj,,}"
+  dj="$(digest_for "$pj")" || {
+    add_failure "$report" "$voice" "voice config is not in this release's verified manifest"
+    return 1
+  }
   model_stage="$VOICES_DIR/.$voice.onnx.stage.$BASHPID"
   sidecar_stage="$VOICES_DIR/.$voice.onnx.json.stage.$BASHPID"
   model_backup="$VOICES_DIR/.$voice.onnx.previous.$BASHPID"
@@ -864,8 +854,8 @@ case "${1:-}" in
     ;;
   refresh)
     [[ $# -eq 1 ]] || die "refresh takes no arguments"
-    ensure_catalogue yes || die "could not refresh the voice catalogue; existing cache was kept"
-    echo "Catalogue refreshed ($(jq 'length' "$CATALOGUE") voices)" ;;
+    ensure_catalogue || die "the shipped voice catalogue is damaged; reinstall the plugin"
+    echo "The voice catalogue is pinned to rhasspy/piper-voices@${PIPER_VOICES_REV:0:12} and ships with the plugin ($(jq 'length' "$CATALOGUE") voices); it updates with the plugin, not over the network." ;;
   browse)
     [[ $# -eq 1 ]] || die "browse takes no arguments"
     command -v xdg-open >/dev/null 2>&1 || die "xdg-open is not installed"

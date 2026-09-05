@@ -66,7 +66,11 @@ environment under `~/.local/share/omarchy-tts/`. The release pins its direct
 engine packages to known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses
 `kokoro==0.9.4` and `soundfile==0.14.0` in a supported Python 3.12 environment,
 plus its pinned language-model artifact; EasyOCR uses `easyocr==1.7.2`. Voice models are
-downloaded only after confirmation and verified before installation. No
+downloaded only after confirmation, from one pinned revision of
+`rhasspy/piper-voices`, and each file is verified against a SHA-256 digest
+shipped in the plugin (`lib/piper-voices.sha256`) before installation; the
+voice catalogue ships with the plugin as well, so nothing about which voices
+exist or what they should hash to is read from a mutable branch. No
 installer runs merely because the plugin is added or enabled.
 
 ## Keys
@@ -112,7 +116,7 @@ speak-voice add en_GB-alba-medium # download (--async to background it)
 speak-voice use en_GB-alba-medium # make it the default
 speak-voice remove <voice>        # delete one
 speak-voice status                # progress of a download in flight
-speak-voice refresh               # re-fetch the catalogue
+speak-voice refresh               # check the shipped, pinned catalogue
 speak-voice browse                # listen to samples in a browser
 ```
 
@@ -130,7 +134,7 @@ a change straight after making it:
 - **Voice** — installed voice, speed, length limit, and **Browse all voices**:
   over 170 downloadable voices across 50+ languages, showing which
   are installed, with size and a one-click download that reports progress and
-  verifies the MD5 digest before installing.
+  verifies its SHA-256 against a digest shipped in the plugin before installing.
 - **Text** — live before/after sanitizer preview and readability rules.
 - **Screen** — OCR engine and confidence floor.
 - **Languages** — which languages the selected engine recognises, and installing more.
