@@ -17,12 +17,12 @@ api="https://huggingface.co/api/models/rhasspy/piper-voices"
 files="https://huggingface.co/rhasspy/piper-voices/resolve/$rev"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 
-curl -sSf --proto '=https' -L "$files/voices.json?download=true" -o "$work/voices.json"
+curl -sSf --proto '=https' --proto-redir '=https' -L "$files/voices.json?download=true" -o "$work/voices.json"
 jq -e 'type == "object" and length > 0' "$work/voices.json" >/dev/null
 
 url="$api/tree/$rev?recursive=true&expand=false"; : > "$work/tree.jsonl"
 while [[ -n "$url" ]]; do
-  curl -sSf --proto '=https' -D "$work/hdr" "$url" | jq -c '.[]' >> "$work/tree.jsonl"
+  curl -sSf --proto '=https' --proto-redir '=https' -D "$work/hdr" "$url" | jq -c '.[]' >> "$work/tree.jsonl"
   url="$(grep -i '^link:' "$work/hdr" | grep -o '<[^>]*>; rel="next"' | sed 's/<\(.*\)>.*/\1/' || true)"
 done
 
@@ -33,7 +33,7 @@ jq -r '.[].files | keys[]' "$work/voices.json" | grep -E '\.onnx(\.json)?$' | so
     [[ "$oid" =~ ^[0-9a-f]{64}$ ]] || { echo "no LFS digest for $path at $rev" >&2; exit 1; }
     printf '%s  %s\n' "$oid" "$path" >> "$work/sums"
   else
-    curl -sSf --proto '=https' -L "$files/$path?download=true" -o "$work/sidecar"
+    curl -sSf --proto '=https' --proto-redir '=https' -L "$files/$path?download=true" -o "$work/sidecar"
     printf '%s  %s\n' "$(sha256sum "$work/sidecar" | cut -d' ' -f1)" "$path" >> "$work/sums"
   fi
 done
