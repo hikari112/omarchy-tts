@@ -5,6 +5,24 @@ Versioning.
 
 ## Unreleased
 
+## 1.3.2 - 2026-09-06
+
+- Resolve `pkexec` and `pacman` at fixed canonical paths and admit them across
+  the privilege boundary only when the executable and every ancestor directory
+  are root-owned, not group- or world-writable, and free of symlink components,
+  re-checked immediately before each privileged call; nothing from `PATH` is
+  ever handed to `pkexec`.
+- Install every managed engine from a complete, hash-pinned dependency closure
+  shipped in the plugin (`lib/engines/*.lock`) with `uv pip sync
+  --require-hashes`, so no resolver result or index change can add code this
+  release did not review. The spaCy model wheel is part of the Kokoro lock.
+- Pin the EasyOCR and Kokoro model artefacts to immutable sources with SHA-256
+  digests shipped in `lib/engines/models.json`; the installer fetches and
+  verifies them itself (library downloaders are never enabled), and each engine
+  verifies the files again immediately before loading them. Kokoro runs with
+  the Hugging Face hub client offline.
+- `tools/pin-engines` regenerates the locks and re-checks the model manifest.
+
 ## 1.3.1 - 2026-09-04
 
 - Pin Piper voice downloads to one immutable revision of `rhasspy/piper-voices`

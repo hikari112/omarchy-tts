@@ -36,3 +36,23 @@ state use private permissions and atomic replacement. Runtime directories must
 be owned by the current user and cannot be symlinks. Config symlink targets are
 preserved deliberately, dangling targets are rejected, and interrupted engine
 or voice replacement is recovered transactionally on the next operation.
+
+## Supply chain
+
+Everything the plugin can execute or load after installation is fixed by the
+reviewed commit:
+
+- **Engine code**: `lib/engines/<engine>.lock` is the complete dependency
+  closure for Linux x86_64 / Python 3.12 with a SHA-256 for every
+  distribution; the installer applies it with `uv pip sync --require-hashes`.
+- **Model artefacts**: `lib/engines/models.json` (EasyOCR, Kokoro) and
+  `lib/piper-voices.sha256` (Piper voices) name immutable sources and digests.
+  Downloads that do not match are discarded; files are verified again before
+  every load; library downloaders are never enabled.
+- **Privilege boundary**: `pkexec` and `pacman` are used at fixed canonical
+  paths, verified root-owned and unwritable by others up to `/`, immediately
+  before each call. Only `uv` and `tesseract-data-*` packages are ever
+  installed this way, and only after an explicit click.
+
+`tools/pin-engines` and `tools/pin-piper-voices` regenerate these files so a
+bump is a reviewable diff.

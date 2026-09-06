@@ -12,9 +12,13 @@ import re
 from pathlib import Path
 import select
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
+import io
+import contextlib
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEAK = ROOT / "bin" / "speak"
@@ -1558,15 +1562,104 @@ class CliConfigTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["code"],
                          "confirmation_required")
 
-    def test_engine_setup_pins_packages_and_supported_kokoro_python(self):
+    def test_engine_setup_installs_only_hash_locked_closures(self):
+        """Every managed engine installs from a complete lock shipped in the
+        plugin, hash-enforced, and the installer never lets a library fetch
+        code or models on its own."""
         source = SETUP.read_text()
-        self.assertIn('PIPER_PACKAGE = "piper-tts==1.7.0"', source)
-        self.assertIn('KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")',
-                      source)
-        self.assertIn('KOKORO_PYTHON = "3.12"', source)
-        self.assertIn('EASYOCR_PACKAGES = ("easyocr==1.7.2",)', source)
-        self.assertIn('#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85',
-                      source)
+        self.assertIn('"--require-hashes"', source)
+        self.assertIn('"pip", "sync"', source)
+        self.assertNotIn('"pip", "install"', source)
+        self.assertNotIn("download_enabled=True", source)
+        for engine, top in (("piper", "piper-tts==1.7.0"), ("kokoro", "kokoro==0.9.4"),
+                            ("easyocr", "easyocr==1.7.2")):
+            spec = (ROOT / "lib" / "engines" / f"{engine}.in").read_text()
+            self.assertIn(top, spec, engine)
+            lock = (ROOT / "lib" / "engines" / f"{engine}.lock").read_text()
+            requirements = [line for line in lock.splitlines()
+                            if line and not line.startswith(("#", " ", "-"))]
+            self.assertTrue(requirements, engine)
+            for requirement in requirements:
+                name = requirement.split(" ")[0]
+                self.assertRegex(requirement, r"(==|@ https://)", f"{engine}: {name} is not pinned")
+                block = lock[lock.index(requirement):]
+                block = block[:block.find("\n\n") if "\n\n" in block else len(block)]
+                self.assertIn("--hash=sha256:", block.split("\n", 1)[1] if "\n" in block else "",
+                              f"{engine}: {name} has no hash")
+        kokoro = (ROOT / "lib" / "engines" / "kokoro.lock").read_text()
+        self.assertIn("en_core_web_sm-3.8.0-py3-none-any.whl", kokoro)
+        self.assertIn("sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85", kokoro)
+
+    def test_model_artefacts_are_pinned_to_immutable_sources_with_digests(self):
+        manifest = json.loads((ROOT / "lib" / "engines" / "models.json").read_text())
+        for name, entry in manifest["easyocr"]["models"].items():
+            self.assertRegex(entry["url"], r"^https://github\.com/JaidedAI/EasyOCR/releases/download/[^/]+/[^/]+\.zip$", name)
+            self.assertRegex(entry["archive_sha256"], r"^[0-9a-f]{64}$", name)
+            self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$", name)
+            self.assertGreater(entry["size"], 0)
+        kokoro = manifest["kokoro"]
+        self.assertRegex(kokoro["revision"], r"^[0-9a-f]{40}$")
+        for path in ("config.json", "kokoro-v1_0.pth", "voices/af_heart.pt"):
+            self.assertRegex(kokoro["files"][path]["sha256"], r"^[0-9a-f]{64}$", path)
+        provider = (ROOT / "providers" / "kokoro").read_text()
+        for voice in re.findall(r'"(a[fm]_[a-z]+|b[fm]_[a-z]+)"', (ROOT / "bin" / "speak").read_text()):
+            self.assertIn(f"voices/{voice}.pt", kokoro["files"], f"bundled voice {voice} has no digest")
+        self.assertIn("HF_HUB_OFFLINE=1", provider)
+        self.assertIn("weights_only=True", provider)
+        self.assertNotIn("download_enabled=True", (ROOT / "ocr" / "easyocr").read_text())
+
+    def test_privileged_helpers_are_fixed_paths_verified_at_use(self):
+        source = SETUP.read_text()
+        self.assertNotIn('which("pkexec")', source)
+        self.assertNotIn('which("pacman")', source)
+        self.assertIn('PKEXEC = Path("/usr/bin/pkexec")', source)
+        self.assertIn('PACMAN = Path("/usr/bin/pacman")', source)
+        setup = load_setup_module()
+        # A distribution-installed executable passes.
+        self.assertEqual(setup.trusted_system_executable(Path("/usr/bin/env")), "/usr/bin/env")
+        # Anything under a user-writable tree is refused, however it is named.
+        mine = Path(self.temp.name, "pacman")
+        mine.write_text("#!/usr/bin/env bash\nexit 0\n")
+        mine.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, "not owned by root|writable by other users"):
+            setup.trusted_system_executable(mine)
+        # Symlink components are refused before ownership is even considered.
+        link = Path(self.temp.name, "usr-bin-link")
+        link.symlink_to("/usr/bin")
+        with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+            setup.trusted_system_executable(link / "env")
+        # Relative and non-canonical spellings never reach the privilege helper.
+        for bad in (Path("usr/bin/env"), Path("/usr/bin/../bin/env")):
+            with self.assertRaisesRegex(RuntimeError, "non-canonical"):
+                setup.trusted_system_executable(bad)
+        # And the privileged call composes only from those checks.
+        calls = []
+        setup.run_checked = lambda argv, **kw: calls.append(argv)
+        setup.PKEXEC = Path("/usr/bin/env")
+        setup.PACMAN = Path("/usr/bin/env")
+        setup.privileged_pacman("uv")
+        self.assertEqual(calls, [["/usr/bin/env", "/usr/bin/env", "-S", "--noconfirm", "--needed", "uv"]])
+        setup.PACMAN = mine
+        with self.assertRaises(RuntimeError):
+            setup.privileged_pacman("uv")
+        self.assertEqual(len(calls), 1, "a refused package manager must never be executed")
+
+    def test_fetch_verified_rejects_a_digest_mismatch_and_keeps_nothing(self):
+        setup = load_setup_module()
+        served = Path(self.temp.name, "served.bin")
+        served.write_bytes(b"evil")
+        setup.run_checked = lambda argv, **kw: shutil.copy(served, argv[-1])
+        dest = Path(self.temp.name, "model.pth")
+        good = hashlib.sha256(b"good").hexdigest()
+        with self.assertRaisesRegex(RuntimeError, "does not match its shipped digest"):
+            setup.fetch_verified("https://example.invalid/model", dest, good, 4)
+        self.assertFalse(dest.exists())
+        self.assertEqual(list(Path(self.temp.name).glob("model.pth*")), [])
+        with self.assertRaisesRegex(RuntimeError, "unpinned source"):
+            setup.fetch_verified("http://example.invalid/model", dest, good, 4)
+        served.write_bytes(b"good")
+        setup.fetch_verified("https://example.invalid/model", dest, good, 4)
+        self.assertEqual(dest.read_bytes(), b"good")
 
     def test_engine_transaction_rolls_back_when_proof_fails(self):
         setup = load_setup_module()
@@ -1712,38 +1805,81 @@ class CliConfigTests(unittest.TestCase):
         self.assertNotIn("--raw", speak_line)
 
     def test_setup_registers_worker_identity_before_reporting_started(self):
-        tools = Path(self.temp.name, "setup-tools")
-        tools.mkdir()
-        for name, body in {
-            "pkexec": "exit 0",
-            "pacman": "exit 0",
-            "tesseract": (
-                "if [[ ${1:-} == --list-langs ]]; then\n"
-                "  printf 'List of available languages (1):\\neng\\n'\n"
-                "fi\n"
-                "exit 0"
-            ),
-        }.items():
-            tool = tools / name
-            tool.write_text(f"#!/usr/bin/env bash\n{body}\n")
-            tool.chmod(0o755)
-        self.env["PATH"] = f"{tools}:{self.env['PATH']}"
-
-        started = subprocess.run([SETUP, "start", "lang:eng"], env=self.env,
-                                 check=True, capture_output=True, text=True)
-        payload = json.loads(started.stdout)
-        self.assertTrue(payload["ok"])
-        state = Path(self.temp.name, "omarchy-tts", "setup.json")
-        registered = json.loads(state.read_text())
+        """start() must not acknowledge until the worker has published its
+        PID and start-time identity. The launcher seam stands in for the real
+        worker so no install target - and no privilege prompt - is needed."""
+        fake_worker = Path(self.temp.name, "fake-worker.py")
+        fake_worker.write_text(
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            "state = Path(os.environ['FAKE_WORKER_STATE'])\n"
+            "identity = Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')', 1)[1].split()[19]\n"
+            "base = {'pid': os.getpid(), 'processIdentity': identity, 'target': sys.argv[1], 'cancellable': True}\n"
+            "state.write_text(json.dumps({'status': 'running', 'step': 'prepare', 'progress': 2, 'message': 'Preparing', **base}))\n"
+            "time.sleep(0.2)\n"
+            "state.write_text(json.dumps({'status': 'done', 'step': 'complete', 'progress': 100, 'message': 'Ready', **base}))\n")
+        with unittest.mock.patch.dict(os.environ, self.env):
+            setup = load_setup_module()
+            setup.ensure_private_runtime()
+            os.environ["FAKE_WORKER_STATE"] = str(setup.STATE)
+            setup.worker_command = lambda target: [sys.executable, str(fake_worker), target]
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                setup.start("piper")
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"], payload)
+        registered = json.loads(setup.STATE.read_text())
         self.assertEqual(registered["pid"], payload["pid"])
         self.assertTrue(registered["processIdentity"])
-
         for _ in range(100):
-            current = json.loads(state.read_text())
+            current = json.loads(setup.STATE.read_text())
             if current["status"] in {"done", "error"}:
                 break
             time.sleep(0.02)
         self.assertEqual(current["status"], "done", current)
+
+    def test_engines_refuse_unverified_model_files_before_loading(self):
+        """A model file the manifest does not vouch for, or one that no longer
+        matches its digest, stops the engine before any Python starts."""
+        tools = Path(self.temp.name, "engine-tools")
+        tools.mkdir()
+        marker = Path(self.temp.name, "python-ran")
+        fake_python = tools / "python"
+        fake_python.write_text("#!/usr/bin/env bash\nprintf ran > \"$ENGINE_MARKER\"\nexit 0\n")
+        fake_python.chmod(0o755)
+        env = {**os.environ, "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(Path(self.temp.name, "c.json")),
+               "TTS_SILENT": "1", "ENGINE_MARKER": str(marker)}
+        Path(self.temp.name, "c.json").write_text("{}")
+        # EasyOCR: an unknown .pth in the model directory.
+        models = Path(self.temp.name, "easyocr-models")
+        models.mkdir()
+        (models / "surprise.pth").write_bytes(b"x")
+        result = subprocess.run([ROOT / "ocr" / "easyocr"], input=(ROOT / "lib" / "ocr-probe.png").read_bytes(),
+                                capture_output=True, env={**env, "EASYOCR_PYTHON": str(fake_python),
+                                                          "EASYOCR_MODELS": str(models), "TTS_OCR_LANGS": "eng"})
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn(b"not a verified model file", result.stderr)
+        self.assertFalse(marker.exists())
+        # EasyOCR: a known name whose bytes changed.
+        (models / "surprise.pth").unlink()
+        (models / "english_g2.pth").write_bytes(b"tampered")
+        result = subprocess.run([ROOT / "ocr" / "easyocr"], input=(ROOT / "lib" / "ocr-probe.png").read_bytes(),
+                                capture_output=True, env={**env, "EASYOCR_PYTHON": str(fake_python),
+                                                          "EASYOCR_MODELS": str(models), "TTS_OCR_LANGS": "eng"})
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn(b"failed verification", result.stderr)
+        self.assertFalse(marker.exists())
+        # Kokoro: the model directory has the right names with the wrong bytes.
+        kmodels = Path(self.temp.name, "kokoro-models")
+        (kmodels / "voices").mkdir(parents=True)
+        for name in ("config.json", "kokoro-v1_0.pth", "voices/af_heart.pt"):
+            (kmodels / name).write_bytes(b"tampered")
+        result = subprocess.run([ROOT / "providers" / "kokoro"], input=b"Probe.",
+                                capture_output=True, env={**env, "KOKORO_PYTHON": str(fake_python),
+                                                          "KOKORO_MODELS": str(kmodels), "TTS_VOICE": "af_heart"})
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn(b"failed verification", result.stderr)
+        self.assertFalse(marker.exists())
 
     def test_internal_background_workers_require_a_supervised_lock(self):
         setup = subprocess.run(
