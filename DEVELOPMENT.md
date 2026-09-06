@@ -103,3 +103,15 @@ tools/pin-piper-voices <40-hex revision>
 It rewrites `lib/piper-voices.json`, `lib/piper-voices.sha256`, and the
 `PIPER_VOICES_REV` constant in `bin/speak-voice`. Review the diff like any
 other dependency bump; the digests are the trust root for every download.
+
+## Re-locking engine dependencies and models
+
+```bash
+tools/pin-engines lock      # rebuild lib/engines/*.lock from *.in (uv, hashed)
+tools/pin-engines models    # re-fetch every pinned model artefact and confirm its digest
+```
+
+The locks are complete closures for Linux x86_64 / Python 3.12. To bump a
+model, edit `lib/engines/models.json` by hand with the new immutable source
+and digest, then run `models` to prove it. A digest that no longer matches is
+the event the manifest exists to catch, so the tool never rewrites one.

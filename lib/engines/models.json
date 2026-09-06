@@ -1,0 +1,76 @@
+{
+  "easyocr": {
+    "note": "EasyOCR model archives from JaidedAI/EasyOCR GitHub release assets; each archive and the model inside it are digest-verified.",
+    "models": {
+      "craft_mlt_25k.pth": {
+        "url": "https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/craft_mlt_25k.zip",
+        "archive_sha256": "8dc6a1c703a89ed56308ef742d26ebd45c656248cbbbda6e7fe60e569f873e65",
+        "archive_size": 77251756,
+        "sha256": "4a5efbfb48b4081100544e75e1e2b57f8de3d84f213004b14b85fd4b3748db17",
+        "size": 83152330
+      },
+      "english_g2.pth": {
+        "url": "https://github.com/JaidedAI/EasyOCR/releases/download/v1.3/english_g2.zip",
+        "archive_sha256": "1b5eaebf1c062de6205560c97ffcfa8dc0e6f413c340e8adc5cfc57e159f61ff",
+        "archive_size": 14040947,
+        "sha256": "e2272681d9d67a04e2dff396b6e95077bc19001f8f6d3593c307b9852e1c29e8",
+        "size": 15143997
+      }
+    }
+  },
+  "kokoro": {
+    "note": "hexgrad/Kokoro-82M at one immutable revision; model digests are the hub's LFS object ids, config.json was downloaded and hashed.",
+    "repo": "hexgrad/Kokoro-82M",
+    "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
+    "files": {
+      "config.json": {
+        "sha256": "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+        "size": 2351
+      },
+      "kokoro-v1_0.pth": {
+        "sha256": "496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4",
+        "size": 327212226
+      },
+      "voices/af_bella.pt": {
+        "sha256": "8cb64e02fcc8de0327a8e13817e49c76c945ecf0052ceac97d3081480e8e48d6",
+        "size": 523425
+      },
+      "voices/af_heart.pt": {
+        "sha256": "0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff",
+        "size": 523425
+      },
+      "voices/af_nicole.pt": {
+        "sha256": "c5561808bcf5250fe8c5f5de32caf2d94f27e57e95befdb098c5c85991d4c5da",
+        "size": 523430
+      },
+      "voices/af_sarah.pt": {
+        "sha256": "49bd364ea3be9eb3e9685e8f9a15448c4883112a7c0ff7ab139fa4088b08cef9",
+        "size": 523425
+      },
+      "voices/am_adam.pt": {
+        "sha256": "ced7e284aba12472891be1da3ab34db84cc05cc02b5889535796dbf2d8b0cb34",
+        "size": 523420
+      },
+      "voices/am_michael.pt": {
+        "sha256": "9a443b79a4b22489a5b0ab7c651a0bcd1a30bef675c28333f06971abbd47bd37",
+        "size": 523435
+      },
+      "voices/bf_emma.pt": {
+        "sha256": "d0a423deabf4a52b4f49318c51742c54e21bb89bbbe9a12141e7758ddb5da701",
+        "size": 523420
+      },
+      "voices/bf_isabella.pt": {
+        "sha256": "cdd4c37003805104d1d08fb1e05855c8fb2c68de24ca6e71f264a30aaa59eefd",
+        "size": 523440
+      },
+      "voices/bm_george.pt": {
+        "sha256": "f1bc812213dc59774769e5c80004b13eeb79bd78130b11b2d7f934542dab811b",
+        "size": 523430
+      },
+      "voices/bm_lewis.pt": {
+        "sha256": "b5204750dcba01029d2ac9cec17aec3b20a6d64073c579d694a23cb40effbd0e",
+        "size": 523425
+      }
+    }
+  }
+}

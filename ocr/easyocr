@@ -93,6 +93,22 @@ head -c "$((IMAGE_MAX_BYTES + 1))" > "$img"
 }
 [[ -s "$img" ]] || { printf 'speak: EasyOCR image is empty\n' >&2; exit 65; }
 
+# Every model file EasyOCR could load from this directory must be one the
+# plugin ships a digest for, and must still match it. A file the manifest does
+# not know is refused outright rather than skipped.
+MANIFEST="$TTS_PLUGIN_DIR/lib/engines/models.json"
+for model in "$MODELS"/*.pth; do
+  [[ -e "$model" ]] || continue
+  name="$(basename "$model")"
+  want="$(jq -r --arg f "$name" '.easyocr.models[$f].sha256 // empty' "$MANIFEST" 2>/dev/null)"
+  if [[ ! "$want" =~ ^[0-9a-f]{64}$ || -L "$model" ]]; then
+    printf 'speak: EasyOCR: %s is not a verified model file; reinstall EasyOCR from the Screen tab\n' "$name" >&2; exit 65
+  fi
+  if [[ "$(sha256sum "$model" | cut -d' ' -f1)" != "$want" ]]; then
+    printf 'speak: EasyOCR: %s failed verification; reinstall EasyOCR from the Screen tab\n' "$name" >&2; exit 65
+  fi
+done
+
 # Per-box confidence honours the same floor as tesseract, and paragraph mode
 # hands the sanitizer reflowed lines rather than one box per word.
 LANGS_JSON="$(printf '%s\n' "${codes[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')" \

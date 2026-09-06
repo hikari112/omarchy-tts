@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Regenerate the reviewed supply-chain data for the managed engines.
+#
+#   tools/pin-engines lock            rebuild lib/engines/*.lock from *.in
+#   tools/pin-engines models          re-fetch every model artefact in
+#                                     lib/engines/models.json and check its digest
+#
+# Locks are complete, hash-pinned dependency closures for Linux x86_64 and
+# Python 3.12, produced by uv; the installer applies them with
+# `uv pip sync --require-hashes`, so nothing outside a lock can be installed.
+# The models command proves the manifest still matches what the pinned
+# sources serve; it never rewrites a digest, because a digest that changed
+# is exactly the event the manifest exists to catch.
+set -euo pipefail
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+spec="$root/lib/engines"
+case "${1:-}" in
+  lock)
+    for engine in piper kokoro easyocr; do
+      uv pip compile --quiet --generate-hashes --python-version 3.12 \
+        --python-platform x86_64-unknown-linux-gnu --no-header --no-annotate \
+        "$spec/$engine.in" -o "$spec/$engine.lock"
+      printf '%s: %s requirements, %s hashes\n' "$engine" \
+        "$(grep -c '==\|@ ' "$spec/$engine.lock")" "$(grep -c 'sha256:' "$spec/$engine.lock")"
+    done ;;
+  models)
+    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    fetch() { curl -sSf --proto '=https' --proto-redir '=https' --max-filesize "$3" -L "$1" -o "$2"; }
+    jq -r '.easyocr.models | to_entries[] | "\(.key)\t\(.value.url)\t\(.value.archive_sha256)\t\(.value.archive_size)\t\(.value.sha256)"' "$spec/models.json" |
+    while IFS=$'\t' read -r name url asum asize sum; do
+      fetch "$url" "$work/$name.zip" "$asize"
+      [[ "$(sha256sum "$work/$name.zip" | cut -d' ' -f1)" == "$asum" ]] || { echo "ARCHIVE DIGEST CHANGED: $name" >&2; exit 1; }
+      unzip -oq "$work/$name.zip" "$name" -d "$work"
+      [[ "$(sha256sum "$work/$name" | cut -d' ' -f1)" == "$sum" ]] || { echo "MODEL DIGEST CHANGED: $name" >&2; exit 1; }
+      echo "easyocr $name ok"
+    done
+    repo="$(jq -r .kokoro.repo "$spec/models.json")"; rev="$(jq -r .kokoro.revision "$spec/models.json")"
+    jq -r '.kokoro.files | to_entries[] | "\(.key)\t\(.value.sha256)\t\(.value.size)"' "$spec/models.json" |
+    while IFS=$'\t' read -r path sum size; do
+      fetch "https://huggingface.co/$repo/resolve/$rev/$path?download=true" "$work/f" "$size"
+      [[ "$(sha256sum "$work/f" | cut -d' ' -f1)" == "$sum" ]] || { echo "MODEL DIGEST CHANGED: kokoro $path" >&2; exit 1; }
+      echo "kokoro $path ok"
+    done ;;
+  *) echo "usage: $0 lock|models" >&2; exit 64 ;;
+esac
