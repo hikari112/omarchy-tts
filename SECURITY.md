@@ -50,21 +50,29 @@ by the reviewed commit:
   publishes no wheel is shipped as a reviewed, reproducibly built wheel in
   `lib/engines/wheels` (digests in `SHA256SUMS`, checked before `uv` runs).
 - **Model artefacts**: `lib/engines/models.json` (EasyOCR, Kokoro) and
-  `lib/piper-voices.sha256` (Piper voices) name immutable sources and digests.
-  Downloads that do not match are discarded; files are verified again before
-  every load; library downloaders are never enabled and the Hugging Face hub
-  client runs offline.
+  `lib/piper-voices.sha256` (Piper voices) name fixed sources and digests:
+  Kokoro and Piper files come from one immutable repository revision; EasyOCR
+  archives come from fixed GitHub release-asset URLs, whose content is bound
+  by the shipped digest (a re-uploaded asset fails closed). Downloads that do
+  not match are discarded; files are verified again before every load; library
+  downloaders are never enabled and the Hugging Face hub client runs offline.
+- **Engines from earlier releases**: each environment records the digest of
+  the lock that built it; probes, status and the engines themselves treat an
+  environment without this release's digest as not installed.
 - **Privilege boundary**: `pkexec` and `pacman` are used at fixed canonical
   paths, verified root-owned and unwritable by others up to `/`, immediately
   before each call. Only `uv` and `tesseract-data-*` packages are ever
   installed this way, and only after an explicit click.
 
-Residual trust roots, stated so they can be judged: `uv` itself comes from the
-distribution's package repository, and when the system has no Python 3.12 it
-downloads a python-build-standalone interpreter that `uv` verifies against
-checksums compiled into `uv`; hash-locked wheels come from PyPI and model
-artefacts from GitHub and Hugging Face, but every one of those is bound by a
-digest in this repository, so those services can withhold a file, never
+Residual trust roots, stated so they can be judged: `uv` is used only at
+`/usr/bin/uv` from the distribution's repository (installed through the
+privileged path if absent), runs with `--no-config` and without `UV_*`/`PIP_*`
+overrides, and provides the Python 3.12 interpreter - one already on the
+system or a python-build-standalone build it downloads and verifies against
+checksums compiled into `uv`; a distribution-installed `piper` on `PATH` is
+accepted when no managed engine exists; hash-locked wheels come from PyPI and
+model artefacts from GitHub and Hugging Face, but every one of those is bound
+by a digest in this repository, so those services can withhold a file, never
 substitute one.
 
 `tools/pin-engines` and `tools/pin-piper-voices` regenerate these files so a

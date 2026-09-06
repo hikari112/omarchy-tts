@@ -2,7 +2,7 @@
 # desc: Best local quality. Heavy, slow to start.
 # title: Kokoro
 # kind: local
-# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" && -s "${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}/kokoro-v1_0.pth" ]]
+# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" && -s "${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}/kokoro-v1_0.pth" ]] && ( [[ -n "${KOKORO_PYTHON:-}" ]] || [[ "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/kokoro.lock" | cut -d' ' -f1)" ]] )
 # install: managed Python 3.12 venv from lib/engines/kokoro.lock · verified model files
 # voices: bundled
 # ratemin: 0.5
@@ -18,6 +18,17 @@ if [[ ! -x "$KPY" ]]; then
   echo "  Install it from the Provider tab." >&2
   notify-send -a "Speak" "Kokoro not installed" "See: speak --help" 2>/dev/null
   exit 127
+fi
+
+# An environment this release did not build from its shipped lock is not
+# an installed engine, whatever it contains.
+if [[ -z "${KOKORO_PYTHON:-}" ]]; then
+  ENGINE_DIR="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro"
+  if [[ "$(cat "$ENGINE_DIR/.lock-sha256" 2>/dev/null)" != "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/kokoro.lock" | cut -d' ' -f1)" ]]; then
+    echo "speak: kokoro was installed by an earlier release; reinstall it from the Provider tab." >&2
+    notify-send -a "Speak" "Kokoro needs reinstalling" "Reinstall it from the Provider tab." 2>/dev/null
+    exit 127
+  fi
 fi
 
 VOICE="${TTS_VOICE:-}"

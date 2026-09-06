@@ -20,7 +20,7 @@ Versioning.
   that publishes no wheel (`docopt`) ships as a reviewed, reproducibly built
   wheel in `lib/engines/wheels`, verified before `uv` runs. The spaCy model
   wheel is part of the Kokoro lock.
-- Pin the EasyOCR and Kokoro model artefacts to immutable sources with SHA-256
+- Pin the EasyOCR and Kokoro model artefacts to fixed sources with SHA-256
   digests shipped in `lib/engines/models.json`; the installer fetches and
   verifies them itself (library downloaders are never enabled), and each engine
   verifies the files again immediately before loading them. Kokoro runs with
@@ -30,9 +30,9 @@ Versioning.
   installer's staging rename (Piper failed its proof with exit 126).
 - CI applies every lock in hash-enforcing, wheel-only mode and checks that the
   locks regenerate byte-for-byte. `tools/pin-engines` maintains them.
-- **Upgrading:** Kokoro and EasyOCR installed by an earlier release keep their
-  models outside the verified tree and now show as not installed; reinstall
-  them from the Provider or Screen tab. Piper voices are unaffected.
+- **Upgrading:** every engine environment built by an earlier release shows as
+  not installed, because it was not built from this release's lock; reinstall
+  Piper, Kokoro or EasyOCR once from the panel. Piper voices are unaffected.
 
 ## 1.3.1 - 2026-09-04
 

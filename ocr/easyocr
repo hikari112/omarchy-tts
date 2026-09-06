@@ -2,7 +2,7 @@
 # desc: Stronger on stylised and low-contrast text. Heavy, slow to start.
 # title: EasyOCR
 # kind: local
-# probe: [[ -x "${EASYOCR_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/bin/python}" && -s "${EASYOCR_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/models}/craft_mlt_25k.pth" ]]
+# probe: [[ -x "${EASYOCR_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/bin/python}" && -s "${EASYOCR_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/models}/craft_mlt_25k.pth" ]] && ( [[ -n "${EASYOCR_PYTHON:-}" ]] || [[ "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/easyocr/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/easyocr.lock" | cut -d' ' -f1)" ]] )
 # install: easyocr
 # confidence: true
 # Reads a PNG on stdin, writes recognised text on stdout.
@@ -17,6 +17,13 @@ IMAGE_MAX_BYTES=52428800
 if [[ ! -x "$EPY" ]]; then
   echo "speak: EasyOCR is not installed; add it from the Screen tab." >&2
   notify-send -a "Speak" "EasyOCR not installed" "Add it from the Screen tab." 2>/dev/null
+  exit 127
+fi
+# An environment this release did not build from its shipped lock is not an
+# installed engine, whatever it contains.
+if [[ -z "${EASYOCR_PYTHON:-}" ]] && [[ "$(cat "$ENGINE_DIR/.lock-sha256" 2>/dev/null)" != "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/easyocr.lock" | cut -d' ' -f1)" ]]; then
+  echo "speak: EasyOCR was installed by an earlier release; reinstall it from the Screen tab." >&2
+  notify-send -a "Speak" "EasyOCR needs reinstalling" "Reinstall it from the Screen tab." 2>/dev/null
   exit 127
 fi
 
@@ -52,12 +59,14 @@ if [[ "${1:-}" == "--languages" ]]; then
       ["ara","Arabic","arabic_g2.pth"], ["hin","Hindi","devanagari_g2.pth"], ["tha","Thai","thai_g2.pth"],
       ["ell","Greek","greek_g2.pth"], ["heb","Hebrew","hebrew_g2.pth"] ]
     | map({value: .[0], label: .[1], model: .[2]})' |
-  MODELS="$MODELS" "$EPY" -c '
+  MODELS="$MODELS" MANIFEST="$TTS_PLUGIN_DIR/lib/engines/models.json" "$EPY" -c '
 import json, os, sys
 models = os.environ.get("MODELS", "")
+known = set(json.load(open(os.environ["MANIFEST"]))["easyocr"]["models"])
 rows = json.load(sys.stdin)
 for r in rows:
-    r["installed"] = os.path.exists(os.path.join(models, r.pop("model")))
+    model = r.pop("model")
+    r["installed"] = model in known and os.path.exists(os.path.join(models, model))
 rows.sort(key=lambda r: (not r["installed"], r["label"].lower()))
 print(json.dumps(rows))' 2>/dev/null || printf '[]'
   exit 0

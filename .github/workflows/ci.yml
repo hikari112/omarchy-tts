@@ -59,6 +59,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.8"
 
       - name: Engine locks are reproducible and wheel-only
         run: |
@@ -119,4 +121,32 @@ jobs:
         run: |
           for f in providers/* ocr/*; do
             grep -q '^# desc: ' "$f" || { echo "missing '# desc:' line: $f"; exit 1; }
+          done
+
+  engine-locks:
+    name: Engine locks install for real
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.8"
+
+      - name: Sync every lock in hash-enforcing, wheel-only mode and import the engine
+        run: |
+          set -euo pipefail
+          for engine in piper kokoro easyocr; do
+            uv --no-config venv --quiet --relocatable --python 3.12 "$RUNNER_TEMP/$engine"
+            uv --no-config pip sync --quiet --python "$RUNNER_TEMP/$engine/bin/python" \
+              --require-hashes --only-binary :all: --find-links lib/engines/wheels "lib/engines/$engine.lock"
+            case "$engine" in
+              piper)   "$RUNNER_TEMP/$engine/bin/python" -c "import piper" ;;
+              kokoro)  "$RUNNER_TEMP/$engine/bin/python" -c "import kokoro, spacy, docopt" ;;
+              easyocr) "$RUNNER_TEMP/$engine/bin/python" -c "import easyocr" ;;
+            esac
+            echo "$engine: $(uv --no-config pip freeze --python "$RUNNER_TEMP/$engine/bin/python" | wc -l) packages"
+            rm -rf "$RUNNER_TEMP/$engine"
           done

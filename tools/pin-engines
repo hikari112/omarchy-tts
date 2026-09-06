@@ -19,6 +19,9 @@ root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 spec="$root/lib/engines"
 case "${1:-}" in
   lock)
+    want_uv="$(tr -d '[:space:]' < "$spec/UV_VERSION")"
+    have_uv="$(uv --version | awk '{print $2}')"
+    [[ "$have_uv" == "$want_uv" ]] || { echo "locks are maintained with uv $want_uv (lib/engines/UV_VERSION); this is $have_uv" >&2; exit 65; }
     exclude_newer="$(tr -d '[:space:]' < "$spec/EXCLUDE_NEWER")"
     [[ "$exclude_newer" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "lib/engines/EXCLUDE_NEWER must hold an ISO-8601 UTC instant" >&2; exit 65; }
     # lib/engines/wheels is a flat index of reviewed wheels for dependencies

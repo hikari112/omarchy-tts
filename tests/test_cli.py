@@ -1619,7 +1619,11 @@ class CliConfigTests(unittest.TestCase):
     def test_engine_builders_run_exactly_the_locked_wheel_only_install(self):
         setup = load_setup_module()
         calls = []
-        setup.run_checked = lambda argv, **kw: calls.append(argv)
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[2] == "venv":
+                Path(argv[-1], "bin").mkdir(parents=True)
+        setup.run_checked = run
         setup.ensure_uv = lambda: "/usr/bin/uv"
         setup.install_kokoro_models = lambda models: calls.append(["models", str(models)])
         setup.install_easyocr_models = lambda models: calls.append(["models", str(models)])
@@ -1628,13 +1632,86 @@ class CliConfigTests(unittest.TestCase):
             calls.clear()
             target = Path(self.temp.name, f"stage-{engine}")
             build(target)
-            self.assertEqual(calls[0], ["/usr/bin/uv", "venv", "--relocatable", "--python", "3.12", str(target)], engine)
-            self.assertEqual(calls[1], ["/usr/bin/uv", "pip", "sync", "--python", str(target / "bin/python"),
+            self.assertEqual(calls[0], ["/usr/bin/uv", "--no-config", "venv", "--relocatable", "--python", "3.12", str(target)], engine)
+            self.assertEqual(calls[1], ["/usr/bin/uv", "--no-config", "pip", "sync", "--python", str(target / "bin/python"),
                                         "--require-hashes", "--only-binary", ":all:",
                                         "--find-links", str(setup.ENGINE_SPECS / "wheels"),
                                         str(setup.ENGINE_LOCKS[engine])], engine)
+            self.assertEqual((target / ".lock-sha256").read_text().strip(),
+                             hashlib.sha256(setup.ENGINE_LOCKS[engine].read_bytes()).hexdigest(), engine)
             if engine != "piper":
                 self.assertEqual(calls[2], ["models", str(target / "models")], engine)
+
+    def test_uv_is_only_the_distribution_binary_and_runs_without_overrides(self):
+        source = SETUP.read_text()
+        self.assertNotIn('which("uv")', source)
+        setup = load_setup_module()
+        setup.SYSTEM_UV = Path(self.temp.name, "not-there")
+        installed = []
+        setup.privileged_pacman = lambda *pkgs: installed.append(pkgs)
+        setup.write_state = lambda *a, **k: None
+        setup.PKEXEC = Path("/usr/bin/env")
+        setup.PACMAN = Path("/usr/bin/env")
+        with self.assertRaisesRegex(RuntimeError, "could not be found"):
+            setup.ensure_uv()
+        self.assertEqual(installed, [("uv",)], "a missing uv is installed through the privileged path, never taken from PATH")
+        with unittest.mock.patch.dict(os.environ, {"UV_INDEX_URL": "https://evil.invalid/simple",
+                                                   "UV_FIND_LINKS": "/tmp/evil", "PIP_INDEX_URL": "x",
+                                                   "UV_CACHE_DIR": "/tmp/cache", "HOME": self.temp.name}):
+            env = setup.uv_environment()
+        self.assertNotIn("UV_INDEX_URL", env)
+        self.assertNotIn("UV_FIND_LINKS", env)
+        self.assertNotIn("PIP_INDEX_URL", env)
+        self.assertEqual(env["UV_CACHE_DIR"], "/tmp/cache")
+        self.assertEqual(env["HOME"], self.temp.name)
+
+    def test_engines_from_other_releases_are_not_installed(self):
+        setup = load_setup_module()
+        setup.ENGINE = Path(self.temp.name, "engines")
+        (setup.ENGINE / "piper" / "bin").mkdir(parents=True)
+        self.assertFalse(setup.engine_built_from_lock("piper"), "no stamp: built by something else")
+        (setup.ENGINE / "piper" / ".lock-sha256").write_text("0" * 64 + "\n")
+        self.assertFalse(setup.engine_built_from_lock("piper"), "another lock's digest")
+        (setup.ENGINE / "piper" / ".lock-sha256").write_text(
+            hashlib.sha256(setup.ENGINE_LOCKS["piper"].read_bytes()).hexdigest() + "\n")
+        self.assertTrue(setup.engine_built_from_lock("piper"))
+        # and the engines themselves refuse such an environment before running anything
+        tools = Path(self.temp.name, "stale-tools")
+        tools.mkdir()
+        marker = Path(self.temp.name, "stale-ran")
+        (tools / "python").write_text("#!/usr/bin/env bash\nprintf ran > \"$ENGINE_MARKER\"\nexit 0\n")
+        (tools / "python").chmod(0o755)
+        data = Path(self.temp.name, "stale-data")
+        for engine in ("kokoro", "easyocr"):
+            (data / "engines" / engine / "bin").mkdir(parents=True)
+            shutil.copy(tools / "python", data / "engines" / engine / "bin" / "python")
+            (data / "engines" / engine / "models").mkdir()
+        (data / "engines" / "kokoro" / "models" / "kokoro-v1_0.pth").write_bytes(b"x")
+        (data / "engines" / "easyocr" / "models" / "craft_mlt_25k.pth").write_bytes(b"x")
+        env = {**os.environ, "TTS_PLUGIN_DIR": str(ROOT), "TTS_DATA_DIR": str(data),
+               "TTS_CONFIG": str(Path(self.temp.name, "c.json")), "TTS_SILENT": "1", "ENGINE_MARKER": str(marker)}
+        Path(self.temp.name, "c.json").write_text("{}")
+        for script in (ROOT / "providers" / "kokoro", ROOT / "ocr" / "easyocr"):
+            result = subprocess.run([script], input=b"Probe.", capture_output=True, env=env)
+            self.assertEqual(result.returncode, 127, (script.name, result.stderr))
+            self.assertIn(b"installed by an earlier release", result.stderr, script.name)
+            self.assertFalse(marker.exists(), script.name)
+
+    def test_language_install_goes_through_the_privileged_path_only(self):
+        setup = load_setup_module()
+        calls = []
+        setup.PKEXEC = Path("/usr/bin/env")
+        setup.language_package = lambda code: f"tesseract-data-{code}"
+        setup.privileged_pacman = lambda *pkgs: calls.append(pkgs)
+        setup.write_state = lambda *a, **k: None
+        setup.subprocess = unittest.mock.MagicMock()
+        setup.subprocess.run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+        setup.install_language("deu")
+        self.assertEqual(calls, [("tesseract-data-deu",)])
+        setup.PKEXEC = Path(self.temp.name, "pkexec")
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            setup.install_language("deu")
+        self.assertEqual(len(calls), 1)
 
     def test_reviewed_wheel_index_is_verified_before_uv_runs(self):
         setup = load_setup_module()
@@ -1704,6 +1781,8 @@ class CliConfigTests(unittest.TestCase):
         data = Path(self.temp.name, "piper-data")
         (data / "engines" / "piper" / "bin").mkdir(parents=True)
         shutil.copy(fake_piper, data / "engines" / "piper" / "bin" / "piper")
+        (data / "engines" / "piper" / ".lock-sha256").write_text(
+            hashlib.sha256((ROOT / "lib" / "engines" / "piper.lock").read_bytes()).hexdigest() + "\n")
         env = {**os.environ, "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(Path(self.temp.name, "c.json")),
                "TTS_DATA_DIR": str(data), "PIPER_VOICES_DIR": str(voices), "TTS_SILENT": "1",
                "PIPER_MARKER": str(marker), "XDG_RUNTIME_DIR": str(Path(self.temp.name, "run"))}

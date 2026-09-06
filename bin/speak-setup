@@ -58,6 +58,7 @@ ENGINE_SPECS = PLUGIN / "lib" / "engines"
 # reproducibly from the hash-verified sdist (see DEVELOPMENT.md).
 ENGINE_LOCKS = {name: ENGINE_SPECS / f"{name}.lock" for name in ("piper", "kokoro", "easyocr")}
 MODEL_MANIFEST = ENGINE_SPECS / "models.json"
+LOCK_STAMP = ".lock-sha256"
 ENGINE_PYTHON = "3.12"
 KOKORO_PYTHON = ENGINE_PYTHON
 # The privilege boundary takes fixed canonical paths, never a PATH lookup:
@@ -219,6 +220,20 @@ def piper_binary() -> Path:
     return ENGINE / "piper" / "bin" / "piper"
 
 
+def engine_built_from_lock(name: str) -> bool:
+    """True only for an engine directory whose recorded lock digest equals
+    the lock this plugin ships; anything else is not this release's engine."""
+    stamp = ENGINE / name / LOCK_STAMP
+    lock = ENGINE_LOCKS.get(name)
+    try:
+        if stamp.is_symlink() or lock is None or lock.is_symlink():
+            return False
+        recorded = stamp.read_text().strip()
+        return bool(re.fullmatch(r"[0-9a-f]{64}", recorded)) and recorded == sha256_file(lock)
+    except OSError:
+        return False
+
+
 def nonempty_file(path: Path) -> bool:
     """Treat concurrent removal or an unreadable model as not installed."""
     try:
@@ -230,7 +245,7 @@ def nonempty_file(path: Path) -> bool:
 def status() -> dict:
     voice = VOICES / f"{DEFAULT_VOICE}.onnx"
     legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
-    engine_ready = os.access(piper_binary(), os.X_OK) or shutil.which("piper") is not None
+    engine_ready = engine_built_from_lock("piper") or shutil.which("piper") is not None
     voice_ready = ((nonempty_file(voice) and nonempty_file(Path(f"{voice}.json")))
                    or (nonempty_file(legacy_voice)
                        and nonempty_file(Path(f"{legacy_voice}.json"))))
@@ -304,13 +319,14 @@ def privileged_pacman(*packages: str) -> None:
 
 
 def ensure_uv() -> str:
+    """Only the distribution's uv builds engines. A uv found on PATH would be
+    a user-writable binary deciding what the hash-locked install does, so it
+    is not consulted; if the system has none, it is installed through the
+    same privileged path as every other package."""
     try:
         return trusted_system_executable(SYSTEM_UV)
     except RuntimeError:
         pass
-    uv = shutil.which("uv")
-    if uv:
-        return uv
     try:
         trusted_system_executable(PKEXEC)
         trusted_system_executable(PACMAN)
@@ -326,6 +342,15 @@ def ensure_uv() -> str:
         raise RuntimeError("uv was installed but could not be found") from exc
 
 
+def uv_environment() -> dict:
+    """uv reads index, find-links and python-source overrides from UV_* and
+    PIP_* variables and from ~/.config/uv/uv.toml. None of those may steer a
+    locked install, so they are dropped (the cache location is kept)."""
+    keep = {"UV_CACHE_DIR"}
+    return {k: v for k, v in os.environ.items()
+            if not ((k.startswith("UV_") and k not in keep) or k.startswith("PIP_"))}
+
+
 def sync_locked(uv: str, python: str, engine: str) -> None:
     """Install exactly the reviewed closure: every requirement pinned and
     hash-checked, wheels only so no build backend is ever resolved, nothing
@@ -336,9 +361,13 @@ def sync_locked(uv: str, python: str, engine: str) -> None:
     if lock.is_symlink() or not lock.is_file():
         raise RuntimeError(f"The {engine} dependency lock is missing from the plugin")
     verify_reviewed_wheels()
-    run_checked([uv, "pip", "sync", "--python", python, "--require-hashes",
+    run_checked([uv, "--no-config", "pip", "sync", "--python", python, "--require-hashes",
                  "--only-binary", ":all:", "--find-links", str(ENGINE_SPECS / "wheels"),
-                 str(lock)])
+                 str(lock)], env=uv_environment())
+    # Record which reviewed lock built this environment. Probes and providers
+    # require it to match the shipped lock, so an environment built by an
+    # earlier release - or by anything else - is not treated as installed.
+    (Path(python).parent.parent / LOCK_STAMP).write_text(sha256_file(lock) + "\n")
 
 
 def verify_reviewed_wheels() -> None:
@@ -459,11 +488,11 @@ def create_venv(uv: str, target: Path, python_version: str | None = None) -> Non
     # place on success. Console scripts carry an absolute shebang unless the
     # venv is relocatable, and a shebang naming the staging path fails with
     # exit 126 the moment the rename lands.
-    argv = [uv, "venv", "--relocatable"]
+    argv = [uv, "--no-config", "venv", "--relocatable"]
     if python_version is not None:
         argv.extend(["--python", python_version])
     argv.append(str(target))
-    run_checked(argv)
+    run_checked(argv, env=uv_environment())
 
 
 def build_piper(target: Path) -> None:

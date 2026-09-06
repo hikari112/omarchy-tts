@@ -2,7 +2,7 @@
 # desc: Fast, natural, runs here. The default.
 # title: Piper
 # kind: local
-# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (for model in "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"/*.onnx "$HOME/.local/share/piper-voices"/*.onnx; do [[ -s "$model" && -s "$model.json" ]] && exit 0; done; exit 1)
+# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" && "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/piper.lock" | cut -d' ' -f1)" ]] || command -v piper >/dev/null) && (for model in "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"/*.onnx "$HOME/.local/share/piper-voices"/*.onnx; do [[ -s "$model" && -s "$model.json" ]] && exit 0; done; exit 1)
 # install: managed venv · piper-tts==1.7.0
 # voices: downloadable
 # ratemin: 0.5
@@ -10,7 +10,11 @@
 set -uo pipefail
 umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
-PIPER_BIN="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper"
+# The managed engine counts only when it was built from the lock this
+# release ships; otherwise fall through to a distribution-installed piper.
+ENGINE_DIR="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper"
+PIPER_BIN="$ENGINE_DIR/bin/piper"
+if [[ "$(cat "$ENGINE_DIR/.lock-sha256" 2>/dev/null)" != "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/piper.lock" | cut -d' ' -f1)" ]]; then PIPER_BIN=""; fi
 [[ -x "$PIPER_BIN" ]] || PIPER_BIN="$(command -v piper || true)"
 [[ -n "$PIPER_BIN" ]] || need piper "install it from the Provider tab"
 
