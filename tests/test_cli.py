@@ -6,6 +6,7 @@ import importlib.util
 import hashlib
 import json
 import uuid
+import zipfile
 import shutil
 import os
 import re
@@ -1564,31 +1565,159 @@ class CliConfigTests(unittest.TestCase):
 
     def test_engine_setup_installs_only_hash_locked_closures(self):
         """Every managed engine installs from a complete lock shipped in the
-        plugin, hash-enforced, and the installer never lets a library fetch
-        code or models on its own."""
+        plugin, hash-enforced and wheel-only, and the installer never lets a
+        library fetch code or models on its own."""
         source = SETUP.read_text()
-        self.assertIn('"--require-hashes"', source)
+        self.assertIn('"--require-hashes",', source)
+        self.assertIn('"--only-binary", ":all:"', source)
+        self.assertIn('"--find-links", str(ENGINE_SPECS / "wheels")', source)
         self.assertIn('"pip", "sync"', source)
         self.assertNotIn('"pip", "install"', source)
         self.assertNotIn("download_enabled=True", source)
+        self.assertIn('"venv", "--relocatable"', source)
         for engine, top in (("piper", "piper-tts==1.7.0"), ("kokoro", "kokoro==0.9.4"),
                             ("easyocr", "easyocr==1.7.2")):
             spec = (ROOT / "lib" / "engines" / f"{engine}.in").read_text()
             self.assertIn(top, spec, engine)
-            lock = (ROOT / "lib" / "engines" / f"{engine}.lock").read_text()
-            requirements = [line for line in lock.splitlines()
-                            if line and not line.startswith(("#", " ", "-"))]
-            self.assertTrue(requirements, engine)
-            for requirement in requirements:
-                name = requirement.split(" ")[0]
-                self.assertRegex(requirement, r"(==|@ https://)", f"{engine}: {name} is not pinned")
-                block = lock[lock.index(requirement):]
-                block = block[:block.find("\n\n") if "\n\n" in block else len(block)]
-                self.assertIn("--hash=sha256:", block.split("\n", 1)[1] if "\n" in block else "",
-                              f"{engine}: {name} has no hash")
-        kokoro = (ROOT / "lib" / "engines" / "kokoro.lock").read_text()
-        self.assertIn("en_core_web_sm-3.8.0-py3-none-any.whl", kokoro)
-        self.assertIn("sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85", kokoro)
+            blocks = self.lock_blocks((ROOT / "lib" / "engines" / f"{engine}.lock").read_text())
+            self.assertTrue(blocks, engine)
+            for requirement, hashes in blocks:
+                self.assertRegex(requirement, r"(==|@ https://)", f"{engine}: {requirement} is not pinned")
+                self.assertTrue(hashes, f"{engine}: {requirement} has no hash")
+                for digest in hashes:
+                    self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertNotIn("./", "".join(r for r, _ in blocks), f"{engine}: path requirements are not allowed in a lock")
+        kokoro = dict(self.lock_blocks((ROOT / "lib" / "engines" / "kokoro.lock").read_text()))
+        spacy = next(r for r in kokoro if r.startswith("en-core-web-sm @"))
+        self.assertIn("1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85", kokoro[spacy])
+        # The one dependency without a published wheel is served from the
+        # reviewed flat index, and the lock admits exactly that wheel.
+        wheels = ROOT / "lib" / "engines" / "wheels"
+        sums = dict(line.split("  ", 1)[::-1] for line in (wheels / "SHA256SUMS").read_text().splitlines())
+        self.assertEqual(set(sums), {p.name for p in wheels.iterdir() if p.name != "SHA256SUMS"})
+        for name, digest in sums.items():
+            self.assertEqual(hashlib.sha256((wheels / name).read_bytes()).hexdigest(), digest, name)
+        self.assertEqual(kokoro["docopt==0.6.2"], [sums["docopt-0.6.2-py2.py3-none-any.whl"]])
+        self.assertRegex((ROOT / "lib" / "engines" / "EXCLUDE_NEWER").read_text().strip(),
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    @staticmethod
+    def lock_blocks(lock):
+        """[(requirement, [hashes])] from a uv requirements lock."""
+        blocks, current = [], None
+        for line in lock.splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            if line.startswith(" "):
+                for digest in re.findall(r"--hash=sha256:([0-9a-f]+)", line):
+                    current[1].append(digest)
+            else:
+                current = [line.rstrip(" \\").strip(), []]
+                blocks.append(current)
+        return [(r, h) for r, h in blocks]
+
+    def test_engine_builders_run_exactly_the_locked_wheel_only_install(self):
+        setup = load_setup_module()
+        calls = []
+        setup.run_checked = lambda argv, **kw: calls.append(argv)
+        setup.ensure_uv = lambda: "/usr/bin/uv"
+        setup.install_kokoro_models = lambda models: calls.append(["models", str(models)])
+        setup.install_easyocr_models = lambda models: calls.append(["models", str(models)])
+        setup.write_state = lambda *a, **k: None
+        for engine, build in (("piper", setup.build_piper), ("kokoro", setup.build_kokoro), ("easyocr", setup.build_easyocr)):
+            calls.clear()
+            target = Path(self.temp.name, f"stage-{engine}")
+            build(target)
+            self.assertEqual(calls[0], ["/usr/bin/uv", "venv", "--relocatable", "--python", "3.12", str(target)], engine)
+            self.assertEqual(calls[1], ["/usr/bin/uv", "pip", "sync", "--python", str(target / "bin/python"),
+                                        "--require-hashes", "--only-binary", ":all:",
+                                        "--find-links", str(setup.ENGINE_SPECS / "wheels"),
+                                        str(setup.ENGINE_LOCKS[engine])], engine)
+            if engine != "piper":
+                self.assertEqual(calls[2], ["models", str(target / "models")], engine)
+
+    def test_reviewed_wheel_index_is_verified_before_uv_runs(self):
+        setup = load_setup_module()
+        specs = Path(self.temp.name, "engines")
+        shutil.copytree(ROOT / "lib" / "engines", specs)
+        setup.ENGINE_SPECS = specs
+        setup.ENGINE_LOCKS = {name: specs / f"{name}.lock" for name in ("piper", "kokoro", "easyocr")}
+        setup.verify_reviewed_wheels()
+        stray = specs / "wheels" / "extra-1.0-py3-none-any.whl"
+        stray.write_bytes(b"not reviewed")
+        with self.assertRaisesRegex(RuntimeError, "does not match its digest list"):
+            setup.verify_reviewed_wheels()
+        stray.unlink()
+        wheel = next(specs.glob("wheels/*.whl"))
+        wheel.write_bytes(wheel.read_bytes() + b"x")
+        with self.assertRaisesRegex(RuntimeError, "failed verification"):
+            setup.verify_reviewed_wheels()
+
+    def test_easyocr_model_extraction_takes_only_the_named_verified_member(self):
+        setup = load_setup_module()
+        model = b"model-bytes"
+        entry = {"url": "https://example.invalid/m.zip", "archive_sha256": "", "archive_size": 0,
+                 "sha256": hashlib.sha256(model).hexdigest(), "size": len(model)}
+        def archive_with(members):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as bundle:
+                for name, data in members.items():
+                    bundle.writestr(name, data)
+            return buffer.getvalue()
+        def install(members):
+            data = archive_with(members)
+            entry["archive_sha256"] = hashlib.sha256(data).hexdigest()
+            entry["archive_size"] = len(data)
+            setup.model_manifest = lambda: {"easyocr": {"models": {"english_g2.pth": entry}}}
+            setup.fetch_verified = lambda url, dest, sha, size: dest.write_bytes(data)
+            target = Path(self.temp.name, "models-" + uuid.uuid4().hex[:6])
+            setup.install_easyocr_models(target)
+            return target
+        # the named member is extracted, a sibling with a traversal name is ignored
+        target = install({"english_g2.pth": model, "../evil.pth": b"x", "other.pth": b"y"})
+        self.assertEqual((target / "english_g2.pth").read_bytes(), model)
+        self.assertEqual(sorted(p.name for p in target.iterdir()), ["english_g2.pth"])
+        # a member whose bytes differ from the shipped digest is refused (same
+        # length, so it is the digest and not the size check that catches it)
+        with self.assertRaisesRegex(RuntimeError, "does not match its shipped digest"):
+            install({"english_g2.pth": b"model-BYTES"})
+        # and a member of the wrong length never even reaches the digest
+        with self.assertRaisesRegex(RuntimeError, "size does not match"):
+            install({"english_g2.pth": b"tampered-bytes"})
+        # an archive without the member is refused
+        with self.assertRaisesRegex(RuntimeError, "does not contain the expected model"):
+            install({"something-else.pth": model})
+
+    def test_piper_verifies_catalogue_voices_before_loading(self):
+        tools = Path(self.temp.name, "piper-tools")
+        tools.mkdir()
+        marker = Path(self.temp.name, "piper-ran")
+        fake_piper = tools / "piper"
+        fake_piper.write_text("#!/usr/bin/env bash\nprintf ran > \"$PIPER_MARKER\"\ncat >/dev/null\n")
+        fake_piper.chmod(0o755)
+        voices = Path(self.temp.name, "voices")
+        voices.mkdir()
+        (voices / "en_US-amy-medium.onnx").write_bytes(b"not the real model")
+        (voices / "en_US-amy-medium.onnx.json").write_text('{"audio": {"sample_rate": 22050}}')
+        (voices / "custom-voice.onnx").write_bytes(b"my own model")
+        (voices / "custom-voice.onnx.json").write_text('{"audio": {"sample_rate": 22050}}')
+        data = Path(self.temp.name, "piper-data")
+        (data / "engines" / "piper" / "bin").mkdir(parents=True)
+        shutil.copy(fake_piper, data / "engines" / "piper" / "bin" / "piper")
+        env = {**os.environ, "TTS_PLUGIN_DIR": str(ROOT), "TTS_CONFIG": str(Path(self.temp.name, "c.json")),
+               "TTS_DATA_DIR": str(data), "PIPER_VOICES_DIR": str(voices), "TTS_SILENT": "1",
+               "PIPER_MARKER": str(marker), "XDG_RUNTIME_DIR": str(Path(self.temp.name, "run"))}
+        Path(self.temp.name, "run").mkdir(exist_ok=True)
+        Path(self.temp.name, "c.json").write_text("{}")
+        result = subprocess.run([ROOT / "providers" / "piper"], input=b"Probe.", capture_output=True,
+                                env={**env, "TTS_VOICE": "en_US-amy-medium"})
+        self.assertEqual(result.returncode, 65, result.stderr)
+        self.assertIn(b"failed verification", result.stderr)
+        self.assertFalse(marker.exists(), "a catalogue voice with the wrong bytes must never reach Piper")
+        result = subprocess.run([ROOT / "providers" / "piper"], input=b"Probe.", capture_output=True,
+                                env={**env, "TTS_VOICE": "custom-voice"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(marker.exists(), "a voice outside the catalogue is the user's own")
 
     def test_model_artefacts_are_pinned_to_immutable_sources_with_digests(self):
         manifest = json.loads((ROOT / "lib" / "engines" / "models.json").read_text())

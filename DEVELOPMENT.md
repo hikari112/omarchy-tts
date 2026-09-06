@@ -107,11 +107,29 @@ other dependency bump; the digests are the trust root for every download.
 ## Re-locking engine dependencies and models
 
 ```bash
-tools/pin-engines lock      # rebuild lib/engines/*.lock from *.in (uv, hashed)
+tools/pin-engines lock      # rebuild lib/engines/*.lock from *.in (uv, hashed, wheel-only)
 tools/pin-engines models    # re-fetch every pinned model artefact and confirm its digest
 ```
 
-The locks are complete closures for Linux x86_64 / Python 3.12. To bump a
-model, edit `lib/engines/models.json` by hand with the new immutable source
-and digest, then run `models` to prove it. A digest that no longer matches is
-the event the manifest exists to catch, so the tool never rewrites one.
+The locks are complete closures for Linux x86_64 / Python 3.12, compiled
+against the index as it stood at `lib/engines/EXCLUDE_NEWER`; move that
+instant forward to pick up newer releases, then re-run `lock`. CI fails if the
+locks do not regenerate byte-for-byte or if any requirement lacks a wheel.
+
+A dependency with no published wheel (today only `docopt`, via
+kokoro → misaki → num2words) is served from the reviewed flat index
+`lib/engines/wheels`. Its wheel is built reproducibly from the hash-verified
+sdist so a reviewer can recreate it bit-for-bit:
+
+```bash
+curl -sSLO https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz
+echo '49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491  docopt-0.6.2.tar.gz' | sha256sum -c
+tar xzf docopt-0.6.2.tar.gz && cd docopt-0.6.2
+SOURCE_DATE_EPOCH=0 uv build --wheel --out-dir ../dist .
+sha256sum ../dist/docopt-0.6.2-py2.py3-none-any.whl   # must match lib/engines/wheels/SHA256SUMS
+```
+
+To bump a model, edit `lib/engines/models.json` by hand with the new immutable
+source and digest, then run `models` to prove it. A digest that no longer
+matches is the event the manifest exists to catch, so the tool never rewrites
+one.

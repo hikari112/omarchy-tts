@@ -57,6 +57,29 @@ jobs:
       - name: ShellCheck
         run: shellcheck -x bin/speak bin/speak-voice providers/* ocr/* lib/*.sh tools/*
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Engine locks are reproducible and wheel-only
+        run: |
+          tools/pin-engines lock
+          git diff --exit-code -- lib/engines
+
+      - name: Engine locks apply in hash-enforcing, wheel-only mode
+        run: |
+          set -euo pipefail
+          for engine in piper kokoro easyocr; do
+            uv venv --quiet --relocatable --python 3.12 "$RUNNER_TEMP/$engine"
+            if [[ "$engine" == piper ]]; then
+              uv pip sync --quiet --python "$RUNNER_TEMP/$engine/bin/python" --require-hashes --only-binary :all: "lib/engines/$engine.lock"
+              "$RUNNER_TEMP/$engine/bin/python" -c "import piper"
+            else
+              # torch-sized closures are resolved, not downloaded: this proves every
+              # requirement has a hashed wheel for this platform.
+              uv pip install --dry-run --python "$RUNNER_TEMP/$engine/bin/python" --require-hashes --only-binary :all: -r "lib/engines/$engine.lock"
+            fi
+          done
+
       - name: Manifest is valid
         run: |
           jq -e . manifest.json > /dev/null

@@ -44,6 +44,25 @@ if [[ ! -s "$MODEL" || ! -s "$MODEL.json" ]]; then
   exit 1
 fi
 
+# A voice the plugin ships a digest for is verified right before Piper loads
+# it, the same way the other engines verify their models. Voices outside the
+# shipped catalogue (custom or legacy) are the user's own and get only the
+# structural checks above.
+DIGESTS="$TTS_PLUGIN_DIR/lib/piper-voices.sha256"
+if [[ "$MODEL" == "$VOICES_DIR/$VOICE.onnx" && -f "$DIGESTS" && "$VOICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  for suffix in .onnx .onnx.json; do
+    want="$(awk -v v="/$VOICE$suffix" '$1 !~ /^#/ && substr($2, length($2)-length(v)+1) == v { print tolower($1); exit }' "$DIGESTS" 2>/dev/null)"
+    [[ -n "$want" ]] || continue   # not a catalogue voice
+    [[ ! -L "$MODEL${suffix#.onnx}" ]] || { echo "speak: piper voice $VOICE$suffix is a symlink; repair it: speak-voice add $VOICE --repair" >&2; exit 65; }
+    got="$(sha256sum "$VOICES_DIR/$VOICE$suffix" | cut -d' ' -f1)"
+    [[ "$got" == "$want" ]] || {
+      echo "speak: piper voice $VOICE$suffix failed verification; repair it: speak-voice add $VOICE --repair" >&2
+      notify-send -a "Speak" "Voice failed verification" "Repair it: speak-voice add $VOICE --repair" 2>/dev/null
+      exit 65
+    }
+  done
+fi
+
 # Model config carries the real sample rate; guessing here causes chipmunks.
 RATE_HZ="$(jq -r '.audio.sample_rate // 22050' "$MODEL.json" 2>/dev/null)"
 [[ "$RATE_HZ" =~ ^[0-9]+$ ]] || RATE_HZ=22050

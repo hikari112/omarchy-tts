@@ -2,7 +2,7 @@
 # desc: Best local quality. Heavy, slow to start.
 # title: Kokoro
 # kind: local
-# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
+# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" && -s "${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}/kokoro-v1_0.pth" ]]
 # install: managed Python 3.12 venv from lib/engines/kokoro.lock · verified model files
 # voices: bundled
 # ratemin: 0.5

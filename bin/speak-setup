@@ -52,6 +52,10 @@ DEFAULT_VOICE = "en_US-amy-medium"
 # not review. Model artefacts come from lib/engines/models.json: immutable
 # sources with SHA-256 digests, verified at install and again before load.
 ENGINE_SPECS = PLUGIN / "lib" / "engines"
+# A dependency that publishes no wheel would force a source build, whose
+# build backend uv resolves unhashed from the index. Such packages are
+# instead shipped as reviewed wheels under lib/engines/wheels, built
+# reproducibly from the hash-verified sdist (see DEVELOPMENT.md).
 ENGINE_LOCKS = {name: ENGINE_SPECS / f"{name}.lock" for name in ("piper", "kokoro", "easyocr")}
 MODEL_MANIFEST = ENGINE_SPECS / "models.json"
 ENGINE_PYTHON = "3.12"
@@ -250,11 +254,11 @@ def status() -> dict:
 
 
 def run_checked(argv: list[str], *, env: dict | None = None,
-                timeout: int = INSTALL_TIMEOUT) -> None:
+                timeout: int = INSTALL_TIMEOUT, cwd: Path | None = None) -> None:
     """Run an installer without retaining an unbounded log in memory."""
     with tempfile.TemporaryFile() as log:
         try:
-            result = subprocess.run(argv, env=env, stdout=log,
+            result = subprocess.run(argv, env=env, stdout=log, cwd=cwd,
                                     stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"{argv[0]} did not finish within {timeout} seconds") from exc
@@ -324,11 +328,40 @@ def ensure_uv() -> str:
 
 def sync_locked(uv: str, python: str, engine: str) -> None:
     """Install exactly the reviewed closure: every requirement pinned and
-    hash-checked, nothing beyond the lock."""
+    hash-checked, wheels only so no build backend is ever resolved, nothing
+    beyond the lock. lib/engines/wheels is a flat index of the plugin's own
+    reviewed wheels for the few dependencies that publish none; a lock hash
+    admits only those exact files."""
     lock = ENGINE_LOCKS[engine]
     if lock.is_symlink() or not lock.is_file():
         raise RuntimeError(f"The {engine} dependency lock is missing from the plugin")
-    run_checked([uv, "pip", "sync", "--python", python, "--require-hashes", str(lock)])
+    verify_reviewed_wheels()
+    run_checked([uv, "pip", "sync", "--python", python, "--require-hashes",
+                 "--only-binary", ":all:", "--find-links", str(ENGINE_SPECS / "wheels"),
+                 str(lock)])
+
+
+def verify_reviewed_wheels() -> None:
+    """The flat index may hold only the wheels this commit reviewed. uv checks
+    the lock hash of whatever it picks; this checks the directory itself, so a
+    stray or altered file fails the install before uv is even asked."""
+    wheels = ENGINE_SPECS / "wheels"
+    sums = wheels / "SHA256SUMS"
+    if sums.is_symlink() or not sums.is_file():
+        raise RuntimeError("The reviewed wheel index has no digest list")
+    expected = {}
+    for line in sums.read_text().splitlines():
+        digest, _, name = line.partition("  ")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not re.fullmatch(r"[A-Za-z0-9._-]+\.whl", name):
+            raise RuntimeError("The reviewed wheel digest list is malformed")
+        expected[name] = digest
+    present = {entry.name for entry in wheels.iterdir() if entry.name != "SHA256SUMS"}
+    if present != set(expected):
+        raise RuntimeError("The reviewed wheel index does not match its digest list")
+    for name, digest in expected.items():
+        path = wheels / name
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != digest:
+            raise RuntimeError(f"Reviewed wheel {name} failed verification")
 
 
 def sha256_file(path: Path) -> str:

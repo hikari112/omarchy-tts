@@ -12,16 +12,27 @@ Versioning.
   are root-owned, not group- or world-writable, and free of symlink components,
   re-checked immediately before each privileged call; nothing from `PATH` is
   ever handed to `pkexec`.
-- Install every managed engine from a complete, hash-pinned dependency closure
-  shipped in the plugin (`lib/engines/*.lock`) with `uv pip sync
-  --require-hashes`, so no resolver result or index change can add code this
-  release did not review. The spaCy model wheel is part of the Kokoro lock.
+- Install every managed engine from a complete, hash-pinned, wheel-only
+  dependency closure shipped in the plugin (`lib/engines/*.lock`, reproducible
+  from `*.in` at the instant in `lib/engines/EXCLUDE_NEWER`) with `uv pip sync
+  --require-hashes --only-binary :all:`, so no resolver result, index change or
+  source build can add code this release did not review. The one dependency
+  that publishes no wheel (`docopt`) ships as a reviewed, reproducibly built
+  wheel in `lib/engines/wheels`, verified before `uv` runs. The spaCy model
+  wheel is part of the Kokoro lock.
 - Pin the EasyOCR and Kokoro model artefacts to immutable sources with SHA-256
   digests shipped in `lib/engines/models.json`; the installer fetches and
   verifies them itself (library downloaders are never enabled), and each engine
   verifies the files again immediately before loading them. Kokoro runs with
-  the Hugging Face hub client offline.
-- `tools/pin-engines` regenerates the locks and re-checks the model manifest.
+  the Hugging Face hub client offline. Piper voices from the shipped catalogue
+  are verified before load in the same way.
+- Build engine environments relocatable, so console scripts survive the
+  installer's staging rename (Piper failed its proof with exit 126).
+- CI applies every lock in hash-enforcing, wheel-only mode and checks that the
+  locks regenerate byte-for-byte. `tools/pin-engines` maintains them.
+- **Upgrading:** Kokoro and EasyOCR installed by an earlier release keep their
+  models outside the verified tree and now show as not installed; reinstall
+  them from the Provider or Screen tab. Piper voices are unaffected.
 
 ## 1.3.1 - 2026-09-04
 

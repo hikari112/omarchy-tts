@@ -68,11 +68,13 @@ environments under `~/.local/share/omarchy-tts/` from complete, hash-pinned
 dependency locks shipped in the plugin (`lib/engines/*.lock`, applied with
 `uv pip sync --require-hashes`): Piper (`piper-tts==1.7.0`), Kokoro
 (`kokoro==0.9.4` with its spaCy model wheel) and EasyOCR (`easyocr==1.7.2`),
-all on a managed Python 3.12. Model artefacts are pinned too: Piper voices
+all on Python 3.12 (`uv` fetches a checksummed interpreter if the system has
+none). Model artefacts are pinned too: Piper voices
 come from one revision of `rhasspy/piper-voices`, Kokoro's model, config and
 voices from one revision of `hexgrad/Kokoro-82M`, and EasyOCR's recognition
 models from fixed release archives, each verified against a SHA-256 shipped in
-the plugin when downloaded and again before it is loaded. Nothing is fetched
+the plugin when downloaded and again before it is loaded. Engines installed by
+a release before 1.3.2 must be reinstalled once from the panel. Nothing is fetched
 merely because the plugin is added or enabled, and no library is ever allowed
 to download on its own.
 
