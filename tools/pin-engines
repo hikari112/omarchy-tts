@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Regenerate the reviewed supply-chain data for the managed engines.
+#
+#   tools/pin-engines lock            rebuild lib/engines/*.lock from *.in
+#   tools/pin-engines models          re-fetch every model artefact in
+#                                     lib/engines/models.json and check its digest
+#
+# Locks are complete, hash-pinned, wheel-only dependency closures for Linux
+# x86_64 and Python 3.12, produced by uv against the index as it stood at the
+# instant in lib/engines/EXCLUDE_NEWER, so re-running this yields the same
+# lock. The installer applies them with `uv pip sync --require-hashes
+# --only-binary :all:`, so nothing outside a lock can be installed and no
+# source build - with its unpinned build backend - can ever run.
+# The models command proves the manifest still matches what the pinned
+# sources serve; it never rewrites a digest, because a digest that changed
+# is exactly the event the manifest exists to catch.
+set -euo pipefail
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+spec="$root/lib/engines"
+case "${1:-}" in
+  lock)
+    want_uv="$(tr -d '[:space:]' < "$spec/UV_VERSION")"
+    have_uv="$(uv --version | awk '{print $2}')"
+    [[ "$have_uv" == "$want_uv" ]] || { echo "locks are maintained with uv $want_uv (lib/engines/UV_VERSION); this is $have_uv" >&2; exit 65; }
+    exclude_newer="$(tr -d '[:space:]' < "$spec/EXCLUDE_NEWER")"
+    [[ "$exclude_newer" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "lib/engines/EXCLUDE_NEWER must hold an ISO-8601 UTC instant" >&2; exit 65; }
+    # lib/engines/wheels is a flat index of reviewed wheels for dependencies
+    # that publish none; with --only-binary it is the only candidate uv can
+    # take, so the lock records the reviewed wheel's hash and nothing else.
+    for engine in piper kokoro easyocr; do
+      uv pip compile --quiet --generate-hashes --only-binary :all: --python-version 3.12 \
+        --find-links "$spec/wheels" \
+        --python-platform x86_64-unknown-linux-gnu --no-header --no-annotate \
+        --exclude-newer "$exclude_newer" \
+        "$spec/$engine.in" -o "$spec/$engine.lock"
+      printf '%s: %s requirements, %s hashes\n' "$engine" \
+        "$(grep -c '==\|@ ' "$spec/$engine.lock")" "$(grep -c 'sha256:' "$spec/$engine.lock")"
+    done ;;
+  models)
+    work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+    fetch() { # url dest expected-size: the byte count is checked like the installer checks it
+      curl -sSf --proto '=https' --proto-redir '=https' --max-filesize "$3" -L "$1" -o "$2"
+      [[ "$(stat -c%s "$2")" == "$3" ]] || { echo "SIZE CHANGED: $1" >&2; exit 1; }
+    }
+    jq -r '.easyocr.models | to_entries[] | "\(.key)\t\(.value.url)\t\(.value.archive_sha256)\t\(.value.archive_size)\t\(.value.sha256)"' "$spec/models.json" |
+    while IFS=$'\t' read -r name url asum asize sum; do
+      fetch "$url" "$work/$name.zip" "$asize"
+      [[ "$(sha256sum "$work/$name.zip" | cut -d' ' -f1)" == "$asum" ]] || { echo "ARCHIVE DIGEST CHANGED: $name" >&2; exit 1; }
+      unzip -oq "$work/$name.zip" "$name" -d "$work"
+      [[ "$(stat -c%s "$work/$name")" == "$(jq -r --arg n "$name" '.easyocr.models[$n].size' "$spec/models.json")" ]] || { echo "MODEL SIZE CHANGED: $name" >&2; exit 1; }
+      [[ "$(sha256sum "$work/$name" | cut -d' ' -f1)" == "$sum" ]] || { echo "MODEL DIGEST CHANGED: $name" >&2; exit 1; }
+      echo "easyocr $name ok"
+    done
+    repo="$(jq -r .kokoro.repo "$spec/models.json")"; rev="$(jq -r .kokoro.revision "$spec/models.json")"
+    jq -r '.kokoro.files | to_entries[] | "\(.key)\t\(.value.sha256)\t\(.value.size)"' "$spec/models.json" |
+    while IFS=$'\t' read -r path sum size; do
+      fetch "https://huggingface.co/$repo/resolve/$rev/$path?download=true" "$work/f" "$size"
+      [[ "$(sha256sum "$work/f" | cut -d' ' -f1)" == "$sum" ]] || { echo "MODEL DIGEST CHANGED: kokoro $path" >&2; exit 1; }
+      echo "kokoro $path ok"
+    done ;;
+  *) echo "usage: $0 lock|models" >&2; exit 64 ;;
+esac

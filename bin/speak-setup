@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import zipfile
+import hashlib
 import json
 import os
 import re
@@ -43,9 +45,29 @@ VOICE_CACHE = CACHE_HOME / "omarchy-tts" / "voices"
 VOICE_TOOL = PLUGIN / "bin" / "speak-voice"
 BINDINGS_TOOL = PLUGIN / "bin" / "speak-bindings"
 DEFAULT_VOICE = "en_US-amy-medium"
-PIPER_PACKAGE = "piper-tts==1.7.0"
-KOKORO_PACKAGES = ("kokoro==0.9.4", "soundfile==0.14.0")
-KOKORO_PYTHON = "3.12"
+# Every managed engine installs from a complete, hash-pinned dependency
+# closure shipped with the plugin (lib/engines/<engine>.lock, produced by
+# `tools/pin-engines lock`) and applied with `uv pip sync --require-hashes`,
+# so a later resolver result or index change cannot add code this commit did
+# not review. Model artefacts come from lib/engines/models.json: immutable
+# sources with SHA-256 digests, verified at install and again before load.
+ENGINE_SPECS = PLUGIN / "lib" / "engines"
+# A dependency that publishes no wheel would force a source build, whose
+# build backend uv resolves unhashed from the index. Such packages are
+# instead shipped as reviewed wheels under lib/engines/wheels, built
+# reproducibly from the hash-verified sdist (see DEVELOPMENT.md).
+ENGINE_LOCKS = {name: ENGINE_SPECS / f"{name}.lock" for name in ("piper", "kokoro", "easyocr")}
+MODEL_MANIFEST = ENGINE_SPECS / "models.json"
+LOCK_STAMP = ".lock-sha256"
+ENGINE_PYTHON = "3.12"
+KOKORO_PYTHON = ENGINE_PYTHON
+# The privilege boundary takes fixed canonical paths, never a PATH lookup:
+# a user-writable executable earlier in PATH must not be what pkexec runs
+# as root. Both are re-verified immediately before every privileged call.
+PKEXEC = Path("/usr/bin/pkexec")
+PACMAN = Path("/usr/bin/pacman")
+SYSTEM_UV = Path("/usr/bin/uv")
+ARTEFACT_MAX_BYTES = 1_073_741_824
 JOB_PID = 0
 JOB_IDENTITY = ""
 JOB_TARGET = ""
@@ -198,6 +220,20 @@ def piper_binary() -> Path:
     return ENGINE / "piper" / "bin" / "piper"
 
 
+def engine_built_from_lock(name: str) -> bool:
+    """True only for an engine directory whose recorded lock digest equals
+    the lock this plugin ships; anything else is not this release's engine."""
+    stamp = ENGINE / name / LOCK_STAMP
+    lock = ENGINE_LOCKS.get(name)
+    try:
+        if stamp.is_symlink() or lock is None or lock.is_symlink():
+            return False
+        recorded = stamp.read_text().strip()
+        return bool(re.fullmatch(r"[0-9a-f]{64}", recorded)) and recorded == sha256_file(lock)
+    except OSError:
+        return False
+
+
 def nonempty_file(path: Path) -> bool:
     """Treat concurrent removal or an unreadable model as not installed."""
     try:
@@ -209,7 +245,7 @@ def nonempty_file(path: Path) -> bool:
 def status() -> dict:
     voice = VOICES / f"{DEFAULT_VOICE}.onnx"
     legacy_voice = DATA_HOME / "piper-voices" / f"{DEFAULT_VOICE}.onnx"
-    engine_ready = os.access(piper_binary(), os.X_OK) or shutil.which("piper") is not None
+    engine_ready = engine_built_from_lock("piper") or shutil.which("piper") is not None
     voice_ready = ((nonempty_file(voice) and nonempty_file(Path(f"{voice}.json")))
                    or (nonempty_file(legacy_voice)
                        and nonempty_file(Path(f"{legacy_voice}.json"))))
@@ -233,11 +269,11 @@ def status() -> dict:
 
 
 def run_checked(argv: list[str], *, env: dict | None = None,
-                timeout: int = INSTALL_TIMEOUT) -> None:
+                timeout: int = INSTALL_TIMEOUT, cwd: Path | None = None) -> None:
     """Run an installer without retaining an unbounded log in memory."""
     with tempfile.TemporaryFile() as log:
         try:
-            result = subprocess.run(argv, env=env, stdout=log,
+            result = subprocess.run(argv, env=env, stdout=log, cwd=cwd,
                                     stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"{argv[0]} did not finish within {timeout} seconds") from exc
@@ -248,41 +284,223 @@ def run_checked(argv: list[str], *, env: dict | None = None,
             raise RuntimeError((message or f"{argv[0]} failed")[-800:])
 
 
+def trusted_system_executable(path: Path) -> str:
+    """Admit an executable across the privilege boundary only if it is what
+    the distribution installed: an absolute canonical path with no symlink
+    component, owned by root, and not writable by group or others at any
+    level up to the filesystem root."""
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        raise RuntimeError(f"Refusing non-canonical executable path {path}")
+    for node in (path, *path.parents):
+        try:
+            info = os.lstat(node)
+        except OSError as exc:
+            raise RuntimeError(f"{path} is unavailable: {node} cannot be inspected") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise RuntimeError(f"Refusing {path}: {node} is a symbolic link")
+        if info.st_uid != 0:
+            raise RuntimeError(f"Refusing {path}: {node} is not owned by root")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError(f"Refusing {path}: {node} is writable by other users")
+    if not stat.S_ISREG(os.lstat(path).st_mode) or not os.access(path, os.X_OK):
+        raise RuntimeError(f"{path} is not an executable file")
+    return str(path)
+
+
+def privileged_pacman(*packages: str) -> None:
+    """Run the package manager as root through the fixed privilege helper.
+
+    The helper and the package manager are checked at the moment of use, not
+    at import or earlier in the job, so nothing can be swapped in between.
+    """
+    argv = [trusted_system_executable(PKEXEC), trusted_system_executable(PACMAN),
+            "-S", "--noconfirm", "--needed", *packages]
+    run_checked(argv)
+
+
 def ensure_uv() -> str:
-    uv = shutil.which("uv")
-    if uv:
-        return uv
-    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
-    if not pkexec or not pacman:
-        raise RuntimeError("The uv installer is unavailable")
+    """Only the distribution's uv builds engines. A uv found on PATH would be
+    a user-writable binary deciding what the hash-locked install does, so it
+    is not consulted; if the system has none, it is installed through the
+    same privileged path as every other package."""
+    try:
+        return trusted_system_executable(SYSTEM_UV)
+    except RuntimeError:
+        pass
+    try:
+        trusted_system_executable(PKEXEC)
+        trusted_system_executable(PACMAN)
+    except RuntimeError as exc:
+        raise RuntimeError(f"The uv installer is unavailable: {exc}") from exc
     write_state("running", "permission", 5,
                 "Administrator approval is required to install uv",
                 cancellable=False)
-    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", "uv"])
-    uv = shutil.which("uv")
-    if not uv:
-        raise RuntimeError("uv was installed but could not be found")
-    return uv
+    privileged_pacman("uv")
+    try:
+        return trusted_system_executable(SYSTEM_UV)
+    except RuntimeError as exc:
+        raise RuntimeError("uv was installed but could not be found") from exc
+
+
+def uv_environment() -> dict:
+    """uv reads index, find-links and python-source overrides from UV_* and
+    PIP_* variables and from ~/.config/uv/uv.toml. None of those may steer a
+    locked install, so they are dropped (the cache location is kept)."""
+    keep = {"UV_CACHE_DIR"}
+    return {k: v for k, v in os.environ.items()
+            if not ((k.startswith("UV_") and k not in keep) or k.startswith("PIP_"))}
+
+
+def sync_locked(uv: str, python: str, engine: str) -> None:
+    """Install exactly the reviewed closure: every requirement pinned and
+    hash-checked, wheels only so no build backend is ever resolved, nothing
+    beyond the lock. lib/engines/wheels is a flat index of the plugin's own
+    reviewed wheels for the few dependencies that publish none; a lock hash
+    admits only those exact files."""
+    lock = ENGINE_LOCKS[engine]
+    if lock.is_symlink() or not lock.is_file():
+        raise RuntimeError(f"The {engine} dependency lock is missing from the plugin")
+    verify_reviewed_wheels()
+    run_checked([uv, "--no-config", "pip", "sync", "--python", python, "--require-hashes",
+                 "--only-binary", ":all:", "--find-links", str(ENGINE_SPECS / "wheels"),
+                 str(lock)], env=uv_environment())
+    # Record which reviewed lock built this environment. Probes and providers
+    # require it to match the shipped lock, so an environment built by an
+    # earlier release - or by anything else - is not treated as installed.
+    (Path(python).parent.parent / LOCK_STAMP).write_text(sha256_file(lock) + "\n")
+
+
+def verify_reviewed_wheels() -> None:
+    """The flat index may hold only the wheels this commit reviewed. uv checks
+    the lock hash of whatever it picks; this checks the directory itself, so a
+    stray or altered file fails the install before uv is even asked."""
+    wheels = ENGINE_SPECS / "wheels"
+    sums = wheels / "SHA256SUMS"
+    if sums.is_symlink() or not sums.is_file():
+        raise RuntimeError("The reviewed wheel index has no digest list")
+    expected = {}
+    for line in sums.read_text().splitlines():
+        digest, _, name = line.partition("  ")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not re.fullmatch(r"[A-Za-z0-9._-]+\.whl", name):
+            raise RuntimeError("The reviewed wheel digest list is malformed")
+        expected[name] = digest
+    present = {entry.name for entry in wheels.iterdir() if entry.name != "SHA256SUMS"}
+    if present != set(expected):
+        raise RuntimeError("The reviewed wheel index does not match its digest list")
+    for name, digest in expected.items():
+        path = wheels / name
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != digest:
+            raise RuntimeError(f"Reviewed wheel {name} failed verification")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def model_manifest() -> dict:
+    if MODEL_MANIFEST.is_symlink() or not MODEL_MANIFEST.is_file():
+        raise RuntimeError("The model manifest is missing from the plugin")
+    data = json.loads(MODEL_MANIFEST.read_text())
+    if not isinstance(data, dict):
+        raise RuntimeError("The model manifest is malformed")
+    return data
+
+
+def fetch_verified(url: str, dest: Path, sha256: str, size: int) -> None:
+    """Download one artefact over HTTPS only and keep it only if it hashes to
+    the digest this commit ships. Anything else is deleted."""
+    if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise RuntimeError(f"Refusing artefact with an unpinned source or digest: {dest.name}")
+    if not isinstance(size, int) or size <= 0 or size > ARTEFACT_MAX_BYTES:
+        raise RuntimeError(f"Refusing artefact with an implausible size: {dest.name}")
+    part = dest.with_name(dest.name + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        run_checked(["curl", "-sSf", "--proto", "=https", "--proto-redir", "=https",
+                     "--connect-timeout", "15", "--max-time", "1800",
+                     "--max-filesize", str(size), "-L", url, "-o", str(part)])
+        if part.stat().st_size != size:
+            raise RuntimeError(f"{dest.name}: downloaded size does not match the manifest")
+        if sha256_file(part) != sha256:
+            raise RuntimeError(f"{dest.name}: downloaded artefact does not match its shipped digest")
+        part.replace(dest)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def install_easyocr_models(models: Path) -> None:
+    """Fetch each recognition model as a whole verified archive and extract
+    only the named member, verified again; the library's own downloader is
+    never enabled."""
+    manifest = model_manifest().get("easyocr", {}).get("models", {})
+    if not manifest:
+        raise RuntimeError("The model manifest has no EasyOCR entries")
+    models.mkdir(parents=True, exist_ok=True)
+    for name, entry in manifest.items():
+        if not re.fullmatch(r"[A-Za-z0-9_]+\.pth", name):
+            raise RuntimeError(f"Refusing model with an unexpected name: {name}")
+        archive = models / f".{name}.zip"
+        staged = models / f".{name}.part"
+        fetch_verified(entry["url"], archive, entry["archive_sha256"], entry["archive_size"])
+        try:
+            with zipfile.ZipFile(archive) as bundle:
+                member = bundle.getinfo(name)   # exact member name only, never a path
+                if member.file_size != entry["size"]:
+                    raise RuntimeError(f"{name}: archive member size does not match the manifest")
+                with bundle.open(member) as source, open(staged, "wb") as sink:
+                    shutil.copyfileobj(source, sink, 1 << 20)
+        except (KeyError, zipfile.BadZipFile) as exc:
+            raise RuntimeError(f"{name}: archive does not contain the expected model") from exc
+        finally:
+            archive.unlink(missing_ok=True)
+        if sha256_file(staged) != entry["sha256"]:
+            staged.unlink(missing_ok=True)
+            raise RuntimeError(f"{name}: extracted model does not match its shipped digest")
+        staged.replace(models / name)
+
+
+def install_kokoro_models(models: Path) -> None:
+    """Fetch the Kokoro model, config and bundled voices from one immutable
+    revision, each verified against its shipped digest."""
+    spec = model_manifest().get("kokoro", {})
+    repo, revision, files = spec.get("repo", ""), spec.get("revision", ""), spec.get("files", {})
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo) \
+            or not re.fullmatch(r"[0-9a-f]{40}", revision) or not files:
+        raise RuntimeError("The model manifest has no usable Kokoro entry")
+    for path, entry in files.items():
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.(json|pth|pt)", path):
+            raise RuntimeError(f"Refusing model file with an unexpected path: {path}")
+        dest = models / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fetch_verified(f"https://huggingface.co/{repo}/resolve/{revision}/{path}?download=true",
+                       dest, entry["sha256"], entry["size"])
 
 
 def create_venv(uv: str, target: Path, python_version: str | None = None) -> None:
     """Create a fresh managed environment at a private staging path."""
     if target.exists() or target.is_symlink():
         raise RuntimeError(f"Unsafe existing staging path: {target}")
-    argv = [uv, "venv"]
+    # The environment is built at a private staging path and renamed into
+    # place on success. Console scripts carry an absolute shebang unless the
+    # venv is relocatable, and a shebang naming the staging path fails with
+    # exit 126 the moment the rename lands.
+    argv = [uv, "--no-config", "venv", "--relocatable"]
     if python_version is not None:
         argv.extend(["--python", python_version])
     argv.append(str(target))
-    run_checked(argv)
+    run_checked(argv, env=uv_environment())
 
 
 def build_piper(target: Path) -> None:
     uv = ensure_uv()
     write_state("running", "engine", 15, "Preparing the Piper speech engine")
     target.parent.mkdir(parents=True, exist_ok=True)
-    create_venv(uv, target)
-    run_checked([uv, "pip", "install", "--python", str(target / "bin/python"),
-                 PIPER_PACKAGE])
+    create_venv(uv, target, ENGINE_PYTHON)
+    sync_locked(uv, str(target / "bin/python"), "piper")
 
 
 def install_voice() -> None:
@@ -308,9 +526,10 @@ def language_package(code: str) -> str:
     if not LANGUAGE_CODE.fullmatch(code):
         raise RuntimeError("Unsupported language code")
     package = f"tesseract-data-{code}"
-    pacman = shutil.which("pacman")
-    if not pacman:
-        raise RuntimeError("Package management is unavailable")
+    try:
+        pacman = trusted_system_executable(PACMAN)
+    except RuntimeError as exc:
+        raise RuntimeError("Package management is unavailable") from exc
     try:
         known = subprocess.run([pacman, "-Si", package], capture_output=True,
                                text=True, timeout=HELPER_TIMEOUT)
@@ -323,12 +542,13 @@ def language_package(code: str) -> str:
 
 def install_language(code: str) -> None:
     package = language_package(code)
-    pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
-    if not pkexec or not pacman:
-        raise RuntimeError("Graphical package installation is unavailable")
+    try:
+        trusted_system_executable(PKEXEC)
+    except RuntimeError as exc:
+        raise RuntimeError("Graphical package installation is unavailable") from exc
     write_state("running", "permission", 10, "Waiting for administrator approval",
                 cancellable=False)
-    run_checked([pkexec, pacman, "-S", "--noconfirm", "--needed", package])
+    privileged_pacman(package)
     write_state("running", "verify", 85, "Checking the language is available")
     speak = Path(__file__).resolve().parent / "speak"
     if speak.exists():
@@ -339,12 +559,9 @@ def install_language(code: str) -> None:
                                "The language installed, but recognition could not refresh it")
 
 
-# Kokoro's English G2P needs a spaCy model that is not on PyPI. Left out, it
-# tries to fetch the model at first use through spaCy's own downloader, which
-# shells out to pip—absent from a uv-created venv—after setup has completed.
-SPACY_MODEL = ("https://github.com/explosion/spacy-models/releases/download/"
-               "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
-               "#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85")
+# Kokoro's English G2P needs a spaCy model that is not on PyPI; it is part of
+# the kokoro lock as a hash-pinned wheel URL, so it installs with everything
+# else and spaCy never reaches for its own downloader.
 OCR_ENGINES = {"easyocr"}
 # Every cloud key the plugin will store. Google and OpenAI credentials are
 # shared by their speech and OCR adapters.
@@ -359,30 +576,23 @@ def build_kokoro(target: Path) -> None:
     # system Python, so ask uv for a supported interpreter instead of letting
     # installation depend on whichever version Arch happens to ship today.
     create_venv(uv, target, KOKORO_PYTHON)
-    python = str(target / "bin/python")
-    run_checked([uv, "pip", "install", "--python", python, *KOKORO_PACKAGES])
-    write_state("running", "engine", 60, "Installing the English language model")
-    run_checked([uv, "pip", "install", "--python", python, SPACY_MODEL])
+    sync_locked(uv, str(target / "bin/python"), "kokoro")
+    write_state("running", "engine", 60, "Downloading and verifying the Kokoro model and voices")
+    install_kokoro_models(target / "models")
 
-
-EASYOCR_PACKAGES = ("easyocr==1.7.2",)
 
 
 def build_easyocr(target: Path) -> None:
     uv = ensure_uv()
     write_state("running", "engine", 20, "Installing the EasyOCR engine (this is large)")
     target.parent.mkdir(parents=True, exist_ok=True)
-    create_venv(uv, target, KOKORO_PYTHON)
-    python = str(target / "bin/python")
-    run_checked([uv, "pip", "install", "--python", python, *EASYOCR_PACKAGES])
-    # The engine never downloads at read time - a screen capture must not turn
-    # into a surprise network fetch - so the English models are fetched here.
-    write_state("running", "engine", 70, "Downloading the English recognition models")
-    models = target / "models"
-    models.mkdir(parents=True, exist_ok=True)
-    run_checked([python, "-c",
-                 "import sys, easyocr; easyocr.Reader(['en'], gpu=False, verbose=False, "
-                 "model_storage_directory=sys.argv[1], download_enabled=True)", str(models)])
+    create_venv(uv, target, ENGINE_PYTHON)
+    sync_locked(uv, str(target / "bin/python"), "easyocr")
+    # The engine never downloads at read time, and neither does the installer
+    # through the library: each model comes from a pinned release archive and
+    # is digest-verified before it is placed where EasyOCR will load it.
+    write_state("running", "engine", 70, "Downloading and verifying the English recognition models")
+    install_easyocr_models(target / "models")
 
 
 def prove(target: str) -> None:
@@ -595,6 +805,10 @@ def worker(target: str) -> int:
         os.close(lock_fd)
 
 
+def worker_command(target: str) -> list[str]:
+    return [sys.executable, str(Path(__file__).resolve()), "_worker", target]
+
+
 def start(target: str) -> None:
     if target.startswith(LANGUAGE_PREFIX):
         try:
@@ -636,7 +850,7 @@ def start(target: str) -> None:
         worker_environment = os.environ.copy()
         worker_environment[SETUP_LOCK_FD_ENV] = str(lock_fd)
         process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "_worker", target],
+            worker_command(target),
             start_new_session=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             pass_fds=(lock_fd,),

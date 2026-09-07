@@ -61,17 +61,23 @@ from its configured Arch repositories.
 
 The guided local-engine setup is always explicit. It may request administrator
 approval through `pkexec` to install `uv` or a `tesseract-data-*` language
-pack (names are checked against `pacman -Si` first), then uses `uv` to create an isolated
-environment under `~/.local/share/omarchy-tts/`. The release pins its direct
-engine packages to known versions: Piper uses `piper-tts==1.7.0`; Kokoro uses
-`kokoro==0.9.4` and `soundfile==0.14.0` in a supported Python 3.12 environment,
-plus its pinned language-model artifact; EasyOCR uses `easyocr==1.7.2`. Voice models are
-downloaded only after confirmation, from one pinned revision of
-`rhasspy/piper-voices`, and each file is verified against a SHA-256 digest
-shipped in the plugin (`lib/piper-voices.sha256`) before installation; the
-voice catalogue ships with the plugin as well, so nothing about which voices
-exist or what they should hash to is read from a mutable branch. No
-installer runs merely because the plugin is added or enabled.
+pack; `pkexec` and `pacman` are used only at their fixed system paths, checked
+to be root-owned and unwritable by others immediately before each privileged
+call, never resolved from `PATH`. Engines are built with `uv` into isolated
+environments under `~/.local/share/omarchy-tts/` from complete, hash-pinned
+dependency locks shipped in the plugin (`lib/engines/*.lock`, applied with
+`uv pip sync --require-hashes`): Piper (`piper-tts==1.7.0`), Kokoro
+(`kokoro==0.9.4` with its spaCy model wheel) and EasyOCR (`easyocr==1.7.2`),
+all on Python 3.12 (`uv` fetches a checksummed interpreter if the system has
+none). Model artefacts are pinned too: Piper voices
+come from one revision of `rhasspy/piper-voices`, Kokoro's model, config and
+voices from one revision of `hexgrad/Kokoro-82M`, and EasyOCR's recognition
+models from fixed release archives, each verified against a SHA-256 shipped in
+the plugin when downloaded and again before it is loaded. Every engine
+environment records the lock that built it, so engines installed by a release
+before 1.3.2 show as not installed until reinstalled once from the panel. Nothing is fetched
+merely because the plugin is added or enabled, and no library is ever allowed
+to download on its own.
 
 ## Keys
 

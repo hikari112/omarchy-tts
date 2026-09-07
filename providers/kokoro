@@ -2,8 +2,8 @@
 # desc: Best local quality. Heavy, slow to start.
 # title: Kokoro
 # kind: local
-# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" ]]
-# install: managed Python 3.12 venv · kokoro==0.9.4
+# probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" && -s "${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}/kokoro-v1_0.pth" ]] && ( [[ -n "${KOKORO_PYTHON:-}" ]] || [[ "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/kokoro.lock" | cut -d' ' -f1)" ]] )
+# install: managed Python 3.12 venv from lib/engines/kokoro.lock · verified model files
 # voices: bundled
 # ratemin: 0.5
 # ratemax: 2.0
@@ -20,26 +20,62 @@ if [[ ! -x "$KPY" ]]; then
   exit 127
 fi
 
+# An environment this release did not build from its shipped lock is not
+# an installed engine, whatever it contains.
+if [[ -z "${KOKORO_PYTHON:-}" ]]; then
+  ENGINE_DIR="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro"
+  if [[ "$(cat "$ENGINE_DIR/.lock-sha256" 2>/dev/null)" != "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/kokoro.lock" | cut -d' ' -f1)" ]]; then
+    echo "speak: kokoro was installed by an earlier release; reinstall it from the Provider tab." >&2
+    notify-send -a "Speak" "Kokoro needs reinstalling" "Reinstall it from the Provider tab." 2>/dev/null
+    exit 127
+  fi
+fi
+
 VOICE="${TTS_VOICE:-}"
 [[ -z "$VOICE" ]] && VOICE="$(jq -r '.kokoro.voice // "af_heart"' "$TTS_CONFIG" 2>/dev/null)"
 [[ -z "$VOICE" || "$VOICE" == "null" ]] && VOICE="af_heart"
 
-# Torch and the HF hub client are chatty on stderr on every run; none of it is
-# actionable here, and it buries real errors.
-KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" \
-PYTHONWARNINGS=ignore HF_HUB_DISABLE_TELEMETRY=1 \
+# The model, its config and the chosen voice are the files the installer
+# verified against lib/engines/models.json; check them again here, right
+# before they are loaded, and never let the hub client reach the network.
+MODELS="${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}"
+MANIFEST="$TTS_PLUGIN_DIR/lib/engines/models.json"
+[[ "$VOICE" =~ ^[a-z]{2}_[a-z]+$ ]] || { echo "speak: kokoro: invalid voice name" >&2; exit 65; }
+verify_model() { # <relative path>
+  local want got
+  want="$(jq -r --arg f "$1" '.kokoro.files[$f].sha256 // empty' "$MANIFEST" 2>/dev/null)"
+  [[ "$want" =~ ^[0-9a-f]{64}$ ]] || { echo "speak: kokoro: $1 is not a verified model file" >&2; exit 65; }
+  [[ -f "$MODELS/$1" && ! -L "$MODELS/$1" ]] || { echo "speak: kokoro: $1 is missing; reinstall Kokoro from the Provider tab" >&2; exit 127; }
+  got="$(sha256sum "$MODELS/$1" | cut -d' ' -f1)"
+  [[ "$got" == "$want" ]] || { echo "speak: kokoro: $1 failed verification; reinstall Kokoro from the Provider tab" >&2; exit 65; }
+}
+verify_model config.json
+verify_model kokoro-v1_0.pth
+verify_model "voices/$VOICE.pt"
+
+# Torch is chatty on stderr on every run; none of it is actionable here, and
+# it buries real errors.
+KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" KOKORO_MODELS="$MODELS" \
+PYTHONWARNINGS=ignore HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 \
 "$KPY" 3<&0 - <<'KOKORO_PY' 2>/dev/null | play_raw 24000 1
 import os, sys, warnings
 warnings.filterwarnings("ignore")
 import numpy as np
-from kokoro import KPipeline
+import torch
+from kokoro import KModel, KPipeline
 
+models = os.environ["KOKORO_MODELS"]
 voice = os.environ.get("KOKORO_VOICE", "af_heart")
-pipe = KPipeline(lang_code=voice[0])
+# Local, verified files only: no repo lookup, no hub download.
+model = KModel(repo_id="hexgrad/Kokoro-82M",
+               config=os.path.join(models, "config.json"),
+               model=os.path.join(models, "kokoro-v1_0.pth")).eval()
+pipe = KPipeline(lang_code=voice[0], repo_id="hexgrad/Kokoro-82M", model=model)
+pack = torch.load(os.path.join(models, "voices", voice + ".pt"), weights_only=True)
 with os.fdopen(3, encoding="utf-8") as source:
     text = source.read()
 
-for _, _, audio in pipe(text, voice=voice,
+for _, _, audio in pipe(text, voice=pack,
                         speed=float(os.environ.get("KOKORO_SPEED", "1.0"))):
     # kokoro yields a torch Tensor, which has no .astype; convert first.
     if hasattr(audio, "detach"):

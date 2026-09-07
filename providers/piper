@@ -2,7 +2,7 @@
 # desc: Fast, natural, runs here. The default.
 # title: Piper
 # kind: local
-# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" ]] || command -v piper >/dev/null) && (for model in "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"/*.onnx "$HOME/.local/share/piper-voices"/*.onnx; do [[ -s "$model" && -s "$model.json" ]] && exit 0; done; exit 1)
+# probe: ([[ -x "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper" && "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/piper.lock" | cut -d' ' -f1)" ]] || command -v piper >/dev/null) && (for model in "${PIPER_VOICES_DIR:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/voices/piper}"/*.onnx "$HOME/.local/share/piper-voices"/*.onnx; do [[ -s "$model" && -s "$model.json" ]] && exit 0; done; exit 1)
 # install: managed venv · piper-tts==1.7.0
 # voices: downloadable
 # ratemin: 0.5
@@ -10,7 +10,11 @@
 set -uo pipefail
 umask 077
 source "$TTS_PLUGIN_DIR/lib/play.sh"
-PIPER_BIN="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper/bin/piper"
+# The managed engine counts only when it was built from the lock this
+# release ships; otherwise fall through to a distribution-installed piper.
+ENGINE_DIR="${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/piper"
+PIPER_BIN="$ENGINE_DIR/bin/piper"
+if [[ "$(cat "$ENGINE_DIR/.lock-sha256" 2>/dev/null)" != "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/piper.lock" | cut -d' ' -f1)" ]]; then PIPER_BIN=""; fi
 [[ -x "$PIPER_BIN" ]] || PIPER_BIN="$(command -v piper || true)"
 [[ -n "$PIPER_BIN" ]] || need piper "install it from the Provider tab"
 
@@ -42,6 +46,25 @@ if [[ ! -s "$MODEL" || ! -s "$MODEL.json" ]]; then
   echo "speak: piper voice not found: $MODEL" >&2
   notify-send -a "Speak" "Voice missing or incomplete" "Repair it: speak-voice add $VOICE --repair" 2>/dev/null
   exit 1
+fi
+
+# A voice the plugin ships a digest for is verified right before Piper loads
+# it, the same way the other engines verify their models. Voices outside the
+# shipped catalogue (custom or legacy) are the user's own and get only the
+# structural checks above.
+DIGESTS="$TTS_PLUGIN_DIR/lib/piper-voices.sha256"
+if [[ "$MODEL" == "$VOICES_DIR/$VOICE.onnx" && -f "$DIGESTS" && "$VOICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  for suffix in .onnx .onnx.json; do
+    want="$(awk -v v="/$VOICE$suffix" '$1 !~ /^#/ && substr($2, length($2)-length(v)+1) == v { print tolower($1); exit }' "$DIGESTS" 2>/dev/null)"
+    [[ -n "$want" ]] || continue   # not a catalogue voice
+    [[ ! -L "$MODEL${suffix#.onnx}" ]] || { echo "speak: piper voice $VOICE$suffix is a symlink; repair it: speak-voice add $VOICE --repair" >&2; exit 65; }
+    got="$(sha256sum "$VOICES_DIR/$VOICE$suffix" | cut -d' ' -f1)"
+    [[ "$got" == "$want" ]] || {
+      echo "speak: piper voice $VOICE$suffix failed verification; repair it: speak-voice add $VOICE --repair" >&2
+      notify-send -a "Speak" "Voice failed verification" "Repair it: speak-voice add $VOICE --repair" 2>/dev/null
+      exit 65
+    }
+  done
 fi
 
 # Model config carries the real sample rate; guessing here causes chipmunks.

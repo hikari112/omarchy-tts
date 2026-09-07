@@ -5,6 +5,35 @@ Versioning.
 
 ## Unreleased
 
+## 1.3.2 - 2026-09-06
+
+- Resolve `pkexec` and `pacman` at fixed canonical paths and admit them across
+  the privilege boundary only when the executable and every ancestor directory
+  are root-owned, not group- or world-writable, and free of symlink components,
+  re-checked immediately before each privileged call; nothing from `PATH` is
+  ever handed to `pkexec`.
+- Install every managed engine from a complete, hash-pinned, wheel-only
+  dependency closure shipped in the plugin (`lib/engines/*.lock`, reproducible
+  from `*.in` at the instant in `lib/engines/EXCLUDE_NEWER`) with `uv pip sync
+  --require-hashes --only-binary :all:`, so no resolver result, index change or
+  source build can add code this release did not review. The one dependency
+  that publishes no wheel (`docopt`) ships as a reviewed, reproducibly built
+  wheel in `lib/engines/wheels`, verified before `uv` runs. The spaCy model
+  wheel is part of the Kokoro lock.
+- Pin the EasyOCR and Kokoro model artefacts to fixed sources with SHA-256
+  digests shipped in `lib/engines/models.json`; the installer fetches and
+  verifies them itself (library downloaders are never enabled), and each engine
+  verifies the files again immediately before loading them. Kokoro runs with
+  the Hugging Face hub client offline. Piper voices from the shipped catalogue
+  are verified before load in the same way.
+- Build engine environments relocatable, so console scripts survive the
+  installer's staging rename (Piper failed its proof with exit 126).
+- CI applies every lock in hash-enforcing, wheel-only mode and checks that the
+  locks regenerate byte-for-byte. `tools/pin-engines` maintains them.
+- **Upgrading:** every engine environment built by an earlier release shows as
+  not installed, because it was not built from this release's lock; reinstall
+  Piper, Kokoro or EasyOCR once from the panel. Piper voices are unaffected.
+
 ## 1.3.1 - 2026-09-04
 
 - Pin Piper voice downloads to one immutable revision of `rhasspy/piper-voices`
