@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Rectangle {
@@ -12,16 +13,16 @@ Rectangle {
   // What this key lets the plugin send. A speech key sends text; an OCR key
   // sends pictures of the screen, and the dialog must say which.
   property string sends: "Highlighted text and test samples"
-  property color foreground: Color.popups.text
+  property color foreground: Commons.Color.popups.text
   readonly property bool editing: visible && keyField.activeFocus
   readonly property bool keyValid: /^[\x21-\x7e]{8,4096}$/.test(keyField.text)
   signal closed
   width: parent ? parent.width : implicitWidth
   height: content.implicitHeight + Style.space(24)
   radius: Style.space(8)
-  color: Color.background
+  color: Commons.Color.background
   border.width: 1
-  border.color: Color.accent
+  border.color: Commons.Color.accent
 
   function saveKey() {
     if (!root.keyValid || controller.keySaving) return
@@ -44,7 +45,7 @@ Rectangle {
       width: parent.width; wrapMode: Text.WordWrap
       textFormat: Text.PlainText
       text: "The key is saved in the system keyring and is never written to settings or logs. " + root.sends + " will be sent to " + root.vendor + " and may incur charges."
-      color: Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption
+      color: Commons.Color.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
     TextField {
       id: keyField
@@ -60,19 +61,19 @@ Rectangle {
       width: parent.width; visible: root.controller.keyResult.message !== ""
       textFormat: Text.PlainText
       text: root.controller.keyResult.message
-      color: root.controller.keyResult.ok ? Color.accent : Color.urgent
+      color: root.controller.keyResult.ok ? Commons.Color.accent : Commons.Color.urgent
       font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
     Text {
       width: parent.width; visible: keyField.text.length > 0 && !root.keyValid
       text: "Keys must be 8–4096 printable ASCII characters with no spaces."
-      color: Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.caption
+      color: Commons.Color.urgent; font.family: Style.font.family; font.pixelSize: Style.font.caption
     }
     Row {
       spacing: Style.space(8)
       Button { text: "Cancel"; bordered: true; focusable: true; onClicked: { keyField.text = ""; root.closed() } }
       Button {
-        text: "Save key"; bordered: true; focusable: true; foreground: Color.accent
+        text: "Save key"; bordered: true; focusable: true; foreground: Commons.Color.accent
         enabled: root.keyValid && !root.controller.keySaving
         onClicked: root.saveKey()
       }
