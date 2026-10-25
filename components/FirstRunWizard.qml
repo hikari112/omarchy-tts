@@ -1,18 +1,19 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Rectangle {
   id: root
   required property var controller
-  property color foreground: Color.popups.text
+  property color foreground: Commons.Color.popups.text
   signal skipped
   width: parent ? parent.width : implicitWidth
   height: content.implicitHeight + Style.space(24)
   radius: Style.space(8)
-  color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+  color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.08)
   border.width: 1
-  border.color: Color.popups.border
+  border.color: Commons.Color.popups.border
 
   readonly property bool busy: controller.setupStarting
                                || controller.setupJob.status === "starting"
@@ -36,7 +37,7 @@ Rectangle {
       text: root.controller.setup.ready
         ? "The recommended local voice is ready. Text stays on this computer."
         : "Set up a natural local voice with one click. The engine and voice are kept inside the plugin’s data folder, and highlighted text never leaves this computer."
-      color: Color.muted
+      color: Commons.Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.body
     }
@@ -45,12 +46,12 @@ Rectangle {
       height: 6
       radius: 3
       visible: root.busy
-      color: Color.popups.border
+      color: Commons.Color.popups.border
       Rectangle {
         height: parent.height
         width: parent.width * Math.max(0.02, Math.min(1, root.controller.setupJob.progress / 100))
         radius: parent.radius
-        color: Color.accent
+        color: Commons.Color.accent
       }
     }
     Text {
@@ -60,7 +61,7 @@ Rectangle {
       text: root.controller.setupStarting
             ? "Starting setup safely…"
             : (root.controller.setupJob.message || "Preparing setup")
-      color: root.controller.setupJob.status === "error" ? Color.urgent : Color.muted
+      color: root.controller.setupJob.status === "error" ? Commons.Color.urgent : Commons.Color.muted
       wrapMode: Text.WordWrap
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
@@ -71,7 +72,7 @@ Rectangle {
         text: root.controller.setup.ready ? "Continue" : (root.controller.setupJob.status === "error" ? "Try again" : "Set up local voice")
         iconText: root.controller.setup.ready ? "󰄬" : "󰐊"
         bordered: true; focusable: true
-        foreground: Color.accent
+        foreground: Commons.Color.accent
         enabled: !root.busy
         onClicked: root.controller.setup.ready ? root.skipped() : root.controller.startSetup("recommended")
       }

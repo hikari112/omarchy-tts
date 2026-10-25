@@ -1,12 +1,13 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 Rectangle {
   id: root
   property string actionName: ""
   property string label: ""
   property string chord: ""
-  property color foreground: Color.popups.text
+  property color foreground: Commons.Color.popups.text
   signal changeRequested(string actionName, string chord)
   width: parent ? parent.width : implicitWidth
   height: 34; radius: Style.space(5); color: "transparent"
@@ -15,7 +16,7 @@ Rectangle {
   Accessible.name: root.label + ", " + root.chord
   Accessible.onPressAction: root.changeRequested(root.actionName, root.chord)
   border.width: activeFocus ? 1 : 0
-  border.color: Color.accent
+  border.color: Commons.Color.accent
   Keys.onSpacePressed: root.changeRequested(root.actionName, root.chord)
   Keys.onReturnPressed: root.changeRequested(root.actionName, root.chord)
   Keys.onEnterPressed: root.changeRequested(root.actionName, root.chord)
@@ -28,7 +29,7 @@ Rectangle {
   Rectangle {
     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
     width: keyText.implicitWidth + 12; height: 24; radius: 4
-    color: Color.background; border.width: 1; border.color: Color.popups.border
+    color: Commons.Color.background; border.width: 1; border.color: Commons.Color.popups.border
     Text {
       id: keyText; anchors.centerIn: parent; text: root.chord.replace(/ \+ /g, "  ")
       textFormat: Text.PlainText
