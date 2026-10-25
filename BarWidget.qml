@@ -87,7 +87,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
 
-    text: "󰕾"
+    text: "󱋊"
     active: root.speaking
     tooltipText: root.speaking
       ? "Speaking — right-click to stop"
