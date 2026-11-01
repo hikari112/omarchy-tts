@@ -3,7 +3,14 @@
 All notable changes are documented here. This project follows Semantic
 Versioning.
 
-## Unreleased
+## 1.3.3 - 2026-11-01
+
+- Keep Kokoro loaded in a detached worker under the session runtime directory.
+  Each utterance synthesizes the next chunk while the current chunk plays, so
+  paragraph breaks no longer wait on a fresh model load or on the previous
+  chunk draining the playback pipe. The worker exits after 15 idle minutes.
+  Stopping speech stops playback only. Model files are still verified before
+  the worker starts, and again inside the worker before they are loaded.
 
 ## 1.3.2 - 2026-09-06
 

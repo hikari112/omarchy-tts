@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# desc: Best local quality. Heavy, slow to start.
+# desc: Best local quality. A resident worker keeps the model loaded.
 # title: Kokoro
 # kind: local
 # probe: [[ -x "${KOKORO_PYTHON:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/bin/python}" && -s "${KOKORO_MODELS:-${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/models}/kokoro-v1_0.pth" ]] && ( [[ -n "${KOKORO_PYTHON:-}" ]] || [[ "$(cat "${TTS_DATA_DIR:-$HOME/.local/share/omarchy-tts}/engines/kokoro/.lock-sha256" 2>/dev/null)" == "$(sha256sum "$TTS_PLUGIN_DIR/lib/engines/kokoro.lock" | cut -d' ' -f1)" ]] )
@@ -49,38 +49,50 @@ verify_model() { # <relative path>
   got="$(sha256sum "$MODELS/$1" | cut -d' ' -f1)"
   [[ "$got" == "$want" ]] || { echo "speak: kokoro: $1 failed verification; reinstall Kokoro from the Provider tab" >&2; exit 65; }
 }
-verify_model config.json
-verify_model kokoro-v1_0.pth
-verify_model "voices/$VOICE.pt"
+# A live worker records the path, mtime, and size of every file it verified.
+# Hashing the checkpoint again is the pause before the first word, so skip it
+# only when that record still describes these exact files. Anything else,
+# including a socket left by another model directory, is checked in full
+# before Python starts. The worker checks again at startup.
+if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  KOKORO_RUNTIME_DIR="${XDG_RUNTIME_DIR}/omarchy-tts/kokoro"
+else
+  KOKORO_RUNTIME_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-tts/kokoro"
+fi
+KOKORO_SOCK="$KOKORO_RUNTIME_DIR/worker.sock"
+KOKORO_STAMP="$KOKORO_RUNTIME_DIR/verified.stamp"
+stamp_covers() { # <relative path>
+  local recorded current rec_ns rec_size cur_s cur_size
+  [[ -f "$KOKORO_STAMP" && ! -L "$KOKORO_STAMP" ]] || return 1
+  recorded="$(awk -v rel="$1" '$1 == "file" && $2 == rel { print $3 " " $4; exit }' "$KOKORO_STAMP")"
+  current="$(stat -c '%Y %s' "$MODELS/$1" 2>/dev/null || true)"
+  [[ -n "$recorded" && -n "$current" ]] || return 1
+  read -r rec_ns rec_size <<<"$recorded"
+  read -r cur_s cur_size <<<"$current"
+  [[ "$rec_ns" =~ ^[0-9]+$ && "$rec_size" == "$cur_size" ]] || return 1
+  # The stamp stores nanoseconds. The second matches when the file was not replaced.
+  [[ "$((rec_ns / 1000000000))" == "$cur_s" ]] || return 1
+}
+models_recorded="$(awk '$1 == "models" { print substr($0, 8); exit }' "$KOKORO_STAMP" 2>/dev/null || true)"
+# Skip the Kokoro rehash only when the worker stamp still matches.  A socket by itself is not proof that these model files were verified.
+# The shell now checks the worker's recorded path, mtime, and size.
+# Hashes the files before starting Python whenever that record does not match.
+kokoro_stamp_fresh() {
+  [[ -S "$KOKORO_SOCK" && ! -L "$KOKORO_SOCK" && ! -L "$KOKORO_RUNTIME_DIR" ]] || return 1
+  [[ "$models_recorded" == "$MODELS" ]] || return 1
+  stamp_covers config.json || return 1
+  stamp_covers kokoro-v1_0.pth || return 1
+  stamp_covers "voices/$VOICE.pt" || return 1
+}
+if ! kokoro_stamp_fresh; then
+  verify_model config.json
+  verify_model kokoro-v1_0.pth
+  verify_model "voices/$VOICE.pt"
+fi
 
-# Torch is chatty on stderr on every run; none of it is actionable here, and
-# it buries real errors.
-KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" KOKORO_MODELS="$MODELS" \
-PYTHONWARNINGS=ignore HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 \
-"$KPY" 3<&0 - <<'KOKORO_PY' 2>/dev/null | play_raw 24000 1
-import os, sys, warnings
-warnings.filterwarnings("ignore")
-import numpy as np
-import torch
-from kokoro import KModel, KPipeline
-
-models = os.environ["KOKORO_MODELS"]
-voice = os.environ.get("KOKORO_VOICE", "af_heart")
-# Local, verified files only: no repo lookup, no hub download.
-model = KModel(repo_id="hexgrad/Kokoro-82M",
-               config=os.path.join(models, "config.json"),
-               model=os.path.join(models, "kokoro-v1_0.pth")).eval()
-pipe = KPipeline(lang_code=voice[0], repo_id="hexgrad/Kokoro-82M", model=model)
-pack = torch.load(os.path.join(models, "voices", voice + ".pt"), weights_only=True)
-with os.fdopen(3, encoding="utf-8") as source:
-    text = source.read()
-
-for _, _, audio in pipe(text, voice=pack,
-                        speed=float(os.environ.get("KOKORO_SPEED", "1.0"))):
-    # kokoro yields a torch Tensor, which has no .astype; convert first.
-    if hasattr(audio, "detach"):
-        audio = audio.detach().cpu().numpy()
-    samples = np.clip(np.asarray(audio, dtype="float32"), -1.0, 1.0)
-    sys.stdout.buffer.write((samples * 32767.0).astype("<i2").tobytes())
-    sys.stdout.buffer.flush()
-KOKORO_PY
+# The worker is detached from this process group, so stopping speech does not
+# unload the model. Playback stays in this pipeline and dies with the client.
+export KOKORO_VOICE="$VOICE" KOKORO_SPEED="${TTS_RATE:-1.0}" KOKORO_MODELS="$MODELS"
+export KOKORO_RUNTIME_DIR
+export PYTHONWARNINGS=ignore HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+"$KPY" "$TTS_PLUGIN_DIR/lib/kokoro_runtime.py" | play_raw 24000 1
